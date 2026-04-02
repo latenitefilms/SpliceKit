@@ -520,6 +520,10 @@ static NSString * const kAIRowID = @"FCPAIRow";
     add(@"Open Transcript Editor", @"openTranscript", @"transcript", FCPCommandCategoryTranscript, @"Transcript", @"Ctrl+Opt+T", @"Open transcript-based editing panel", @[@"speech", @"captions"]);
     add(@"Close Transcript Editor", @"closeTranscript", @"transcript", FCPCommandCategoryTranscript, @"Transcript", nil, @"Close the transcript panel", @[]);
 
+    // --- Options ---
+    add(@"FCPBridge Options", @"bridgeOptions", @"bridge_options", FCPCommandCategoryOptions, @"Options", nil, @"Open FCPBridge options panel", @[@"settings", @"preferences", @"config"]);
+    add(@"Toggle Viewer Pinch-to-Zoom", @"toggleViewerPinchZoom", @"bridge_toggle", FCPCommandCategoryOptions, @"Options", nil, @"Enable/disable trackpad pinch-to-zoom on the viewer", @[@"trackpad", @"zoom", @"magnify", @"gesture"]);
+
     self.allCommands = [cmds copy];
     self.masterCommands = self.allCommands;
 }
@@ -1074,6 +1078,18 @@ static NSString * const kAIRowID = @"FCPAIRow";
     } else if ([type isEqualToString:@"batch_export"]) {
         extern NSDictionary *FCPBridge_handleBatchExport(NSDictionary *params);
         result = FCPBridge_handleBatchExport(@{@"scope": @"all"});
+    } else if ([type isEqualToString:@"bridge_options"]) {
+        [self showBridgeOptionsPanel];
+        result = @{@"action": action, @"status": @"ok"};
+    } else if ([type isEqualToString:@"bridge_toggle"]) {
+        if ([action isEqualToString:@"toggleViewerPinchZoom"]) {
+            BOOL newState = !FCPBridge_isViewerPinchZoomEnabled();
+            FCPBridge_setViewerPinchZoomEnabled(newState);
+            result = @{@"action": action, @"status": @"ok",
+                       @"viewerPinchZoom": @(newState)};
+        } else {
+            result = @{@"error": [NSString stringWithFormat:@"Unknown toggle: %@", action]};
+        }
     }
 
     if (!result) {
@@ -1593,6 +1609,53 @@ static NSString * const kAIRowID = @"FCPAIRow";
         [self.tableView selectRowIndexes:[NSIndexSet indexSetWithIndex:0]
                     byExtendingSelection:NO];
     }
+}
+
+#pragma mark - FCPBridge Options Panel
+
+- (void)showBridgeOptionsPanel {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        NSPanel *opts = [[NSPanel alloc] initWithContentRect:NSMakeRect(0, 0, 380, 200)
+            styleMask:(NSWindowStyleMaskTitled | NSWindowStyleMaskClosable)
+            backing:NSBackingStoreBuffered defer:NO];
+        opts.title = @"FCPBridge Options";
+        [opts center];
+
+        NSView *v = opts.contentView;
+        CGFloat y = 155;
+
+        // --- Viewer Pinch-to-Zoom ---
+        NSButton *pinchCheck = [NSButton checkboxWithTitle:@"Viewer Pinch-to-Zoom"
+                                                    target:self
+                                                    action:@selector(_bridgeOptionPinchZoomToggled:)];
+        pinchCheck.frame = NSMakeRect(20, y, 340, 20);
+        pinchCheck.state = FCPBridge_isViewerPinchZoomEnabled() ? NSControlStateValueOn : NSControlStateValueOff;
+        objc_setAssociatedObject(pinchCheck, "panel", opts, OBJC_ASSOCIATION_RETAIN);
+        [v addSubview:pinchCheck];
+
+        y -= 22;
+        NSTextField *pinchDesc = [NSTextField wrappingLabelWithString:
+            @"Use trackpad pinch gestures to zoom the viewer. "
+            @"Supports any zoom level, not just the preset percentages."];
+        pinchDesc.frame = NSMakeRect(38, y - 30, 320, 40);
+        pinchDesc.font = [NSFont systemFontOfSize:11];
+        pinchDesc.textColor = [NSColor secondaryLabelColor];
+        [v addSubview:pinchDesc];
+
+        // --- Close button ---
+        NSButton *closeBtn = [NSButton buttonWithTitle:@"Done" target:opts action:@selector(close)];
+        closeBtn.frame = NSMakeRect(280, 15, 80, 32);
+        closeBtn.bezelStyle = NSBezelStyleRounded;
+        closeBtn.keyEquivalent = @"\r";
+        [v addSubview:closeBtn];
+
+        [opts makeKeyAndOrderFront:nil];
+    });
+}
+
+- (void)_bridgeOptionPinchZoomToggled:(NSButton *)sender {
+    BOOL enabled = (sender.state == NSControlStateValueOn);
+    FCPBridge_setViewerPinchZoomEnabled(enabled);
 }
 
 - (void)enterTransitionBrowseMode {

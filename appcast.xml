@@ -6,6 +6,27 @@
     <description>FCPBridge Patcher release updates</description>
     <language>en</language>
     <item>
+      <title>FCPBridge v2.8.4</title>
+      <sparkle:version>2.8.4</sparkle:version>
+      <sparkle:shortVersionString>2.8.4</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+      <pubDate>Thu, 03 Apr 2026 20:18:00 +0000</pubDate>
+      <description><![CDATA[
+        <h2>What's New in 2.8.4</h2>
+        <ul>
+          <li><b>FCP Debug & Diagnostics</b> — Expose FCP's internal developer tools: timeline visual overlays, performance monitoring, structured logging, framerate monitor</li>
+          <li><b>Patcher Signing Fix</b> — Ad-hoc signing preserves Apple framework signatures (fixes ProAppSupport crash)</li>
+          <li><b>Crash Prevention</b> — Block unsafe trim selectors with nil error pointers</li>
+          <li><b>Bug Fix</b> — Fix retimeHold action mapping</li>
+        </ul>
+      ]]></description>
+      <enclosure
+        url="https://github.com/elliotttate/FCPBridge/releases/download/v2.8.4/FCPBridgePatcher-v2.8.4.zip"
+        sparkle:edSignature="1rtBeHZ5H+tKxfL8hJ5M4rxJsDu/rrAoiJENL7ZGosEptYlldTG7na0pcXG+TXLFUB85+UCwHgOiADMoN1NTDg=="
+        length="3289588"
+        type="application/octet-stream" />
+    </item>
+    <item>
       <title>FCPBridge v2.8.3</title>
       <sparkle:version>2.8.3</sparkle:version>
       <sparkle:shortVersionString>2.8.3</sparkle:shortVersionString>

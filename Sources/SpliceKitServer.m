@@ -3961,6 +3961,12 @@ static NSDictionary *SpliceKit_handleTimelineGetState(NSDictionary *params) {
 }
 
 #pragma mark - Transcript Handlers
+//
+// These proxy calls to SpliceKitTranscriptPanel for text-based editing.
+// The transcript panel does the heavy lifting — transcribing audio, managing
+// word/silence data, and performing timeline edits when words are deleted/moved.
+// Most handlers just forward parameters and return the panel's result.
+//
 
 static NSDictionary *SpliceKit_handleTranscriptOpen(NSDictionary *params) {
     NSString *fileURL = params[@"fileURL"];
@@ -8487,16 +8493,23 @@ void SpliceKit_installSuppressAutoImport(void) {
           (IMP)SpliceKit_swizzled_radVolumeDidMount },
     };
 
+    BOOL anySwizzled = NO;
     for (int i = 0; i < 2; i++) {
         Method m = class_getInstanceMethod(metaCls, swizzles[i].sel);
         if (m && !*swizzles[i].origPtr) {
             *swizzles[i].origPtr = method_setImplementation(m, swizzles[i].newImp);
             SpliceKit_log(@"[SuppressAutoImport] Swizzled +[PEImportOrganizerContainerModule %@]",
                           NSStringFromSelector(swizzles[i].sel));
+            anySwizzled = YES;
         } else if (!m) {
             SpliceKit_log(@"[SuppressAutoImport] Method not found: +%@",
                           NSStringFromSelector(swizzles[i].sel));
         }
+    }
+
+    if (!anySwizzled) {
+        SpliceKit_log(@"[SuppressAutoImport] No methods were swizzled — will retry on next enable");
+        return;
     }
 
     sSuppressAutoImportInstalled = YES;

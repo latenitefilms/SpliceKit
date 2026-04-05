@@ -248,8 +248,8 @@ static void SpliceKit_installMenu(void) {
         return;
     }
 
-    // Create "SpliceKit" top-level menu
-    NSMenu *bridgeMenu = [[NSMenu alloc] initWithTitle:@"SpliceKit"];
+    // Create "Enhancements" top-level menu
+    NSMenu *bridgeMenu = [[NSMenu alloc] initWithTitle:@"Enhancements"];
 
     NSMenuItem *transcriptItem = [[NSMenuItem alloc]
         initWithTitle:@"Transcript Editor"
@@ -303,7 +303,7 @@ static void SpliceKit_installMenu(void) {
     [bridgeMenu addItem:optionsMenuItem];
 
     // Add the menu to the menu bar (before the last item which is usually "Help")
-    NSMenuItem *bridgeMenuItem = [[NSMenuItem alloc] initWithTitle:@"SpliceKit" action:nil keyEquivalent:@""];
+    NSMenuItem *bridgeMenuItem = [[NSMenuItem alloc] initWithTitle:@"Enhancements" action:nil keyEquivalent:@""];
     bridgeMenuItem.submenu = bridgeMenu;
 
     NSInteger helpIndex = [mainMenu indexOfItemWithTitle:@"Help"];

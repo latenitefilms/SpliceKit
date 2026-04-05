@@ -239,6 +239,9 @@ static void SKDebug_reloadTLKIfPossible(void) {
         [d removeObjectForKey:@"LogThread"];
         [d removeObjectForKey:@"LogCategory"];
         [d removeObjectForKey:@"EnableScheduledReadAudioLogging"];
+        // Clear integer CFPreferences keys set by the performance preset
+        [d removeObjectForKey:@"VideoDecoderLogLevelInNLE"];
+        [d removeObjectForKey:@"FrameDropLogLevel"];
     }
 
     [d synchronize];

@@ -3,11 +3,13 @@ import Sparkle
 
 // MARK: - Sparkle Auto-Update
 
+@MainActor
 final class CheckForUpdatesViewModel: ObservableObject {
     @Published var canCheckForUpdates = false
 
     init(updater: SPUUpdater) {
-        updater.publisher(for: \.canCheckForUpdates)
+        updater.publisher(for: \.canCheckForUpdates, options: [.initial, .new])
+            .receive(on: DispatchQueue.main)
             .assign(to: &$canCheckForUpdates)
     }
 }

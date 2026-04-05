@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# Launch modded FCP with FCPBridge dylib injected
+# Launch modded FCP with SpliceKit dylib injected
 #
 
 # Auto-detect modded edition: prefer standard, fall back to Creator Studio

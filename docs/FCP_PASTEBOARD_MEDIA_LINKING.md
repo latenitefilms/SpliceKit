@@ -521,7 +521,7 @@ NSPasteboard *pb = [NSPasteboard generalPasteboard];
 After paste, the clip is on the timeline with default properties. Restore saved attributes:
 
 ```python
-# Via FCPBridge JSON-RPC:
+# Via SpliceKit JSON-RPC:
 
 # Select the just-pasted clip
 timeline_action("selectClipAtPlayhead")
@@ -832,7 +832,7 @@ These are documented by Apple for workflow extensions and drag-and-drop integrat
 If you want to confirm what the running FCP version supports:
 
 ```objc
-// From within FCP's process (e.g., via injected dylib or FCPBridge)
+// From within FCP's process (e.g., via injected dylib or SpliceKit)
 Class IXType = objc_getClass("IXXMLPasteboardType");
 
 NSLog(@"=== IXXMLPasteboardType UTIs ===");
@@ -885,11 +885,11 @@ FCP's `importClipsWithOptions:` does not preserve per-clip attributes (`adjust-v
 `adjust-blend`, effects). The import code exists in FCP's `FFXMLImporter` but the
 `importClipsWithOptions:` path skips audio parameter application.
 
-**FCPBridge solves this automatically**: the `fcpxml.pasteImport` method parses attributes
+**SpliceKit solves this automatically**: the `fcpxml.pasteImport` method parses attributes
 from the FCPXML before import, imports the media, then applies the attributes via the
 inspector. This is a single API call — the two-step process is handled internally.
 
-### From FCPBridge — Single Call (tested, working):
+### From SpliceKit — Single Call (tested, working):
 
 ```python
 # fcpxml.pasteImport handles everything:
@@ -949,7 +949,7 @@ The `FCPBridge_handlePasteboardImportXML` function in `FCPBridgeServer.m`:
 
 ### Building a Workflow Extension That Uses This
 
-A workflow extension (`.appex`) runs out-of-process but can communicate with FCPBridge
+A workflow extension (`.appex`) runs out-of-process but can communicate with SpliceKit
 over TCP. Here's a complete implementation:
 
 #### 1. Extension View Controller (SwiftUI)
@@ -973,7 +973,7 @@ class SFXViewModel: ObservableObject {
         // Build FCPXML with attributes embedded
         let fcpxml = buildFCPXML(item: item)
         
-        // Send to FCPBridge — it handles import + attribute restoration
+        // Send to SpliceKit — it handles import + attribute restoration
         FCPBridgeClient.shared.pasteImport(xml: fcpxml) { result in
             print("Import result: \(result)")
         }
@@ -1020,7 +1020,7 @@ class SFXViewModel: ObservableObject {
 }
 ```
 
-#### 2. FCPBridge TCP Client (for use inside the extension)
+#### 2. SpliceKit TCP Client (for use inside the extension)
 
 ```swift
 import Foundation
@@ -1090,7 +1090,7 @@ class FCPBridgeClient {
                 }
             }
             guard connectResult == 0 else {
-                completion(["error": "Cannot connect to FCPBridge"])
+                completion(["error": "Cannot connect to SpliceKit"])
                 return
             }
             

@@ -19,7 +19,7 @@ and custom share destinations.
 9. [Associating Metadata with Media](#associating-metadata-with-media)
 10. [Effect Templates for FCP](#effect-templates-for-fcp)
 11. [Encoder Extensions](#encoder-extensions)
-12. [Integration with FCPBridge](#integration-with-fcpbridge)
+12. [Integration with SpliceKit](#integration-with-splicekit)
 
 ---
 
@@ -562,9 +562,9 @@ FCP Share → Compressor → Your Encoder Extension → Custom Output File
 
 ---
 
-## Integration with FCPBridge
+## Integration with SpliceKit
 
-FCPBridge provides deeper integration than the standard exchange mechanisms:
+SpliceKit provides deeper integration than the standard exchange mechanisms:
 
 ### Import FCPXML
 
@@ -600,7 +600,7 @@ import_media(["/path/to/clip1.mov", "/path/to/clip2.mov"])
 
 ### Pasteboard Integration
 
-FCPBridge can work with FCP's native pasteboard for attribute-preserving operations
+SpliceKit can work with FCP's native pasteboard for attribute-preserving operations
 (see [FCP Pasteboard & Media Linking](FCP_PASTEBOARD_MEDIA_LINKING.md)):
 
 ```python
@@ -621,11 +621,11 @@ batch_export(scope="selected")    # Selected clips only
 
 ### Combining Approaches
 
-For the richest workflow, combine standard exchange with FCPBridge:
+For the richest workflow, combine standard exchange with SpliceKit:
 
 1. **Ingest**: Use FCPXML to send media with metadata to FCP
-2. **Automate**: Use FCPBridge to apply effects, color, and edits
-3. **Export**: Use FCPBridge's batch_export or share_project
+2. **Automate**: Use SpliceKit to apply effects, color, and edits
+3. **Export**: Use SpliceKit's batch_export or share_project
 4. **Process**: Receive output via custom share destination
 
 ---

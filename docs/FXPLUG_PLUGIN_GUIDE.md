@@ -1,7 +1,7 @@
 # FxPlug 4 Plugin Development Guide
 
 Complete guide to building FxPlug video effect plugins for Final Cut Pro and Motion.
-FCPBridge includes a reference LUT plugin implementation in `LUTPlugin/`.
+SpliceKit includes a reference LUT plugin implementation in `LUTPlugin/`.
 
 ---
 
@@ -27,7 +27,7 @@ FCPBridge includes a reference LUT plugin implementation in `LUTPlugin/`.
 18. [Preparing Plugins for Final Cut Pro](#preparing-plugins-for-final-cut-pro)
 19. [Testing](#testing)
 20. [Notarization and Distribution](#notarization-and-distribution)
-21. [Reference: FCPBridge LUT Plugin](#reference-fcpbridge-lut-plugin)
+21. [Reference: SpliceKit LUT Plugin](#reference-splicekit-lut-plugin)
 22. [API Quick Reference](#api-quick-reference)
 
 ---
@@ -969,7 +969,7 @@ Test your plugin across these conditions:
 - **Console.app** — Filter by your plugin's process name for log output
 - **Activity Monitor** — Monitor your XPC service's memory/CPU usage
 - **Xcode Debugger** — Attach to the XPC service process
-- **FCPBridge debug tools** — Use `debug_enable_preset("render_debug")` to isolate
+- **SpliceKit debug tools** — Use `debug_enable_preset("render_debug")` to isolate
   rendering issues in the FCP pipeline
 
 ### Resilience Testing
@@ -1021,7 +1021,7 @@ Distribute the signed, notarized `.app` bundle. Users install by:
 
 ---
 
-## Reference: FCPBridge LUT Plugin
+## Reference: SpliceKit LUT Plugin
 
 The `LUTPlugin/` directory contains a complete FxPlug 4 plugin implementing 3D LUT
 color grading. Use it as a reference for real-world patterns.

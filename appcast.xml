@@ -6,7 +6,7 @@
     <description>SpliceKit release updates</description>
     <language>en</language>
     <item>
-      <title>FCPBridge v2.8.4</title>
+      <title>SpliceKit v2.8.4</title>
       <sparkle:version>2.8.4</sparkle:version>
       <sparkle:shortVersionString>2.8.4</sparkle:shortVersionString>
       <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
@@ -28,14 +28,14 @@
         type="application/octet-stream" />
     </item>
     <item>
-      <title>FCPBridge v2.8.3</title>
+      <title>SpliceKit v2.8.3</title>
       <sparkle:version>2.8.3</sparkle:version>
       <sparkle:shortVersionString>2.8.3</sparkle:shortVersionString>
       <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
       <pubDate>Thu, 02 Apr 2026 19:00:28 +0000</pubDate>
       <description><![CDATA[
         <h2>What's New in 2.8.3</h2>
-        <p>Effect drag as adjustment clip: drag effects to empty timeline space to create named adjustment clips with effects applied, toggle via FCPBridge menu</p>
+        <p>Effect drag as adjustment clip: drag effects to empty timeline space to create named adjustment clips with effects applied, toggle via SpliceKit menu</p>
       ]]></description>
       <enclosure
         url="https://github.com/elliotttate/FCPBridge/releases/download/v2.8.3/FCPBridgePatcher-v2.8.3.zip"
@@ -44,7 +44,7 @@
         type="application/octet-stream" />
     </item>
     <item>
-      <title>FCPBridge v2.8.2</title>
+      <title>SpliceKit v2.8.2</title>
       <sparkle:version>2.8.2</sparkle:version>
       <sparkle:shortVersionString>2.8.2</sparkle:shortVersionString>
       <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
@@ -60,7 +60,7 @@
         type="application/octet-stream" />
     </item>
     <item>
-      <title>FCPBridge v2.8.1</title>
+      <title>SpliceKit v2.8.1</title>
       <sparkle:version>2.8.1</sparkle:version>
       <sparkle:shortVersionString>2.8.1</sparkle:shortVersionString>
       <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
@@ -76,7 +76,7 @@
         type="application/octet-stream" />
     </item>
     <item>
-      <title>FCPBridge v2.8.1</title>
+      <title>SpliceKit v2.8.1</title>
       <sparkle:version>2.8.1</sparkle:version>
       <sparkle:shortVersionString>2.8.1</sparkle:shortVersionString>
       <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
@@ -92,7 +92,7 @@
         type="application/octet-stream" />
     </item>
     <item>
-      <title>FCPBridge v2.8.1</title>
+      <title>SpliceKit v2.8.1</title>
       <sparkle:version>2.8.1</sparkle:version>
       <sparkle:shortVersionString>2.8.1</sparkle:shortVersionString>
       <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
@@ -108,7 +108,7 @@
         type="application/octet-stream" />
     </item>
     <item>
-      <title>FCPBridge v2.8.0</title>
+      <title>SpliceKit v2.8.0</title>
       <sparkle:version>2.8.0</sparkle:version>
       <sparkle:shortVersionString>2.8.0</sparkle:shortVersionString>
       <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
@@ -124,7 +124,7 @@
         type="application/octet-stream" />
     </item>
     <item>
-      <title>FCPBridge v2.7.0 — Batch Export</title>
+      <title>SpliceKit v2.7.0 — Batch Export</title>
       <sparkle:version>2.7.0</sparkle:version>
       <sparkle:shortVersionString>2.7.0</sparkle:shortVersionString>
       <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
@@ -144,7 +144,7 @@
         type="application/octet-stream" />
     </item>
     <item>
-      <title>FCPBridge v2.6.1 — Fix Parakeet in release patcher</title>
+      <title>SpliceKit v2.6.1 — Fix Parakeet in release patcher</title>
       <sparkle:version>2.6.1</sparkle:version>
       <sparkle:shortVersionString>2.6.1</sparkle:shortVersionString>
       <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
@@ -163,7 +163,7 @@
         type="application/octet-stream" />
     </item>
     <item>
-      <title>FCPBridge v2.6.0 — Parakeet v3 Multilingual, Batch Transcription</title>
+      <title>SpliceKit v2.6.0 — Parakeet v3 Multilingual, Batch Transcription</title>
       <sparkle:version>2.6.0</sparkle:version>
       <sparkle:shortVersionString>2.6.0</sparkle:shortVersionString>
       <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
@@ -187,7 +187,7 @@
         type="application/octet-stream" />
     </item>
     <item>
-      <title>FCPBridge v2.5.0 — Parakeet, Speaker Diarization, Titles Fix, Auto-Update</title>
+      <title>SpliceKit v2.5.0 — Parakeet, Speaker Diarization, Titles Fix, Auto-Update</title>
       <sparkle:version>2.5.0</sparkle:version>
       <sparkle:shortVersionString>2.5.0</sparkle:shortVersionString>
       <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>

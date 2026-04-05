@@ -48,7 +48,7 @@ clean:
 	rm -rf $(BUILD_DIR)
 
 deploy: $(OUTPUT) $(SILENCE_DETECTOR)
-	@echo "=== Deploying FCPBridge to modded FCP ==="
+	@echo "=== Deploying SpliceKit to modded FCP ==="
 	@mkdir -p "$(FW_DIR)/Versions/A/Resources"
 	cp $(OUTPUT) "$(FW_DIR)/Versions/A/FCPBridge"
 	@# Create framework symlinks (must use cd for relative paths)
@@ -60,7 +60,7 @@ deploy: $(OUTPUT) $(SILENCE_DETECTOR)
 		printf '<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "https://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict><key>CFBundleIdentifier</key><string>com.custom.FCPBridge</string><key>CFBundleName</key><string>FCPBridge</string><key>CFBundleVersion</key><string>1.0.0</string><key>CFBundlePackageType</key><string>FMWK</string><key>CFBundleExecutable</key><string>FCPBridge</string></dict></plist>' \
 		> "$(FW_DIR)/Versions/A/Resources/Info.plist"
 	@# Add speech recognition usage description for transcript feature
-	@/usr/libexec/PlistBuddy -c "Add :NSSpeechRecognitionUsageDescription string 'FCPBridge uses speech recognition to transcribe timeline audio for text-based editing.'" "$(MODDED_APP)/Contents/Info.plist" 2>/dev/null || true
+	@/usr/libexec/PlistBuddy -c "Add :NSSpeechRecognitionUsageDescription string 'SpliceKit uses speech recognition to transcribe timeline audio for text-based editing.'" "$(MODDED_APP)/Contents/Info.plist" 2>/dev/null || true
 	@# Sign the framework
 	codesign --force --sign - "$(FW_DIR)"
 	@# Re-sign the app
@@ -69,8 +69,8 @@ deploy: $(OUTPUT) $(SILENCE_DETECTOR)
 	@echo "=== Deployed successfully ==="
 
 launch: deploy
-	@echo "=== Launching modded FCP with FCPBridge ==="
+	@echo "=== Launching modded FCP with SpliceKit ==="
 	DYLD_INSERT_LIBRARIES="$(FW_DIR)/Versions/A/FCPBridge" \
 		"$(MODDED_APP)/Contents/MacOS/Final Cut Pro" &
-	@echo "FCP launched. Check Console.app for [FCPBridge] messages."
+	@echo "FCP launched. Check Console.app for [SpliceKit] messages."
 	@echo "Connect: echo '{\"jsonrpc\":\"2.0\",\"method\":\"system.version\",\"id\":1}' | nc -U /tmp/fcpbridge.sock"

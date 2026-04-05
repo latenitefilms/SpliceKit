@@ -1,6 +1,6 @@
-# FCPBridge - Programmatic Final Cut Pro Control
+# SpliceKit - Programmatic Final Cut Pro Control
 
-FCPBridge is an ObjC dylib injected into FCP's process. It exposes all 78,000+ ObjC classes
+SpliceKit is an ObjC dylib injected into FCP's process. It exposes all 78,000+ ObjC classes
 via a JSON-RPC server on TCP 127.0.0.1:9876. Everything is fully programmatic -- no AppleScript,
 no UI automation, no menu clicks.
 
@@ -223,7 +223,7 @@ batch_export(scope="selected")    # export only selected clips
 ```
 
 Each clip is exported individually with all effects/color grading baked in.
-For each clip, FCPBridge:
+For each clip, SpliceKit:
 1. Computes the clip's exact position in the timeline
 2. Sets the in/out range (mark in/out) to the clip boundaries
 3. Triggers FCP's share dialog — click "Share" to confirm
@@ -296,7 +296,7 @@ apply_transition(name="Flow")         # apply Flow transition there
 
 ### Freeze Extend (not enough media handles)
 When clips don't have enough extra media beyond their edges for a transition, FCP normally
-shows a dialog offering to ripple trim. FCPBridge adds a third option: **"Use Freeze Frames"**.
+shows a dialog offering to ripple trim. SpliceKit adds a third option: **"Use Freeze Frames"**.
 
 - **UI button**: Whenever the "not enough extra media" dialog appears (including manual use),
   a "Use Freeze Frames" button is added. It extends clip edges with freeze frames and
@@ -323,7 +323,7 @@ The command palette opens as a floating window inside FCP:
 - Arrow keys to navigate, Return to execute, Escape to close
 - Type natural language sentences and press Tab to ask Apple Intelligence
 - Falls back to keyword matching when Apple Intelligence is unavailable
-- Also accessible via toolbar button or FCPBridge menu
+- Also accessible via toolbar button or SpliceKit menu
 
 ## Object Handles
 ```
@@ -374,7 +374,7 @@ get_methods("FFEffectStack")                           # all methods
 
 ## Debug & Diagnostics (FCP Internal Developer Tools)
 
-FCPBridge exposes FCP's internal developer logging, debug overlays, and performance
+SpliceKit exposes FCP's internal developer logging, debug overlays, and performance
 monitoring tools that are normally hidden. These are built into FCP's own frameworks
 (ProAppSupport, TimelineKit, Helium, ProCore) and controlled via NSUserDefaults and
 CFPreferences keys.
@@ -534,7 +534,7 @@ problems. GPU logging captures the FxPlug/shader pipeline.
 
 **Verbose logging for development**: The `verbose_logging` preset sets ProAppSupport to
 trace level with the log UI enabled, giving maximum visibility into FCP's internal
-operations. Useful when developing new FCPBridge features or investigating FCP behavior.
+operations. Useful when developing new SpliceKit features or investigating FCP behavior.
 
 **Understanding timeline internals**: `TLKShowHiddenGapItems` and `TLKShowZeroHeightSpineItems`
 reveal items FCP hides from the user, helping understand the true timeline data model.
@@ -542,4 +542,4 @@ reveal items FCP hides from the user, helping understand the true timeline data 
 ## Full API Reference
 See `docs/FCP_API_REFERENCE.md` for comprehensive documentation of all key classes,
 methods, properties, notifications, and patterns. This reference is sufficient to use
-FCPBridge without access to the decompiled FCP source code.
+SpliceKit without access to the decompiled FCP source code.

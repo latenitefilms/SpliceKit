@@ -3,7 +3,7 @@
 Complete reference for Final Cut Pro's XML interchange format. FCPXML describes media
 assets, projects, editing decisions, and metadata exchanged between apps and Final Cut Pro.
 
-FCPBridge uses FCPXML for project creation (`generate_fcpxml`), import (`import_fcpxml`),
+SpliceKit uses FCPXML for project creation (`generate_fcpxml`), import (`import_fcpxml`),
 and export (`export_xml`).
 
 ---
@@ -920,10 +920,10 @@ NSData *bookmark = [assetURL
 </title>
 ```
 
-### Example 4: Using with FCPBridge
+### Example 4: Using with SpliceKit
 
 ```python
-# Generate FCPXML with FCPBridge
+# Generate FCPXML with SpliceKit
 xml = generate_fcpxml(
     project_name="Auto Edit",
     frame_rate="24",

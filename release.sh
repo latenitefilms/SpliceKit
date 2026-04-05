@@ -38,7 +38,7 @@ echo "[1/13] Bumping version to ${VERSION}..."
 sed -i '' "s/MARKETING_VERSION = \"[^\"]*\"/MARKETING_VERSION = \"${VERSION}\"/g" "${XCODE_PROJECT}/project.pbxproj"
 sed -i '' "s/CURRENT_PROJECT_VERSION = \"[^\"]*\"/CURRENT_PROJECT_VERSION = \"${VERSION}\"/g" "${XCODE_PROJECT}/project.pbxproj"
 
-echo "[2/13] Building FCPBridge dylib..."
+echo "[2/13] Building SpliceKit dylib..."
 make clean && make
 
 echo "[3/13] Building SpliceKit app via Xcode..."

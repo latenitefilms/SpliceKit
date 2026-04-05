@@ -54,9 +54,9 @@ step()  { echo -e "\n${CYAN}${BOLD}=== $* ===${NC}"; }
 usage() {
     cat << 'EOF'
 
-  FCPBridge Patcher v2.0.0
+  SpliceKit Patcher v2.0.0
 
-  Creates a modded copy of Final Cut Pro with FCPBridge injected
+  Creates a modded copy of Final Cut Pro with SpliceKit injected
   for direct programmatic control via JSON-RPC and MCP.
 
   Usage:
@@ -72,7 +72,7 @@ usage() {
 
   What it does:
     1. Copies Final Cut Pro to a writable location
-    2. Builds the FCPBridge dylib from source
+    2. Builds the SpliceKit dylib from source
     3. Injects it into the FCP binary (LC_LOAD_DYLIB)
     4. Re-signs everything with custom entitlements (no sandbox)
     5. Patches CloudContent/ImagePlayground crash points
@@ -118,7 +118,7 @@ MODDED_APP="$DEST_DIR/$APP_NAME"
 # Uninstall
 # ============================================================
 if $UNINSTALL; then
-    step "Uninstalling FCPBridge"
+    step "Uninstalling SpliceKit"
     if [[ -d "$DEST_DIR" ]]; then
         info "Removing $DEST_DIR"
         rm -rf "$DEST_DIR"
@@ -136,7 +136,7 @@ echo -e "${BOLD}"
 cat << 'BANNER'
 
   ╔═══════════════════════════════════════════════╗
-  ║         FCPBridge Patcher v2.0.0              ║
+  ║         SpliceKit Patcher v2.0.0              ║
   ║  Direct programmatic control of Final Cut Pro ║
   ╚═══════════════════════════════════════════════╝
 
@@ -232,9 +232,9 @@ else
 fi
 
 # ============================================================
-# Step 2: Build FCPBridge dylib
+# Step 2: Build SpliceKit dylib
 # ============================================================
-step "Step 2: Building FCPBridge dylib"
+step "Step 2: Building SpliceKit dylib"
 
 BUILD_DIR="$REPO_DIR/build"
 mkdir -p "$BUILD_DIR"
@@ -262,7 +262,7 @@ log "Built: $(file "$BUILD_DIR/FCPBridge" | grep -o 'universal.*')"
 # ============================================================
 # Step 3: Create framework bundle
 # ============================================================
-step "Step 3: Installing FCPBridge framework"
+step "Step 3: Installing SpliceKit framework"
 
 FW_DIR="$MODDED_APP/Contents/Frameworks/FCPBridge.framework"
 mkdir -p "$FW_DIR/Versions/A/Resources"
@@ -341,14 +341,14 @@ cat > "$ENTITLEMENTS" << 'ENT'
 </plist>
 ENT
 
-# Only sign the FCPBridge framework (ours) and the main app bundle.
+# Only sign the SpliceKit framework (ours) and the main app bundle.
 # Apple's own frameworks must keep their original signatures or internal
 # integrity checks (e.g. ProAppSupport +[PCApp isiMovie]) abort on launch.
-info "Signing FCPBridge framework..."
+info "Signing SpliceKit framework..."
 codesign --force --sign - "$MODDED_APP/Contents/Frameworks/FCPBridge.framework" 2>/dev/null || true
 
 # Sign main app with entitlements (disables library validation so our
-# ad-hoc-signed FCPBridge.framework loads alongside Apple-signed frameworks)
+# ad-hoc-signed SpliceKit framework loads alongside Apple-signed frameworks)
 info "Signing main application..."
 codesign --force --sign - --entitlements "$ENTITLEMENTS" "$MODDED_APP" 2>/dev/null
 
@@ -382,7 +382,7 @@ defaults write com.apple.FinalCut FFCloudContentDisabled -bool true 2>/dev/null 
 log "CloudContent defaults set"
 
 # Add speech recognition usage description for transcript feature
-/usr/libexec/PlistBuddy -c "Add :NSSpeechRecognitionUsageDescription string 'FCPBridge uses speech recognition to transcribe timeline audio for text-based editing.'" "$MODDED_APP/Contents/Info.plist" 2>/dev/null || true
+/usr/libexec/PlistBuddy -c "Add :NSSpeechRecognitionUsageDescription string 'SpliceKit uses speech recognition to transcribe timeline audio for text-based editing.'" "$MODDED_APP/Contents/Info.plist" 2>/dev/null || true
 log "Speech recognition permission configured"
 
 # ============================================================
@@ -414,7 +414,7 @@ fi
 step "Patching complete!"
 
 echo -e "
-${GREEN}${BOLD}FCPBridge has been installed successfully!${NC}
+${GREEN}${BOLD}SpliceKit has been installed successfully!${NC}
 
 ${BOLD}Launch:${NC}
   $MODDED_APP/Contents/MacOS/Final\\ Cut\\ Pro
@@ -426,7 +426,7 @@ ${BOLD}JSON-RPC server:${NC}
   127.0.0.1:$BRIDGE_PORT (starts automatically)
 
 ${BOLD}Check logs:${NC}
-  ~/Library/Logs/FCPBridge/fcpbridge.log
+  ~/Library/Logs/SpliceKit/splicekit.log
 
 ${BOLD}Python client:${NC}
   python3 $REPO_DIR/Scripts/fcpbridge_client.py

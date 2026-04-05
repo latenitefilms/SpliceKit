@@ -15,7 +15,7 @@ timeline, and exchange data with the editing workflow.
 6. [Observing Timeline Changes](#observing-timeline-changes)
 7. [Design Guidelines](#design-guidelines)
 8. [Data Exchange Patterns](#data-exchange-patterns)
-9. [Comparison: Extensions vs FCPBridge](#comparison-extensions-vs-fcpbridge)
+9. [Comparison: Extensions vs SpliceKit](#comparison-extensions-vs-splicekit)
 
 ---
 
@@ -480,9 +480,9 @@ FCP sends rendered media and editing decisions (as FCPXML) to your destination.
 
 ---
 
-## Comparison: Extensions vs FCPBridge
+## Comparison: Extensions vs SpliceKit
 
-| Capability | Workflow Extension | FCPBridge |
+| Capability | Workflow Extension | SpliceKit |
 |-----------|-------------------|-----------|
 | **Architecture** | App extension (sandboxed) | Injected dylib (in-process) |
 | **UI** | Floating window in FCP | External (MCP/JSON-RPC) |
@@ -504,15 +504,15 @@ FCP sends rendered media and editing decisions (as FCPXML) to your destination.
 - You only need sequence-level metadata and playhead control
 - Your workflow is primarily about media management / external services
 
-**Use FCPBridge when:**
+**Use SpliceKit when:**
 - You need programmatic control of editing actions
 - You need to read/write effect parameters
 - You need access to FCP's internal class hierarchy
 - You're building automation, AI editing, or batch processing tools
 
 **Use Both Together:**
-- Extension provides the UI, FCPBridge provides the deep integration
-- Extension handles the user-facing workflow, FCPBridge executes the edits
+- Extension provides the UI, SpliceKit provides the deep integration
+- Extension handles the user-facing workflow, SpliceKit executes the edits
 
 ---
 

@@ -1,8 +1,27 @@
-# FCPBridge - Programmatic Final Cut Pro Control
+# SpliceKit - Programmatic Final Cut Pro Control
 
-FCPBridge is an ObjC dylib injected into FCP's process. It exposes all 78,000+ ObjC classes
+SpliceKit is an ObjC dylib injected into FCP's process. It exposes all 78,000+ ObjC classes
 via a JSON-RPC server on TCP 127.0.0.1:9876. Everything is fully programmatic -- no AppleScript,
 no UI automation, no menu clicks.
+
+## NEVER Use Keyboard Simulation or AppleScript
+
+All FCP actions MUST go through direct ObjC calls. Never use any of these:
+- `SpliceKit_simulateKeyPress()` or synthetic NSEvent key events
+- `CGEvent` keyboard/mouse posting
+- `osascript` / `NSAppleScript` / AppleScript `tell application`
+- Accessibility APIs (`AXUIElement`) for clicking or typing
+- Frame-stepping loops (`nextFrame` x N) when `seekToTime` exists
+
+**Instead, always use one of these patterns (in priority order):**
+1. **Direct method call** on the timeline/sequence/clip object via `objc_msgSend`
+2. **Responder chain** via `[NSApp sendAction:NSSelectorFromString(@"selector:") to:nil from:nil]`
+3. **Batch bridge endpoint** (e.g. `timeline.addMarkers`) for operations on multiple items
+4. **Menu execute** via `menu.execute` for actions only accessible through menus
+
+If an action doesn't have a direct ObjC selector yet, find one using `explore_class` /
+`search_methods` on the relevant class (FFAnchoredTimelineModule, FFAnchoredSequence, etc.)
+rather than simulating the keyboard shortcut.
 
 ## Quick Start
 
@@ -223,7 +242,7 @@ batch_export(scope="selected")    # export only selected clips
 ```
 
 Each clip is exported individually with all effects/color grading baked in.
-For each clip, FCPBridge:
+For each clip, SpliceKit:
 1. Computes the clip's exact position in the timeline
 2. Sets the in/out range (mark in/out) to the clip boundaries
 3. Triggers FCP's share dialog — click "Share" to confirm
@@ -296,7 +315,7 @@ apply_transition(name="Flow")         # apply Flow transition there
 
 ### Freeze Extend (not enough media handles)
 When clips don't have enough extra media beyond their edges for a transition, FCP normally
-shows a dialog offering to ripple trim. FCPBridge adds a third option: **"Use Freeze Frames"**.
+shows a dialog offering to ripple trim. SpliceKit adds a third option: **"Use Freeze Frames"**.
 
 - **UI button**: Whenever the "not enough extra media" dialog appears (including manual use),
   a "Use Freeze Frames" button is added. It extends clip edges with freeze frames and
@@ -323,7 +342,64 @@ The command palette opens as a floating window inside FCP:
 - Arrow keys to navigate, Return to execute, Escape to close
 - Type natural language sentences and press Tab to ask Apple Intelligence
 - Falls back to keyword matching when Apple Intelligence is unavailable
-- Also accessible via toolbar button or FCPBridge menu
+- Also accessible via toolbar button or Enhancements menu
+
+## Playhead & Selection
+```
+get_playhead_position()              # current time, duration, frame rate, playing state
+get_selected_clips()                 # get only selected clips in timeline
+seek_to_time(3.5)                    # jump to 3.5 seconds instantly (faster than stepping)
+```
+
+## Viewer Control
+```
+get_viewer_zoom()                    # current zoom level (0.0=Fit, 1.0=100%, 2.0=200%)
+set_viewer_zoom(0.0)                 # fit to window
+set_viewer_zoom(1.0)                 # 100%
+set_viewer_zoom(2.0)                 # 200% — any float value accepted
+```
+
+## Dialog Automation
+```
+detect_dialog()                      # scan for open dialogs, see buttons/fields/checkboxes
+click_dialog_button(button="OK")     # click by title (case-insensitive, partial match)
+click_dialog_button(index=0)         # click by index
+fill_dialog_field(value="My Project") # fill text field
+toggle_dialog_checkbox("Use custom settings", checked=True)
+select_dialog_popup(select="4K")     # choose from dropdown
+dismiss_dialog(action="default")     # click default button to close
+dismiss_dialog(action="cancel")      # cancel/escape
+```
+
+## Scene Detection
+```
+detect_scene_changes()                              # list scene change timestamps
+detect_scene_changes(threshold=0.2)                 # more sensitive
+detect_scene_changes(action="markers")              # add markers at cuts
+detect_scene_changes(action="blade")                # blade at every scene change
+detect_scene_changes(threshold=0.5, sample_interval=0.25) # less sensitive, faster
+```
+
+## Beat Detection
+```
+detect_beats(file_path="/path/to/song.mp3")         # detect beats, bars, sections, BPM
+detect_beats(file_path="song.mp3", sensitivity=0.8) # more sensitive
+detect_beats(file_path="song.mp3", min_bpm=120, max_bpm=180) # for fast music
+```
+Build first: `swiftc -O -o build/beat-detector tools/beat-detector.swift`
+
+## SRT Import
+```
+import_srt_as_markers(srt_content="1\n00:00:05,000 --> 00:00:10,000\nSubtitle text")
+```
+
+## SpliceKit Options
+```
+get_bridge_options()                                # see all configurable options
+set_bridge_option("effectDragAsAdjustmentClip", True)   # drag effects to create adjustment clips
+set_bridge_option("viewerPinchZoom", True)              # trackpad pinch-to-zoom on viewer
+set_bridge_option("videoOnlyKeepsAudioDisabled", True)  # keep audio disabled in video-only mode
+```
 
 ## Object Handles
 ```
@@ -364,17 +440,25 @@ Argument types: string, int, double, float, bool, nil, sender, handle, cmtime, s
 | PEAppController | App controller |
 | PEEditorContainerModule | Editor/timeline modules |
 
-## Discovering APIs
+## Discovering APIs (Runtime Introspection)
 ```
-get_classes(filter="FFColor")                          # find classes
-explore_class("FFAnchoredTimelineModule")              # full overview
-search_methods("FFAnchoredTimelineModule", "blade")    # find methods
-get_methods("FFEffectStack")                           # all methods
+get_classes(filter="FFColor")                          # find classes by name
+explore_class("FFAnchoredTimelineModule")              # full overview (methods, ivars, protocols)
+search_methods("FFAnchoredTimelineModule", "blade")    # find methods by name
+get_methods("FFEffectStack")                           # all instance + class methods with type encodings
+get_ivars("FFPlayer")                                  # ivar names, types, byte offsets
+get_properties("FFAnchoredSequence")                   # properties with parsed attributes
+get_protocols("FFAnchoredMediaComponent")              # protocol conformances
+get_superchain("FFAnchoredTimelineModule")             # inheritance chain to NSObject
 ```
+
+Each method entry includes: selector name, ObjC type encoding, IMP hex address, owning
+image (via dladdr), and linker symbol name. Ivar entries include byte offsets for struct
+reconstruction.
 
 ## Debug & Diagnostics (FCP Internal Developer Tools)
 
-FCPBridge exposes FCP's internal developer logging, debug overlays, and performance
+SpliceKit exposes FCP's internal developer logging, debug overlays, and performance
 monitoring tools that are normally hidden. These are built into FCP's own frameworks
 (ProAppSupport, TimelineKit, Helium, ProCore) and controlled via NSUserDefaults and
 CFPreferences keys.
@@ -534,12 +618,219 @@ problems. GPU logging captures the FxPlug/shader pipeline.
 
 **Verbose logging for development**: The `verbose_logging` preset sets ProAppSupport to
 trace level with the log UI enabled, giving maximum visibility into FCP's internal
-operations. Useful when developing new FCPBridge features or investigating FCP behavior.
+operations. Useful when developing new SpliceKit features or investigating FCP behavior.
 
 **Understanding timeline internals**: `TLKShowHiddenGapItems` and `TLKShowZeroHeightSpineItems`
 reveal items FCP hides from the user, helping understand the true timeline data model.
 
+## Runtime Metadata Export (for IDA Pro & Reverse Engineering)
+
+Extract rich ObjC runtime metadata from the live FCP process — data that static binary
+analysis cannot provide. Used to enrich IDA Pro decompilation and build the 303K-function
+decompiled codebase.
+
+### Bulk Class Metadata Export
+```
+dump_runtime_metadata(binary="Flexo")              # full metadata for all Flexo classes
+dump_runtime_metadata(binary="Flexo", classes_only=True)  # just class names (fast)
+dump_runtime_metadata()                             # all images (large!)
+```
+
+Returns per class:
+- **Instance & class methods** with selector, type encoding, IMP address, **dladdr info**
+  (which binary owns the IMP — reveals category methods from other frameworks)
+- **Ivars** with name, type encoding, and **byte offset** (for struct reconstruction)
+- **Ivar layout bitmaps** — which ivars are strong vs weak references
+- **Protocol conformances** with **full method declarations** (required/optional,
+  instance/class, type encodings) and protocol inheritance chains
+- **Parsed property attributes** — type, getter/setter selectors, backing ivar,
+  readonly/copy/strong/weak/nonatomic/dynamic (structured, not raw attribute strings)
+- **Superclass chain** and **instance size**
+
+### Loaded Image Enumeration
+```
+list_loaded_images()                     # all 1255 loaded Mach-O images
+list_loaded_images(filter="Flexo")       # filter by name
+```
+Returns path, base address, ASLR slide, and ObjC class count per image.
+The ASLR slide is needed to map runtime IMP addresses → IDA static addresses.
+
+### Mach-O Section Data
+```
+get_image_sections(binary="Flexo")       # selector refs, class refs
+```
+Returns:
+- **Selector references** — every ObjC selector the binary calls (44K+ for Flexo)
+- **Class references** — which classes the binary references
+- **Superclass references** — parent class dependencies
+
+For shared-cache system frameworks, uses ObjC runtime APIs instead of raw section reads.
+
+### Symbol Discovery with Swift Demangling
+```
+get_image_symbols(binary="Flexo", filter="Timeline")   # filtered
+get_image_symbols(binary="TimelineKit")                 # all symbols
+```
+Discovers exported symbols via dladdr on all methods. Swift symbols are automatically
+demangled using `swift_demangle()` from libswiftCore.
+
+### Notification Name Discovery
+```
+get_notification_names(binary="Flexo")   # notification-related classes & symbols
+```
+Finds classes with "Notification" in their name and enumerates their methods.
+Also resolves well-known notification name constants (e.g., `FFEffectsChangedNotification`).
+
+### IDA Pro Integration Scripts
+The `tools/` directory contains scripts for applying runtime metadata to IDA Pro:
+
+```bash
+# Step 1: Export runtime metadata from live FCP
+python3 tools/fcp_runtime_export.py --binary Flexo -o ida_export
+
+# Step 2: Run IDA headless with metadata enrichment + decompile
+RUNTIME_JSON=ida_export/Flexo.json DECOMPILE_OUTPUT_DIR=output \
+  idat -A -S"tools/ida_apply_and_decompile.py" /path/to/Flexo
+```
+
+**What the IDA script does:**
+1. Declares struct types from ivars with correct offsets and typed members
+2. Registers types in IDA's local type library (persists across sessions)
+3. Renames functions to ObjC names (`sub_XXXX` → `-[FFPlayer play]`)
+4. Sets function prototypes with typed parameters
+5. Adds class hierarchy and protocol conformance comments
+6. Creates enums for known constant sets
+7. Triggers type propagation across the entire binary
+
+**Tools:**
+- `tools/fcp_runtime_export.py` — Collection script (connects to SpliceKit, dumps JSON per binary)
+- `tools/ida_apply_and_decompile.py` — IDAPython headless script (applies metadata + decompiles)
+- `tools/ida_objc_types.py` — ObjC type encoding parser (converts `@"NSArray"` → `NSArray *`)
+- `tools/ida_import_runtime.py` — Interactive IDAPython script (for use inside IDA GUI)
+- `tools/batch_enhanced_decompile.sh` — Batch process all 53 FCP binaries
+
+## In-Process Debugging (Debugger Parity)
+
+SpliceKit includes a full debugging toolkit that provides Xcode/lldb-level capabilities
+from within FCP's process, accessible via MCP. No debugger attachment required.
+
+### Method Tracing (replaces breakpoints)
+```
+debug.traceMethod(action="add", className="FFAnchoredTimelineModule",
+                  selector="blade:", logStack=True)
+# ... perform action in FCP ...
+debug.traceMethod(action="getLog", limit=10)  # see calls + call stacks
+debug.traceMethod(action="removeAll")          # clean up
+```
+Traces are broadcast to MCP clients in real-time as JSON-RPC notifications.
+
+### Property Watching (replaces watchpoints)
+```
+debug.watch(action="add", className="NSApplication", keyPath="mainWindow")
+# Events broadcast when property changes with old/new values
+debug.watch(action="removeAll")
+```
+
+### Crash Handler (replaces debugger crash catching)
+```
+debug.crashHandler(action="install")   # catch exceptions + signals
+debug.crashHandler(action="getLog")    # see crash stack traces
+```
+Catches NSExceptions and signals (SIGABRT, SIGSEGV, etc.) with full stack traces.
+
+### Thread Inspection
+```
+debug.threads()                    # thread count, operation queues
+debug.threads(detailed=True)       # per-thread CPU usage, run state, stacks
+```
+Uses Mach kernel APIs. Shows all ~45 threads with CPU usage percentages.
+
+### Expression Evaluation (replaces lldb `po`)
+```
+debug.eval(expression="NSApp.delegate._targetLibrary.displayName")
+debug.eval(chain=["delegate", "_targetLibrary"], storeResult=True)
+```
+Walks ObjC property chains. Stores results as handles for further inspection.
+
+### Hot Plugin Loading (replaces dlopen from lldb)
+```
+debug.loadPlugin(action="load", path="/tmp/patch.dylib")   # inject code
+debug.loadPlugin(action="unload", path="/tmp/patch.dylib")  # remove it
+```
+Compile a `.dylib` with fixes/features, load into running FCP without restart.
+
+### Notification Observation
+```
+debug.observeNotification(action="add", name="FFEffectsChangedNotification")
+debug.observeNotification(action="add", name="*")  # all notifications (high volume)
+debug.observeNotification(action="removeAll")
+```
+Subscribe to FCP's internal NSNotification events. Broadcast to MCP clients.
+
+## Direct Timeline Actions (`timeline.directAction`)
+
+Calls Flexo's parameterized `action*` methods directly on FFAnchoredTimelineModule
+with real arguments. More powerful than the simple responder-chain `timeline.action`.
+
+### Retiming (direct control)
+```
+timeline.directAction(action="retimeSetRate", rate=0.5, ripple=True)
+timeline.directAction(action="retimeSpeedRamp", toZero=True)
+timeline.directAction(action="retimeInstantReplay", rate=0.5, addTitle=True)
+timeline.directAction(action="retimeJumpCut", framesToJump=5)
+timeline.directAction(action="retimeRewind", speed=2.0)
+timeline.directAction(action="insertFreezeFrame")
+```
+
+### Markers (programmatic manipulation)
+```
+timeline.directAction(action="changeMarkerType", type="chapter")
+timeline.directAction(action="changeMarkerName", name="Intro", marker="obj_5")
+timeline.directAction(action="markMarkerCompleted", completed=True)
+```
+
+### Audio (precise control)
+```
+timeline.directAction(action="changeAudioVolume", amount=-6.0, relative=True)
+timeline.directAction(action="applyAudioFadesDirect", fadeIn=True, duration=0.5)
+timeline.directAction(action="setBackgroundMusic", enabled=True)
+```
+
+### Other direct actions
+```
+timeline.directAction(action="addKeywords", keywords=["Interview", "B-Roll"])
+timeline.directAction(action="removeEffectByID", effectID="HEFlowTransition")
+timeline.directAction(action="renameAngle", name="Camera 2")
+timeline.directAction(action="newProject", name="My Project")
+timeline.directAction(action="alignToMusicMarkers")
+timeline.directAction(action="duplicateCaptions", language="es", format="SRT")
+```
+
+### Raw selector fallback
+```
+timeline.directAction(selector="actionValidateAndRepair:validateMode:error:")
+```
+
+See `docs/DEBUG_TOOLS_GUIDE.md` for comprehensive documentation of all debug
+endpoints, parameters, workflows, and recipes.
+
 ## Full API Reference
 See `docs/FCP_API_REFERENCE.md` for comprehensive documentation of all key classes,
 methods, properties, notifications, and patterns. This reference is sufficient to use
-FCPBridge without access to the decompiled FCP source code.
+SpliceKit without access to the decompiled FCP source code.
+
+## Additional Documentation
+- `docs/TRANSCRIPT_EDITING_GUIDE.md` — Transcript-based editing (engines, silence removal, speakers)
+- `docs/COMMAND_PALETTE_GUIDE.md` — Command palette & Apple Intelligence
+- `docs/RUNTIME_INTROSPECTION_GUIDE.md` — ObjC runtime exploration & reverse engineering
+- `docs/DIALOG_AUTOMATION_GUIDE.md` — Dialog detection & interaction
+- `docs/SCENE_BEAT_DETECTION_GUIDE.md` — Scene change & beat detection
+- `docs/FXPLUG_PLUGIN_GUIDE.md` — FxPlug 4 plugin development
+- `docs/FCPXML_FORMAT_REFERENCE.md` — FCPXML interchange format
+- `docs/WORKFLOW_EXTENSIONS_GUIDE.md` — Workflow Extensions (ProExtensionHost)
+- `docs/CONTENT_EXCHANGE_GUIDE.md` — Content exchange mechanisms
+- `docs/FLEXMUSIC_AND_MONTAGE_GUIDE.md` — FlexMusic & Montage Maker
+- `docs/DEBUG_TOOLS_GUIDE.md` — In-process debugging (tracing, watching, crash handling, eval, hot-loading)
+- `tools/fcp_runtime_export.py` — Export runtime metadata for IDA Pro (usage: `--help`)
+- `tools/ida_apply_and_decompile.py` — IDAPython headless: apply metadata + decompile all functions
+- `tools/batch_enhanced_decompile.sh` — Batch decompile all 53 FCP binaries with runtime enrichment

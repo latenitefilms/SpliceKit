@@ -821,7 +821,7 @@ The presence of `com.apple.ProVideo.multicam` in iPad's type declarations (despi
 | **AppleScript** | Full dictionary via `ProEditor.sdef` |
 | **Workflow Extensions** | FxPlug 4 API for third-party effects |
 | **Third-Party Plugins** | ProExtension framework family (5 frameworks) |
-| **FCPBridge** | TCP JSON-RPC injection (this project) |
+| **SpliceKit** | TCP JSON-RPC injection (this project) |
 | **FCPXML** | Full round-trip XML interchange |
 
 ### iPad

@@ -10,6 +10,7 @@ struct WizardView: View {
             rightColumn
         }
         .frame(width: 640, height: 440)
+        .preferredColorScheme(.dark)
     }
 
     // MARK: - Left Column

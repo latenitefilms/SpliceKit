@@ -87,8 +87,7 @@ struct StatusPanel: View {
                 Button {
                     model.launch()
                 } label: {
-                    Label("Launch Final Cut Pro", systemImage: "play.fill")
-                        .frame(minWidth: 100)
+                    Label("Launch FCP", systemImage: "play.fill")
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)

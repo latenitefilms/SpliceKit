@@ -8,7 +8,7 @@ title: FCP Application Internals
 > **Version**: Final Cut Pro 11.1 (macOS) — April 2026  
 > **Binary analysis**: 53 binaries, 303,662 decompiled functions, ~78,000+ ObjC classes
 
-This document provides a comprehensive technical reference to the internal architecture of Apple's Final Cut Pro. It is based on static analysis of the application bundle, decompilation of all embedded binaries, and runtime introspection via FCPBridge.
+This document provides a comprehensive technical reference to the internal architecture of Apple's Final Cut Pro. It is based on static analysis of the application bundle, decompilation of all embedded binaries, and runtime introspection via SpliceKit.
 
 ---
 
@@ -1702,4 +1702,4 @@ Most frameworks within Final Cut Pro are also found in:
 
 ---
 
-*This document was generated from static analysis of Final Cut Pro's application bundle, decompilation of all 53 embedded binaries (303,662 functions), and runtime introspection via FCPBridge. Class method counts and binary function counts are derived from the decompiled codebase.*
+*This document was generated from static analysis of Final Cut Pro's application bundle, decompilation of all 53 embedded binaries (303,662 functions), and runtime introspection via SpliceKit. Class method counts and binary function counts are derived from the decompiled codebase.*

@@ -1,7 +1,7 @@
 # Final Cut Pro Internal API Reference
 
 This reference documents the key ObjC classes, methods, and patterns inside Final Cut Pro
-that are accessible through FCPBridge. You do NOT need the decompiled source to use this --
+that are accessible through SpliceKit. You do NOT need the decompiled source to use this --
 the bridge discovers everything at runtime via the ObjC runtime.
 
 Use `explore_class("ClassName")` or `search_methods("ClassName", "keyword")` to discover

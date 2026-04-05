@@ -1,6 +1,6 @@
-# FCPBridge
+# SpliceKit
 
-Direct in-process control of Final Cut Pro via dylib injection. FCPBridge loads a custom framework into FCP's process space, giving you full access to all 78,000+ ObjC classes and their methods through a JSON-RPC interface and MCP server.
+Direct in-process control of Final Cut Pro via dylib injection. SpliceKit loads a custom framework into FCP's process space, giving you full access to all 78,000+ ObjC classes and their methods through a JSON-RPC interface and MCP server.
 
 ## Sample Apps
 
@@ -51,7 +51,7 @@ The AI understands your intent, maps it to the right sequence of FCP actions, an
 
 ## What This Does
 
-FCPBridge injects a dynamic library into a re-signed copy of Final Cut Pro that:
+SpliceKit injects a dynamic library into a re-signed copy of Final Cut Pro that:
 
 - Exposes the entire ObjC runtime (78,000+ classes, including all private APIs)
 - Runs a JSON-RPC 2.0 server on `127.0.0.1:9876` for external control
@@ -65,7 +65,7 @@ FCPBridge injects a dynamic library into a re-signed copy of Final Cut Pro that:
 ┌─────────────────────────────────────────────────┐
 │  Final Cut Pro (modded copy)                    │
 │  ┌───────────────────────────────────────────┐  │
-│  │  FCPBridge.framework (injected via        │  │
+│  │  SpliceKit.framework (injected via        │  │
 │  │  LC_LOAD_DYLIB)                           │  │
 │  │                                           │  │
 │  │  - ObjC runtime introspection             │  │
@@ -93,13 +93,13 @@ FCPBridge injects a dynamic library into a re-signed copy of Final Cut Pro that:
 
 [![Installation Guide](https://img.youtube.com/vi/NxbInKlXQVs/maxresdefault.jpg)](https://www.youtube.com/watch?v=NxbInKlXQVs)
 
-Download **FCPBridgePatcher** from the [latest release](https://github.com/elliotttate/FCPBridge/releases/latest), unzip it, and run the app. It handles everything automatically — just click the button to patch.
+Download **SpliceKitPatcher** from the [latest release](https://github.com/elliotttate/SpliceKit/releases/latest), unzip it, and run the app. It handles everything automatically — just click the button to patch.
 
-<img src="docs/patcher-screenshot.jpg" width="500" alt="FCPBridge Patcher">
+<img src="docs/patcher-screenshot.jpg" width="500" alt="SpliceKit Patcher">
 
 The patcher will:
-1. Copy Final Cut Pro to `~/Desktop/FinalCutPro_Modded/`
-2. Build and inject the FCPBridge dylib
+1. Copy Final Cut Pro to `~/Applications/SpliceKit/`
+2. Build and inject the SpliceKit dylib
 3. Re-sign with custom entitlements (no sandbox)
 4. Patch crash points (CloudContent/ImagePlayground)
 5. Set up the MCP server config
@@ -111,8 +111,8 @@ Once patched, click **Launch FCP** in the patcher or open the modded app directl
 Alternatively, use the shell script:
 
 ```bash
-git clone https://github.com/elliotttate/FCPBridge.git
-cd FCPBridge
+git clone https://github.com/elliotttate/SpliceKit.git
+cd SpliceKit
 ./patcher/patch_fcp.sh
 ```
 
@@ -135,18 +135,18 @@ Options:
 
 ```bash
 # Copy FCP
-mkdir -p ~/Desktop/FinalCutPro_Modded
-cp -R "/Applications/Final Cut Pro.app" ~/Desktop/FinalCutPro_Modded/"Final Cut Pro.app"
+mkdir -p ~/Applications/SpliceKit
+cp -R "/Applications/Final Cut Pro.app" ~/Applications/SpliceKit/"Final Cut Pro.app"
 
 # Copy MAS receipt (needed for licensing)
 cp "/Applications/Final Cut Pro.app/Contents/_MASReceipt/receipt" \
-   ~/Desktop/FinalCutPro_Modded/"Final Cut Pro.app/Contents/_MASReceipt/receipt"
+   ~/Applications/SpliceKit/"Final Cut Pro.app/Contents/_MASReceipt/receipt"
 
 # Remove quarantine
-xattr -cr ~/Desktop/FinalCutPro_Modded/"Final Cut Pro.app"
+xattr -cr ~/Applications/SpliceKit/"Final Cut Pro.app"
 ```
 
-### 2. Build and Inject FCPBridge
+### 2. Build and Inject SpliceKit
 
 ```bash
 # Build the dylib
@@ -158,23 +158,23 @@ make deploy
 # Inject LC_LOAD_DYLIB into the binary (requires insert_dylib)
 # Build insert_dylib: git clone https://github.com/tyilo/insert_dylib.git && cd insert_dylib && clang -o /usr/local/bin/insert_dylib insert_dylib/main.c -framework Foundation
 insert_dylib --inplace --all-yes \
-    "@rpath/FCPBridge.framework/Versions/A/FCPBridge" \
-    ~/Desktop/FinalCutPro_Modded/"Final Cut Pro.app"/Contents/MacOS/"Final Cut Pro"
+    "@rpath/SpliceKit.framework/Versions/A/SpliceKit" \
+    ~/Applications/SpliceKit/"Final Cut Pro.app"/Contents/MacOS/"Final Cut Pro"
 
 # Re-sign with custom entitlements (no sandbox, library validation disabled)
 codesign --force --sign - --entitlements entitlements.plist \
-    ~/Desktop/FinalCutPro_Modded/"Final Cut Pro.app"
+    ~/Applications/SpliceKit/"Final Cut Pro.app"
 ```
 
 ### 3. Launch
 
 ```bash
-~/Desktop/FinalCutPro_Modded/"Final Cut Pro.app"/Contents/MacOS/"Final Cut Pro"
+~/Applications/SpliceKit/"Final Cut Pro.app"/Contents/MacOS/"Final Cut Pro"
 ```
 
-Check `~/Library/Logs/FCPBridge/fcpbridge.log` for startup messages. You should see:
+Check `~/Library/Logs/SpliceKit/splicekit.log` for startup messages. You should see:
 ```
-[FCPBridge] Control server listening on 127.0.0.1:9876
+[SpliceKit] Control server listening on 127.0.0.1:9876
 ```
 
 ## Usage
@@ -182,16 +182,16 @@ Check `~/Library/Logs/FCPBridge/fcpbridge.log` for startup messages. You should 
 ### Python Client (Interactive REPL)
 
 ```bash
-python3 Scripts/fcpbridge_client.py
+python3 Scripts/splicekit_client.py
 ```
 
 ```
-fcpbridge> version
-fcpbridge> classes FFAnchored
-fcpbridge> methods FFPlayer
-fcpbridge> props FFAnchoredSequence
-fcpbridge> super FFAnchoredSequence
-fcpbridge> ivars FFLibrary
+splicekit> version
+splicekit> classes FFAnchored
+splicekit> methods FFPlayer
+splicekit> props FFAnchoredSequence
+splicekit> super FFAnchoredSequence
+splicekit> ivars FFLibrary
 ```
 
 ### Direct TCP
@@ -206,9 +206,9 @@ Add to your `.mcp.json`:
 ```json
 {
   "mcpServers": {
-    "fcpbridge": {
+    "splicekit": {
       "command": "python3",
-      "args": ["/path/to/FCPBridge/mcp/server.py"]
+      "args": ["/path/to/SpliceKit/mcp/server.py"]
     }
   }
 }
@@ -218,7 +218,7 @@ Add to your `.mcp.json`:
 
 | Method | Description |
 |--------|-------------|
-| `system.version` | FCPBridge + FCP version info |
+| `system.version` | SpliceKit + FCP version info |
 | `system.getClasses` | List/filter all ObjC classes |
 | `system.getMethods` | List methods on a class |
 | `system.getProperties` | List @property declarations |
@@ -254,8 +254,8 @@ Add to your `.mcp.json`:
 
 1. **App duplication**: FCP is copied to a writable location
 2. **Re-signing**: Ad-hoc signature with entitlements that disable library validation and sandbox
-3. **Binary patching**: `insert_dylib` adds an `LC_LOAD_DYLIB` command pointing to `FCPBridge.framework`
-4. **Auto-load**: On launch, dyld loads FCPBridge before `main()` runs
+3. **Binary patching**: `insert_dylib` adds an `LC_LOAD_DYLIB` command pointing to `SpliceKit.framework`
+4. **Auto-load**: On launch, dyld loads SpliceKit before `main()` runs
 5. **Constructor**: `__attribute__((constructor))` caches class references and swizzles CloudContent
 6. **Server start**: On `NSApplicationDidFinishLaunchingNotification`, starts TCP server on port 9876
 7. **Runtime access**: All calls use `objc_getClass()`, `objc_msgSend()`, and the ObjC runtime API
@@ -263,27 +263,27 @@ Add to your `.mcp.json`:
 ## Project Structure
 
 ```
-FCPBridge/
+SpliceKit/
 ├── patcher/
-│   ├── FCPBridgePatcher.app/  # Signed & notarized GUI patcher
-│   ├── FCPBridgePatcher/
+│   ├── SpliceKitPatcher.app/  # Signed & notarized GUI patcher
+│   ├── SpliceKitPatcher/
 │   │   └── main.swift         # Patcher source (SwiftUI)
 │   └── patch_fcp.sh           # Command line patcher
 ├── Sources/
-│   ├── FCPBridge.h            # Public header
-│   ├── FCPBridge.m            # Constructor, class caching, crash fixes, menu/toolbar
-│   ├── FCPBridgeRuntime.m     # ObjC runtime utilities
-│   ├── FCPBridgeServer.m      # JSON-RPC TCP server (33 tool endpoints)
-│   ├── FCPBridgeSwizzle.m     # Method swizzling infrastructure
-│   ├── FCPTranscriptPanel.h   # Transcript editor header
-│   ├── FCPTranscriptPanel.m   # Speech transcription, text-based editing UI
-│   ├── FCPCommandPalette.h    # Command palette header
-│   └── FCPCommandPalette.m    # Cmd+Shift+P palette with Apple Intelligence + 100 commands
+│   ├── SpliceKit.h            # Public header
+│   ├── SpliceKit.m            # Constructor, class caching, crash fixes, menu/toolbar
+│   ├── SpliceKitRuntime.m     # ObjC runtime utilities
+│   ├── SpliceKitServer.m      # JSON-RPC TCP server (33 tool endpoints)
+│   ├── SpliceKitSwizzle.m     # Method swizzling infrastructure
+│   ├── SpliceKitTranscriptPanel.h   # Transcript editor header
+│   ├── SpliceKitTranscriptPanel.m   # Speech transcription, text-based editing UI
+│   ├── SpliceKitCommandPalette.h    # Command palette header
+│   └── SpliceKitCommandPalette.m    # Cmd+Shift+P palette with Apple Intelligence + 100 commands
 ├── tools/
 │   ├── silence-detector.swift       # Audio silence detection CLI (AVFoundation + vDSP)
 │   └── parakeet-transcriber/        # On-device speech-to-text CLI (NVIDIA Parakeet via FluidAudio)
 ├── Scripts/
-│   ├── fcpbridge_client.py    # Interactive Python REPL client
+│   ├── splicekit_client.py    # Interactive Python REPL client
 │   └── launch.sh              # Launch helper script
 ├── mcp/
 │   └── server.py              # MCP server (33 tools)
@@ -299,9 +299,9 @@ FCPBridge/
 
 A few things worth clarifying up front -- this isn't for everyone, but it's very easy to set up if you do want to try it.
 
-**On reverse engineering and the EULA:** Reverse engineering for interoperability is explicitly protected under the DMCA ([17 U.S.C. § 1201(f)](https://www.law.cornell.edu/uscode/text/17/1201)) and similar laws in the EU. This is the same legal basis that allows tools like Homebrew, Hammerspoon, and countless other macOS utilities that hook into Apple apps. Apple's EULA doesn't override federal law. That said, FCPBridge doesn't really involve reverse engineering in the traditional sense -- once the library is loaded, Final Cut Pro exposes all of its own classes and methods through the Objective-C runtime. There's no decompilation required.
+**On reverse engineering and the EULA:** Reverse engineering for interoperability is explicitly protected under the DMCA ([17 U.S.C. § 1201(f)](https://www.law.cornell.edu/uscode/text/17/1201)) and similar laws in the EU. This is the same legal basis that allows tools like Homebrew, Hammerspoon, and countless other macOS utilities that hook into Apple apps. Apple's EULA doesn't override federal law. That said, SpliceKit doesn't really involve reverse engineering in the traditional sense -- once the library is loaded, Final Cut Pro exposes all of its own classes and methods through the Objective-C runtime. There's no decompilation required.
 
-**On "injecting code":** What FCPBridge does is no different from what accessibility tools, screen readers, and automation utilities do every day on macOS. `DYLD_INSERT_LIBRARIES` is a documented Apple mechanism -- it's not an exploit. Apps like BetterTouchTool, Alfred, and Bartender all inject into running processes using the same techniques.
+**On "injecting code":** What SpliceKit does is no different from what accessibility tools, screen readers, and automation utilities do every day on macOS. `DYLD_INSERT_LIBRARIES` is a documented Apple mechanism -- it's not an exploit. Apps like BetterTouchTool, Alfred, and Bartender all inject into running processes using the same techniques.
 
 **On Apple disabling your Apple ID:** There is no precedent for Apple disabling an Apple ID for running a modified local app. Apple can't even distinguish between "ran a modded app" and "loaded a dylib for debugging in Xcode," which developers do constantly. Apple's focus is on protecting the App Store and code signing for distribution -- not policing what developers do on their own machines.
 

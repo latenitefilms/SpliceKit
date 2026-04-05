@@ -35,7 +35,7 @@ echo ""
 echo "[1/13] Bumping version to ${VERSION}..."
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${VERSION}" "patcher/SpliceKit/Resources/Info.plist"
 sed -i '' "s/MARKETING_VERSION = \"[^\"]*\"/MARKETING_VERSION = \"${VERSION}\"/g" "${XCODE_PROJECT}/project.pbxproj"
-sed -i '' "s/CURRENT_PROJECT_VERSION = [^;]*/CURRENT_PROJECT_VERSION = 1/g" "${XCODE_PROJECT}/project.pbxproj"
+sed -i '' "s/CURRENT_PROJECT_VERSION = [^;]*/CURRENT_PROJECT_VERSION = ${VERSION}/g" "${XCODE_PROJECT}/project.pbxproj"
 
 echo "[2/14] Building SpliceKit dylib..."
 make clean && make

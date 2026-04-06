@@ -4,6 +4,7 @@
 
 import SwiftUI
 import AppKit
+import UniformTypeIdentifiers
 
 // MARK: - Types
 
@@ -63,24 +64,84 @@ class PatcherModel: ObservableObject {
     var moddedApp: String { destDir + "/" + (sourceApp as NSString).lastPathComponent }
     let repoDir: String                // where SpliceKit sources live
 
-    /// Which FCP editions are installed (standard vs Creator Studio)
+    /// Which FCP editions are installed (standard, Creator Studio, or auto-discovered)
     var availableEditions: [(label: String, path: String)] {
         var editions: [(String, String)] = []
+        let knownPaths: Set<String> = [Self.standardApp, Self.creatorStudioApp]
         if FileManager.default.fileExists(atPath: Self.standardApp) {
             editions.append(("Final Cut Pro", Self.standardApp))
         }
         if FileManager.default.fileExists(atPath: Self.creatorStudioApp) {
             editions.append(("Final Cut Pro Creator Studio", Self.creatorStudioApp))
         }
+        // Include user-browsed or auto-discovered path if not already listed
+        if !knownPaths.contains(sourceApp) && FileManager.default.fileExists(atPath: sourceApp + "/Contents/Info.plist") {
+            let name = (sourceApp as NSString).lastPathComponent.replacingOccurrences(of: ".app", with: "")
+            editions.append((name, sourceApp))
+        }
         return editions
     }
 
     var hasBothEditions: Bool { availableEditions.count > 1 }
 
+    /// True when sourceApp points to an existing FCP bundle (standard path or user-browsed).
+    var fcpFound: Bool { FileManager.default.fileExists(atPath: sourceApp + "/Contents/Info.plist") }
+
     func switchEdition(to path: String) {
         sourceApp = path
         fcpVersion = ""
         checkStatus()
+    }
+
+    /// Open a file browser so the user can locate Final Cut Pro manually.
+    func browseForFCP() {
+        let panel = NSOpenPanel()
+        panel.title = "Locate Final Cut Pro"
+        panel.message = "Select your Final Cut Pro application"
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = [.applicationBundle]
+        panel.directoryURL = URL(fileURLWithPath: "/Applications")
+
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+
+        // Validate it's actually Final Cut Pro
+        let plistPath = url.appendingPathComponent("Contents/Info.plist").path
+        let bundleID = shell("/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' '\(plistPath)' 2>/dev/null")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let bundleName = shell("/usr/libexec/PlistBuddy -c 'Print :CFBundleName' '\(plistPath)' 2>/dev/null")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard bundleID == "com.apple.FinalCut" || bundleName.contains("Final Cut") else {
+            errorMessage = "The selected app does not appear to be Final Cut Pro."
+            return
+        }
+
+        errorMessage = nil
+        sourceApp = url.path
+        fcpVersion = ""
+        checkStatus()
+    }
+
+    /// Use Spotlight to find Final Cut Pro anywhere on the system.
+    private static func findFCPViaSpotlight() -> String? {
+        let p = Process()
+        let pipe = Pipe()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/mdfind")
+        p.arguments = ["kMDItemCFBundleIdentifier == 'com.apple.FinalCut'"]
+        p.standardOutput = pipe
+        p.standardError = FileHandle.nullDevice
+        try? p.run()
+        p.waitUntilExit()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        let paths = (String(data: data, encoding: .utf8) ?? "")
+            .split(separator: "\n")
+            .map(String.init)
+        // Prefer paths in /Applications, skip any in ~/Applications/SpliceKit (our modded copy)
+        let spliceKitDir = NSHomeDirectory() + "/Applications/SpliceKit"
+        return paths.first { $0.hasPrefix("/Applications/") }
+            ?? paths.first { !$0.hasPrefix(spliceKitDir) }
     }
 
     init() {
@@ -127,9 +188,13 @@ class PatcherModel: ObservableObject {
         }
         repoDir = found
 
-        // Defer status check -- shell() pumps the run loop via waitUntilExit,
-        // which crashes if called during SwiftUI view graph initialization.
+        // Defer shell calls -- waitUntilExit pumps the run loop, which crashes
+        // if called during SwiftUI view graph initialization.
         DispatchQueue.main.async { [self] in
+            // Search for FCP via Spotlight if not at standard paths
+            if !fcpFound, let found = Self.findFCPViaSpotlight() {
+                sourceApp = found
+            }
             checkStatus()
             if status == .patched {
                 currentPanel = .complete  // skip to "done" panel
@@ -147,7 +212,8 @@ class PatcherModel: ObservableObject {
                 let ps = shell("lsof -i :9876 2>/dev/null | grep LISTEN")
                 bridgeConnected = !ps.isEmpty
                 let ver = shell("/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' '\(moddedApp)/Contents/Info.plist' 2>/dev/null")
-                fcpVersion = ver.trimmingCharacters(in: .whitespacesAndNewlines)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                if !ver.contains("Doesn't Exist") { fcpVersion = ver }
             } else {
                 status = .notPatched
             }
@@ -155,9 +221,13 @@ class PatcherModel: ObservableObject {
             status = .notPatched
         }
 
-        if fcpVersion.isEmpty {
+        if fcpVersion.isEmpty && FileManager.default.fileExists(atPath: sourceApp + "/Contents/Info.plist") {
             let ver = shell("/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' '\(sourceApp)/Contents/Info.plist' 2>/dev/null")
-            fcpVersion = ver.trimmingCharacters(in: .whitespacesAndNewlines)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            // PlistBuddy prints "File Doesn't Exist, Will Create:" when plist is missing
+            if !ver.isEmpty && !ver.contains("Doesn't Exist") {
+                fcpVersion = ver
+            }
         }
     }
 

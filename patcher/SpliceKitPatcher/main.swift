@@ -1,3 +1,9 @@
+// SpliceKitPatcher -- GUI patcher app for SpliceKit.
+//
+// Single-file SwiftUI app that copies FCP, compiles the SpliceKit dylib,
+// injects it via LC_LOAD_DYLIB, and re-signs with ad-hoc entitlements.
+// The result is a standalone modded FCP that loads SpliceKit on launch.
+
 import SwiftUI
 import AppKit
 import Sparkle
@@ -11,6 +17,7 @@ enum PatchStatus: Equatable {
     case unknown
 }
 
+/// Each step in the patching pipeline, shown as a checklist in the UI.
 enum PatchStep: String, CaseIterable {
     case checkPrereqs = "Checking prerequisites"
     case copyApp = "Copying Final Cut Pro"
@@ -249,7 +256,7 @@ class PatcherModel: ObservableObject {
         }
         await completeStepAsync(.checkPrereqs)
 
-        // Step 2: Copy app
+        // Step 2: Copy FCP bundle, preserve MAS receipt, strip quarantine xattrs
         await setStepAsync(.copyApp)
         if !FileManager.default.fileExists(atPath: moddedApp) {
             await logAsync("Copying FCP (~6GB, please wait)...")
@@ -265,7 +272,8 @@ class PatcherModel: ObservableObject {
         }
         await completeStepAsync(.copyApp)
 
-        // Step 3: Build dylib
+        // Step 3: Compile universal (arm64+x86_64) dylib; -undefined dynamic_lookup
+        // because FCP symbols are only available at runtime via dyld.
         await setStepAsync(.buildDylib)
         await logAsync("Compiling SpliceKit dylib...")
         let buildDir = NSTemporaryDirectory() + "SpliceKit_build"
@@ -341,7 +349,7 @@ class PatcherModel: ObservableObject {
 
         await completeStepAsync(.buildDylib)
 
-        // Step 4: Install framework
+        // Step 4: Create macOS framework bundle (Versions/A + symlinks)
         await setStepAsync(.installFramework)
         let fwDir = moddedApp + "/Contents/Frameworks/SpliceKit.framework"
         shell("""
@@ -381,7 +389,7 @@ class PatcherModel: ObservableObject {
         await logAsync("Framework installed")
         await completeStepAsync(.installFramework)
 
-        // Step 5: Inject LC_LOAD_DYLIB
+        // Step 5: Patch the Mach-O binary so dyld loads SpliceKit on launch
         await setStepAsync(.injectDylib)
         let binary = moddedApp + "/Contents/MacOS/Final Cut Pro"
         let alreadyInjected = shell("otool -L '\(binary)' 2>/dev/null | grep SpliceKit")
@@ -452,7 +460,7 @@ class PatcherModel: ObservableObject {
         await logAsync("Reset permissions for new signature")
         await completeStepAsync(.signApp)
 
-        // Step 7: Defaults
+        // Step 7: Skip FCP's first-launch cloud content download dialog
         await setStepAsync(.configureDefaults)
         shell("defaults write com.apple.FinalCut CloudContentFirstLaunchCompleted -bool true 2>/dev/null")
         shell("defaults write com.apple.FinalCut FFCloudContentDisabled -bool true 2>/dev/null")
@@ -473,6 +481,7 @@ class PatcherModel: ObservableObject {
 
     // MARK: - Helpers
 
+    /// Run a shell command synchronously; nonisolated for use in background tasks.
     @discardableResult
     nonisolated func shell(_ command: String) -> String {
         let process = Process()
@@ -794,7 +803,7 @@ struct ContentView: View {
     }
 }
 
-// MARK: - Sparkle Auto-Update
+// MARK: - Sparkle Auto-Update (via appcast feed)
 
 final class CheckForUpdatesViewModel: ObservableObject {
     @Published var canCheckForUpdates = false

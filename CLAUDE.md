@@ -835,6 +835,36 @@ See `docs/FCP_API_REFERENCE.md` for comprehensive documentation of all key class
 methods, properties, notifications, and patterns. This reference is sufficient to use
 SpliceKit without access to the decompiled FCP source code.
 
+## Social Media Captions
+```
+open_captions()                                    # open panel + transcribe timeline
+open_captions(style="bold_pop")                    # open with preset style
+get_caption_state()                                # check transcription progress + segments
+get_caption_styles()                               # list all 12 style presets
+set_caption_style(preset_id="neon_glow")           # apply a preset
+set_caption_style(preset_id="bold_pop", font_size=80, position="center")  # customize
+set_caption_grouping(mode="words", max_words=4)    # control word grouping
+generate_captions(style="bold_pop")                # generate FCPXML + import to timeline
+export_captions_srt(path="/tmp/captions.srt")      # export SRT subtitles
+export_captions_txt(path="/tmp/captions.txt")      # export plain text
+```
+
+Generates word-by-word highlighted, animated caption titles as FCPXML and imports
+them directly into the timeline via pasteboard. No drag-and-drop, no dialogs.
+
+**Style presets** (12 built-in): `bold_pop`, `neon_glow`, `clean_minimal`, `handwritten`,
+`gradient_fire`, `outline_bold`, `shadow_deep`, `karaoke`, `typewriter`, `bounce_fun`,
+`subtitle_pro`, `social_bold`
+
+**Animations**: none, fade, pop, slide_up, typewriter, bounce
+
+**Word grouping modes**: words (max N per group), sentence (by punctuation),
+time (max seconds), chars (max characters)
+
+Each caption is a `<title>` element with `<text-style>` attributes. Word-by-word
+highlight uses multiple `<text-style>` refs per title — the active word gets the
+highlight color, others get the base text color.
+
 ## Additional Documentation
 - `docs/TRANSCRIPT_EDITING_GUIDE.md` — Transcript-based editing (engines, silence removal, speakers)
 - `docs/COMMAND_PALETTE_GUIDE.md` — Command palette & Apple Intelligence

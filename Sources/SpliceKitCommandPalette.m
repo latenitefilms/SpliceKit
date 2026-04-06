@@ -333,11 +333,17 @@ static NSString * const kSeparatorRowID = @"FCPSeparatorRow";
 }
 
 #pragma mark - Command Registry
+//
+// Every command the palette knows about is registered here. Each entry specifies
+// a display name, the action string (passed to timeline_action/playback_action),
+// a category for grouping, a keyboard shortcut hint, and search keywords.
+// The `add` block is just syntactic sugar so each registration fits on one line.
+//
 
 - (void)registerCommands {
     NSMutableArray<SpliceKitCommand *> *cmds = [NSMutableArray array];
 
-    // Helper to create commands
+    // Helper to create and register a command in one line
     void (^add)(NSString *, NSString *, NSString *, SpliceKitCommandCategory, NSString *, NSString *, NSString *, NSArray *) =
         ^(NSString *name, NSString *action, NSString *type, SpliceKitCommandCategory cat,
           NSString *catName, NSString *shortcut, NSString *detail, NSArray *keywords) {
@@ -1110,6 +1116,11 @@ static NSString * const kSeparatorRowID = @"FCPSeparatorRow";
 }
 
 #pragma mark - Search / Filter
+//
+// Fuzzy-scores every command against the query, scoring name, keywords, and
+// detail text. Commands below a threshold (0.3) are dropped. Name matches are
+// weighted 1.0, keyword matches 0.8, detail matches 0.5.
+//
 
 - (NSArray<SpliceKitCommand *> *)searchCommands:(NSString *)query {
     if (query.length == 0) return self.allCommands;
@@ -1945,6 +1956,11 @@ static NSString * const kSeparatorRowID = @"FCPSeparatorRow";
 }
 
 #pragma mark - Favorites
+//
+// Users can star commands (right-click -> Favorite). Favorites persist in
+// NSUserDefaults and appear at the top of the command list when the search
+// field is empty. O(1) lookups via a key set ("type::action").
+//
 
 static NSString *FCPFavoriteKey(NSString *type, NSString *action) {
     return [NSString stringWithFormat:@"%@::%@", type, action];
@@ -2560,6 +2576,13 @@ static NSString *FCPFavoriteKey(NSString *type, NSString *action) {
 }
 
 #pragma mark - Apple Intelligence (FoundationModels)
+//
+// When the user types a natural language sentence and presses Tab, we ask
+// Apple Intelligence (via FoundationModels framework) to figure out which
+// commands to run. The LLM gets timeline context (clips, playhead, duration)
+// and returns a JSON action list that we execute sequentially.
+// Falls back to keyword matching when AI isn't available.
+//
 
 - (void)triggerAI:(NSString *)query {
     if (self.aiLoading) return;

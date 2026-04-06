@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-fcp_runtime_export.py — Export ObjC runtime metadata from a live FCP process via SpliceKit.
+fcp_runtime_export.py -- Export ObjC runtime metadata from a live FCP process via SpliceKit.
 
 Connects to SpliceKit's JSON-RPC server (TCP 127.0.0.1:9876) and dumps full class metadata
 for every loaded Mach-O image into per-binary JSON files. The output is consumed by
-ida_import_runtime.py to enrich IDA Pro decompilation.
+ida_import_runtime.py to enrich IDA Pro decompilation with real runtime type info.
 
 Usage:
     python3 fcp_runtime_export.py                          # export all images
@@ -15,9 +15,9 @@ Usage:
 
 Output structure:
     output_dir/
-      _image_map.json          — {name: {path, baseAddress, slide, classCount}} for all images
-      Flexo.json               — full metadata for classes in Flexo
-      TLKit.json               — full metadata for classes in TLKit
+      _image_map.json          -- {name: {path, baseAddress, slide, classCount}} for all images
+      Flexo.json               -- full metadata for classes in Flexo
+      TLKit.json               -- full metadata for classes in TLKit
       ...
 """
 
@@ -30,7 +30,12 @@ import time
 
 
 def rpc_call(method: str, params: dict = None, host: str = "127.0.0.1", port: int = 9876) -> dict:
-    """Send a JSON-RPC 2.0 request and return the result."""
+    """Send a JSON-RPC 2.0 request and return the result.
+
+    Opens a fresh TCP connection per call (no persistent session).
+    Large dumps (e.g. Flexo with 5000+ classes) can take minutes,
+    hence the generous 5-minute timeout.
+    """
     request = {
         "jsonrpc": "2.0",
         "id": 1,
@@ -46,14 +51,14 @@ def rpc_call(method: str, params: dict = None, host: str = "127.0.0.1", port: in
     try:
         sock.sendall(payload.encode("utf-8"))
 
-        # Read response (may be very large)
+        # Read response -- may be very large (100MB+ for full Flexo dump).
+        # We read in 1MB chunks until we see a newline (JSON-RPC delimiter).
         chunks = []
         while True:
-            chunk = sock.recv(1024 * 1024)  # 1MB chunks
+            chunk = sock.recv(1024 * 1024)
             if not chunk:
                 break
             chunks.append(chunk)
-            # JSON-RPC responses are newline-delimited
             if b"\n" in chunk:
                 break
 
@@ -70,7 +75,7 @@ def rpc_call(method: str, params: dict = None, host: str = "127.0.0.1", port: in
 
 
 def export_image_map(host: str, port: int, output_dir: str) -> list:
-    """Export the image map (all loaded Mach-O images with addresses)."""
+    """Export the image map -- all loaded Mach-O images with base addresses and ASLR slides."""
     print("Fetching loaded image list...")
     result = rpc_call("debug.listLoadedImages", {}, host, port)
 
@@ -81,13 +86,13 @@ def export_image_map(host: str, port: int, output_dir: str) -> list:
     images = result.get("images", [])
     print(f"  Found {len(images)} loaded images")
 
-    # Build the map
+    # Build a lookup map keyed by image name
     image_map = {}
     for img in images:
         image_map[img["name"]] = {
             "path": img["path"],
             "baseAddress": img["baseAddress"],
-            "slide": img["slide"],
+            "slide": img["slide"],       # needed to map runtime IMP -> IDA static address
             "classCount": img["classCount"]
         }
 
@@ -101,7 +106,7 @@ def export_image_map(host: str, port: int, output_dir: str) -> list:
 
 def export_binary(binary_name: str, host: str, port: int, output_dir: str,
                   classes_only: bool = False) -> dict:
-    """Export full metadata for one binary."""
+    """Export full class metadata for one binary (methods, ivars, protocols, etc.)."""
     params = {"binary": binary_name}
     if classes_only:
         params["classesOnly"] = True
@@ -119,12 +124,12 @@ def export_binary(binary_name: str, host: str, port: int, output_dir: str,
     total = sum(len(v) for v in classes.values())
     print(f" {total} classes in {elapsed:.1f}s")
 
-    # Find the matching key in classes dict
+    # The response groups classes by image name -- save each as a separate JSON file
     for key, class_data in classes.items():
         out_name = key.replace(".dylib", "").replace(".framework", "")
         out_path = os.path.join(output_dir, f"{out_name}.json")
 
-        # Include image info from the images array
+        # Include image info (base address, slide) alongside class data
         image_info = None
         for img in result.get("images", []):
             if img["name"] == key:
@@ -146,7 +151,7 @@ def export_binary(binary_name: str, host: str, port: int, output_dir: str,
 
 
 def export_image_sections(binary_name: str, host: str, port: int, output_dir: str):
-    """Export ObjC section data (selrefs, classrefs) for one binary."""
+    """Export Mach-O ObjC section data (__objc_selrefs, __objc_classrefs) for one binary."""
     print(f"  Sections for {binary_name}...", end="", flush=True)
     result = rpc_call("debug.getImageSections", {"binary": binary_name}, host, port)
     if "error" in result:
@@ -163,7 +168,7 @@ def export_image_sections(binary_name: str, host: str, port: int, output_dir: st
 
 
 def export_image_symbols(binary_name: str, host: str, port: int, output_dir: str):
-    """Export symbol table for one binary."""
+    """Export symbol table for one binary (with Swift demangling)."""
     print(f"  Symbols for {binary_name}...", end="", flush=True)
     result = rpc_call("debug.getImageSymbols", {"binary": binary_name}, host, port)
     if "error" in result:
@@ -180,7 +185,7 @@ def export_image_symbols(binary_name: str, host: str, port: int, output_dir: str
 
 
 def export_notifications(host: str, port: int, output_dir: str):
-    """Export all notification name constants."""
+    """Export all notification name constants (global, not per-binary)."""
     print("Fetching notification names...", end="", flush=True)
     result = rpc_call("debug.getNotificationNames", {}, host, port)
     if "error" in result:
@@ -216,18 +221,17 @@ def main():
                         help="Skip notification name export")
     args = parser.parse_args()
 
-    # Create output directory
     os.makedirs(args.output, exist_ok=True)
 
-    # Always export the image map first
+    # Always export the image map first -- needed for ASLR slide calculations
     images = export_image_map(args.host, args.port, args.output)
 
-    # Export notification names (global, not per-binary)
+    # Notification names are global, not per-binary
     if not args.no_notifications:
         export_notifications(args.host, args.port, args.output)
 
     if args.binary:
-        # Export specific binaries
+        # Export only the binaries the user asked for
         for binary in args.binary:
             export_binary(binary, args.host, args.port, args.output, args.classes_only)
             if not args.no_sections:
@@ -235,7 +239,7 @@ def main():
             if not args.no_symbols:
                 export_image_symbols(binary, args.host, args.port, args.output)
     else:
-        # Export all images that have ObjC classes
+        # Export every loaded image that has ObjC classes, largest first
         targets = [img for img in images if img["classCount"] >= args.min_classes]
         targets.sort(key=lambda x: x["classCount"], reverse=True)
 

@@ -10,7 +10,9 @@ SOURCES = Sources/SpliceKit.m \
           Sources/SpliceKitRuntime.m \
           Sources/SpliceKitSwizzle.m \
           Sources/SpliceKitServer.m \
+          Sources/SpliceKitLogPanel.m \
           Sources/SpliceKitTranscriptPanel.m \
+          Sources/SpliceKitCaptionPanel.m \
           Sources/SpliceKitCommandPalette.m \
           Sources/SpliceKitDebugUI.m
 

@@ -1,3 +1,7 @@
+// PatcherModel.swift -- Core model for the SpliceKit GUI patcher.
+// Drives the wizard-style UI: welcome -> patching -> complete.
+// Handles FCP edition detection, patch orchestration, and launch.
+
 import SwiftUI
 import AppKit
 
@@ -22,6 +26,7 @@ enum PatchStep: String, CaseIterable {
     case done = "Done"
 }
 
+/// The three panels of the wizard-style patcher UI.
 enum WizardPanel: Int {
     case welcome
     case patching
@@ -53,11 +58,12 @@ class PatcherModel: ObservableObject {
     static let standardApp = "/Applications/Final Cut Pro.app"
     static let creatorStudioApp = "/Applications/Final Cut Pro Creator Studio.app"
 
-    @Published var sourceApp: String
-    let destDir: String
+    @Published var sourceApp: String   // path to the stock FCP.app
+    let destDir: String                // ~/Applications/SpliceKit/
     var moddedApp: String { destDir + "/" + (sourceApp as NSString).lastPathComponent }
-    let repoDir: String
+    let repoDir: String                // where SpliceKit sources live
 
+    /// Which FCP editions are installed (standard vs Creator Studio)
     var availableEditions: [(label: String, path: String)] {
         var editions: [(String, String)] = []
         if FileManager.default.fileExists(atPath: Self.standardApp) {
@@ -78,6 +84,7 @@ class PatcherModel: ObservableObject {
     }
 
     init() {
+        // Auto-detect FCP edition: prefer standard, fall back to Creator Studio
         let fm = FileManager.default
         if fm.fileExists(atPath: Self.standardApp) {
             sourceApp = Self.standardApp
@@ -120,14 +127,17 @@ class PatcherModel: ObservableObject {
         }
         repoDir = found
 
+        // Defer status check -- shell() pumps the run loop via waitUntilExit,
+        // which crashes if called during SwiftUI view graph initialization.
         DispatchQueue.main.async { [self] in
             checkStatus()
             if status == .patched {
-                currentPanel = .complete
+                currentPanel = .complete  // skip to "done" panel
             }
         }
     }
 
+    /// Check whether the modded FCP exists, has SpliceKit injected, and if the bridge is up.
     func checkStatus() {
         let binary = moddedApp + "/Contents/MacOS/Final Cut Pro"
         if FileManager.default.fileExists(atPath: binary) {
@@ -258,7 +268,7 @@ class PatcherModel: ObservableObject {
         }
         await completeStepAsync(.checkPrereqs)
 
-        // Step 2: Copy app
+        // Step 2: Copy FCP bundle, preserve MAS receipt, strip quarantine xattrs
         await setStepAsync(.copyApp)
         if !FileManager.default.fileExists(atPath: moddedApp) {
             await logAsync("Copying FCP (~6GB, please wait)...")
@@ -274,7 +284,7 @@ class PatcherModel: ObservableObject {
         }
         await completeStepAsync(.copyApp)
 
-        // Step 3: Build dylib
+        // Step 3: Build dylib and companion tools (prefers pre-built from app bundle)
         await setStepAsync(.buildDylib)
         let buildDir = NSTemporaryDirectory() + "SpliceKit_build"
         shell("mkdir -p '\(buildDir)'")
@@ -285,7 +295,7 @@ class PatcherModel: ObservableObject {
             shell("cp '\(bundledDylib)' '\(buildDir)/SpliceKit'")
         } else {
             await logAsync("Compiling SpliceKit dylib...")
-            let sources = ["SpliceKit.m", "SpliceKitRuntime.m", "SpliceKitSwizzle.m", "SpliceKitServer.m", "SpliceKitTranscriptPanel.m", "SpliceKitCommandPalette.m"]
+            let sources = ["SpliceKit.m", "SpliceKitRuntime.m", "SpliceKitSwizzle.m", "SpliceKitServer.m", "SpliceKitLogPanel.m", "SpliceKitTranscriptPanel.m", "SpliceKitCaptionPanel.m", "SpliceKitCommandPalette.m", "SpliceKitDebugUI.m"]
                 .map { "'\(repoDir)/Sources/\($0)'" }.joined(separator: " ")
             let buildResult = shell("""
                 clang -arch arm64 -arch x86_64 -mmacosx-version-min=14.0 \
@@ -359,7 +369,7 @@ class PatcherModel: ObservableObject {
 
         await completeStepAsync(.buildDylib)
 
-        // Step 4: Install framework
+        // Step 4: Create macOS framework bundle (Versions/A + symlinks)
         await setStepAsync(.installFramework)
         let fwDir = moddedApp + "/Contents/Frameworks/SpliceKit.framework"
         shell("""
@@ -395,7 +405,7 @@ class PatcherModel: ObservableObject {
         await logAsync("Framework installed")
         await completeStepAsync(.installFramework)
 
-        // Step 5: Inject LC_LOAD_DYLIB
+        // Step 5: Patch the Mach-O binary so dyld loads SpliceKit on launch
         await setStepAsync(.injectDylib)
         let binary = moddedApp + "/Contents/MacOS/Final Cut Pro"
         let alreadyInjected = shell("otool -L '\(binary)' 2>/dev/null | grep '@rpath/SpliceKit'")
@@ -418,7 +428,8 @@ class PatcherModel: ObservableObject {
         }
         await completeStepAsync(.injectDylib)
 
-        // Step 6: Re-sign
+        // Step 6: Ad-hoc re-sign; only sign SpliceKit.framework + app wrapper.
+        // Apple frameworks keep their original signatures to avoid integrity check failures.
         await setStepAsync(.signApp)
         let entitlements = buildDir + "/entitlements.plist"
         let entPlist = """
@@ -450,7 +461,7 @@ class PatcherModel: ObservableObject {
         await logAsync("Reset permissions for new signature")
         await completeStepAsync(.signApp)
 
-        // Step 7: Defaults
+        // Step 7: Skip FCP's first-launch cloud content download dialog
         await setStepAsync(.configureDefaults)
         shell("defaults write com.apple.FinalCut CloudContentFirstLaunchCompleted -bool true 2>/dev/null")
         shell("defaults write com.apple.FinalCut FFCloudContentDisabled -bool true 2>/dev/null")
@@ -471,6 +482,7 @@ class PatcherModel: ObservableObject {
 
     // MARK: - Helpers
 
+    /// Run a shell command synchronously; nonisolated for use in background tasks.
     @discardableResult
     nonisolated func shell(_ command: String) -> String {
         let process = Process()

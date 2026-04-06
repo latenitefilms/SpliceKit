@@ -43,14 +43,29 @@ void SpliceKit_log(NSString *format, ...) {
     NSString *message = [[NSString alloc] initWithFormat:format arguments:args];
     va_end(args);
 
-    NSLog(@"[SpliceKit] %@", message);
+    BOOL includeThreadInfo = [[NSUserDefaults standardUserDefaults] boolForKey:@"LogThread"];
+    NSString *threadLabel = @"";
+    if (includeThreadInfo) {
+        NSThread *thread = [NSThread currentThread];
+        NSString *name = thread.isMainThread ? @"main" : thread.name;
+        if (name.length == 0) {
+            name = [NSString stringWithFormat:@"%p", thread];
+        }
+        threadLabel = [NSString stringWithFormat:@"[%@] ", name];
+    }
+
+    NSString *consolePrefix = threadLabel.length
+        ? [NSString stringWithFormat:@"[SpliceKit] %@", threadLabel]
+        : @"[SpliceKit] ";
+    NSLog(@"%@%@", consolePrefix, message);
 
     // Append to log file on a serial queue so we don't block the caller
     if (sLogHandle && sLogQueue) {
         NSString *timestamp = [NSDateFormatter localizedStringFromDate:[NSDate date]
                                                             dateStyle:NSDateFormatterNoStyle
                                                             timeStyle:NSDateFormatterMediumStyle];
-        NSString *line = [NSString stringWithFormat:@"[%@] [SpliceKit] %@\n", timestamp, message];
+        NSString *line = [NSString stringWithFormat:@"[%@] [SpliceKit] %@%@\n",
+                          timestamp, threadLabel, message];
         NSData *data = [line dataUsingEncoding:NSUTF8StringEncoding];
         dispatch_async(sLogQueue, ^{
             [sLogHandle writeData:data];

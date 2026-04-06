@@ -23,6 +23,7 @@
 
 #import "SpliceKitDebugUI.h"
 #import "SpliceKit.h"
+#import "SpliceKitLogPanel.h"
 #import <AppKit/AppKit.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
@@ -125,6 +126,37 @@ static void SKDebug_reloadTLKIfPossible(void) {
     }
 }
 
+static NSInteger SKDebug_currentLogLevelIndex(void) {
+    id raw = [[NSUserDefaults standardUserDefaults] objectForKey:@"LogLevel"];
+    if (!raw) return 2;  // FCP defaults to "info" when unset.
+    NSInteger level = [raw integerValue];
+    if (level < 0 || level >= (NSInteger)SKDebug_logLevelNames().count) return 2;
+    return level;
+}
+
+static id SKDebug_vamlDebugMenu(void) {
+    Class vamlClass = objc_getClass("FFVAMLDebugMenu");
+    if (!vamlClass || ![vamlClass respondsToSelector:@selector(instance)]) return nil;
+    return ((id (*)(id, SEL))objc_msgSend)(vamlClass, @selector(instance));
+}
+
+static NSInteger SKDebug_vamlMenuItemState(NSString *getterName, NSString *defaultsKey) {
+    id vaml = SKDebug_vamlDebugMenu();
+    SEL getter = NSSelectorFromString(getterName);
+    if (vaml && [vaml respondsToSelector:getter]) {
+        id item = ((id (*)(id, SEL))objc_msgSend)(vaml, getter);
+        if ([item respondsToSelector:@selector(state)]) {
+            return ((NSInteger (*)(id, SEL))objc_msgSend)(item, @selector(state));
+        }
+    }
+
+    if (defaultsKey.length > 0) {
+        return [[NSUserDefaults standardUserDefaults] boolForKey:defaultsKey]
+            ? NSControlStateValueOn : NSControlStateValueOff;
+    }
+    return NSControlStateValueOff;
+}
+
 #pragma mark - Controller (owns targets for all actions)
 
 @interface SpliceKitDebugController : NSObject <NSMenuDelegate>
@@ -161,6 +193,11 @@ static void SKDebug_reloadTLKIfPossible(void) {
         [(NSMenuItem *)sender setState:newValue ? NSControlStateValueOn : NSControlStateValueOff];
     }
 
+    if ([key isEqualToString:@"LogUI"]) {
+        if (newValue) [[SpliceKitLogPanel sharedPanel] showPanel];
+        else [[SpliceKitLogPanel sharedPanel] hidePanel];
+    }
+
     SKDebug_reloadTLKIfPossible();
     SpliceKit_log(@"Debug flag %@ -> %@", key, newValue ? @"YES" : @"NO");
 }
@@ -175,6 +212,14 @@ static void SKDebug_reloadTLKIfPossible(void) {
     if (level < 0 || level >= (NSInteger)SKDebug_logLevelNames().count) return;
     [[NSUserDefaults standardUserDefaults] setInteger:level forKey:@"LogLevel"];
     [[NSUserDefaults standardUserDefaults] synchronize];
+
+    if ([sender isKindOfClass:[NSMenuItem class]]) {
+        NSMenu *menu = [(NSMenuItem *)sender menu];
+        for (NSMenuItem *item in menu.itemArray) {
+            item.state = (item.tag == level) ? NSControlStateValueOn : NSControlStateValueOff;
+        }
+    }
+
     SpliceKit_log(@"ProAppSupport LogLevel -> %@", SKDebug_logLevelNames()[level]);
 }
 
@@ -262,24 +307,10 @@ static void SKDebug_reloadTLKIfPossible(void) {
 #pragma mark FCP-native debug actions
 
 - (void)toggleCGContextDraw:(id)sender {
-    // -[PEAppController toggleDebugCGContextDraw:] — single documented debug
-    // action exposed by the app controller. Find the shared instance and ping it.
-    Class appCtlClass = objc_getClass("PEAppController");
-    if (!appCtlClass) return;
-    id appCtl = nil;
-    if ([appCtlClass respondsToSelector:@selector(sharedAppController)]) {
-        appCtl = ((id (*)(id, SEL))objc_msgSend)(appCtlClass, @selector(sharedAppController));
-    }
-    if (!appCtl) {
-        appCtl = [NSApp delegate];
-    }
-    SEL sel = NSSelectorFromString(@"toggleDebugCGContextDraw:");
-    if ([appCtl respondsToSelector:sel]) {
-        ((void (*)(id, SEL, id))objc_msgSend)(appCtl, sel, sender);
-        SpliceKit_log(@"Invoked PEAppController.toggleDebugCGContextDraw:");
-    } else {
-        SpliceKit_log(@"PEAppController does not respond to toggleDebugCGContextDraw:");
-    }
+    // FCP 12.0 ships this selector as an empty stub in release builds, so keep
+    // the behavior explicit instead of surfacing a dead-looking action.
+    (void)sender;
+    SpliceKit_log(@"PEAppController.toggleDebugCGContextDraw: is a no-op in this FCP build");
 }
 
 - (void)toggleSaveSearchResults:(id)sender {
@@ -289,6 +320,9 @@ static void SKDebug_reloadTLKIfPossible(void) {
     SEL sel = NSSelectorFromString(@"toggleSaveSearchResults");
     if ([vaml respondsToSelector:sel]) {
         ((void (*)(id, SEL))objc_msgSend)(vaml, sel);
+        if ([sender isKindOfClass:[NSMenuItem class]]) {
+            [(NSMenuItem *)sender setState:SKDebug_vamlMenuItemState(@"saveSearchMenuItem", nil)];
+        }
     }
 }
 
@@ -299,6 +333,10 @@ static void SKDebug_reloadTLKIfPossible(void) {
     SEL sel = NSSelectorFromString(@"toggleSaveTranscription");
     if ([vaml respondsToSelector:sel]) {
         ((void (*)(id, SEL))objc_msgSend)(vaml, sel);
+        if ([sender isKindOfClass:[NSMenuItem class]]) {
+            [(NSMenuItem *)sender setState:SKDebug_vamlMenuItemState(@"saveTranscriptionMenuItem",
+                                                                    @"FFVAMLSaveTranscription")];
+        }
     }
 }
 
@@ -319,7 +357,7 @@ static const char kFramerateMonitorKey = '\0';
         // Retain the monitor in an associated object so it's not deallocated.
         objc_setAssociatedObject(self, &kFramerateMonitorKey, monitor,
                                  OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        SpliceKit_log(@"Framerate monitor started (2.0s interval)");
+        SpliceKit_log(@"HMD framerate monitor started (2.0s interval). ProCore only logs while HMD rendering is active.");
     }
 }
 
@@ -372,11 +410,19 @@ static const char kFramerateMonitorKey = '\0';
 
 - (void)menuNeedsUpdate:(NSMenu *)menu {
     NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+    NSInteger currentLogLevel = SKDebug_currentLogLevelIndex();
     for (NSMenuItem *item in menu.itemArray) {
         NSString *key = [item representedObject];
         if ([key isKindOfClass:[NSString class]] && [key length] > 0 && item.action == @selector(toggleBoolDefault:)) {
             BOOL on = [d boolForKey:key];
             item.state = on ? NSControlStateValueOn : NSControlStateValueOff;
+        } else if (item.action == @selector(setLogLevel:)) {
+            item.state = (item.tag == currentLogLevel) ? NSControlStateValueOn : NSControlStateValueOff;
+        } else if (item.action == @selector(toggleSaveSearchResults:)) {
+            item.state = SKDebug_vamlMenuItemState(@"saveSearchMenuItem", nil);
+        } else if (item.action == @selector(toggleSaveTranscription:)) {
+            item.state = SKDebug_vamlMenuItemState(@"saveTranscriptionMenuItem",
+                                                   @"FFVAMLSaveTranscription");
         }
     }
 }
@@ -401,6 +447,17 @@ static NSTextField *SKDebug_makeSectionLabel(NSString *text) {
     NSTextField *label = [NSTextField labelWithString:text];
     label.font = [NSFont boldSystemFontOfSize:13];
     label.textColor = [NSColor labelColor];
+    label.translatesAutoresizingMaskIntoConstraints = NO;
+    return label;
+}
+
+static NSTextField *SKDebug_makeNoteLabel(NSString *text) {
+    NSTextField *label = [NSTextField labelWithString:text];
+    label.font = [NSFont systemFontOfSize:11];
+    label.textColor = [NSColor secondaryLabelColor];
+    label.maximumNumberOfLines = 0;
+    label.lineBreakMode = NSLineBreakByWordWrapping;
+    label.preferredMaxLayoutWidth = 520.0;
     label.translatesAutoresizingMaskIntoConstraints = NO;
     return label;
 }
@@ -515,6 +572,13 @@ static NSView *SKDebug_buildDebugPrefsView(void) {
         [row addArrangedSubview:SKDebug_makeCheckbox(@"LogUI", @"Show In-App Log Panel")];
         [row addArrangedSubview:SKDebug_makeCheckbox(@"LogThread", @"Include Thread Info")];
         [root addArrangedSubview:row];
+        [root addArrangedSubview:SKDebug_makeNoteLabel(
+            @"SpliceKit hosts this panel inside FCP. It combines "
+             @"~/Library/Logs/SpliceKit/splicekit.log, live Final Cut Pro unified logs, "
+             @"and interaction tracing for menus, windows, popovers, and actions. "
+             @"Use the panel toggles to choose sources and dial unified-log noise from "
+             @"Important to Verbose. `LogThread` adds the current thread label to emitted "
+             @"SpliceKit lines.")];
     }
 
     // --- CFPreferences integer popups ---
@@ -590,12 +654,12 @@ static NSView *SKDebug_buildDebugPrefsView(void) {
         row.orientation = NSUserInterfaceLayoutOrientationHorizontal;
         row.spacing = 8;
 
-        NSButton *fpsStart = [NSButton buttonWithTitle:@"Start Framerate Monitor"
+        NSButton *fpsStart = [NSButton buttonWithTitle:@"Start HMD Framerate Monitor"
                                                 target:[SpliceKitDebugController shared]
                                                 action:@selector(startFramerateMonitor:)];
         [row addArrangedSubview:fpsStart];
 
-        NSButton *fpsStop = [NSButton buttonWithTitle:@"Stop Framerate Monitor"
+        NSButton *fpsStop = [NSButton buttonWithTitle:@"Stop HMD Framerate Monitor"
                                                target:[SpliceKitDebugController shared]
                                                action:@selector(stopFramerateMonitor:)];
         [row addArrangedSubview:fpsStop];
@@ -844,6 +908,7 @@ static NSMenuItem *SKDebug_buildDebugMenuItem(void) {
     // Log Level submenu (radio-style — current level always has a checkmark)
     NSMenu *logLevelMenu = [[NSMenu alloc] initWithTitle:@"Log Level"];
     logLevelMenu.autoenablesItems = YES;
+    logLevelMenu.delegate = [SpliceKitDebugController shared];
     NSArray *levels = SKDebug_logLevelNames();
     for (NSInteger i = 0; i < (NSInteger)levels.count; i++) {
         NSMenuItem *item = [[NSMenuItem alloc]
@@ -908,12 +973,15 @@ static NSMenuItem *SKDebug_buildDebugMenuItem(void) {
 
     // FCP-native developer actions
     NSMenu *fcpDevMenu = [[NSMenu alloc] initWithTitle:@"FCP Developer Tools"];
+    fcpDevMenu.autoenablesItems = YES;
+    fcpDevMenu.delegate = [SpliceKitDebugController shared];
     {
         NSMenuItem *cg = [[NSMenuItem alloc]
             initWithTitle:@"Toggle CG Context Draw"
                    action:@selector(toggleCGContextDraw:)
             keyEquivalent:@""];
         cg.target = ctl;
+        cg.enabled = NO;
         [fcpDevMenu addItem:cg];
 
         NSMenuItem *saveSearch = [[NSMenuItem alloc]
@@ -938,14 +1006,14 @@ static NSMenuItem *SKDebug_buildDebugMenuItem(void) {
 
     // Framerate monitor controls
     NSMenuItem *startFps = [[NSMenuItem alloc]
-        initWithTitle:@"Start Framerate Monitor"
+        initWithTitle:@"Start HMD Framerate Monitor"
                action:@selector(startFramerateMonitor:)
         keyEquivalent:@""];
     startFps.target = ctl;
     [root addItem:startFps];
 
     NSMenuItem *stopFps = [[NSMenuItem alloc]
-        initWithTitle:@"Stop Framerate Monitor"
+        initWithTitle:@"Stop HMD Framerate Monitor"
                action:@selector(stopFramerateMonitor:)
         keyEquivalent:@""];
     stopFps.target = ctl;
@@ -969,6 +1037,9 @@ BOOL SpliceKit_installDebugMenuBar(void) {
         if ([mainMenu indexOfItemWithTitle:@"Debug"] >= 0) {
             sDebugMenuInstalled = YES;
             success = YES;
+            if ([[NSUserDefaults standardUserDefaults] boolForKey:@"LogUI"]) {
+                [[SpliceKitLogPanel sharedPanel] showPanel];
+            }
             return;
         }
         NSMenuItem *debugItem = SKDebug_buildDebugMenuItem();
@@ -985,6 +1056,9 @@ BOOL SpliceKit_installDebugMenuBar(void) {
         sDebugMenuInstalled = YES;
         success = YES;
         SpliceKit_log(@"Debug menu bar installed");
+        if ([[NSUserDefaults standardUserDefaults] boolForKey:@"LogUI"]) {
+            [[SpliceKitLogPanel sharedPanel] showPanel];
+        }
     };
 
     if ([NSThread isMainThread]) work(); else dispatch_sync(dispatch_get_main_queue(), work);
@@ -998,6 +1072,7 @@ BOOL SpliceKit_uninstallDebugMenuBar(void) {
         NSMenu *mainMenu = [NSApp mainMenu];
         NSInteger idx = [mainMenu indexOfItemWithTitle:@"Debug"];
         if (idx >= 0) [mainMenu removeItemAtIndex:idx];
+        [[SpliceKitLogPanel sharedPanel] hidePanel];
         [SpliceKitDebugController shared].debugMenuItem = nil;
         sDebugMenuInstalled = NO;
         success = YES;

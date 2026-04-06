@@ -145,8 +145,8 @@ class BridgeConnection:
 
     def __init__(self):
         self.sock = None
-        self._buf = b""
-        self._id = 0
+        self._buf = b""  # leftover bytes from previous recv (newline-delimited protocol)
+        self._id = 0     # monotonically increasing JSON-RPC request ID
 
     def ensure_connected(self):
         if self.sock is None:
@@ -165,6 +165,7 @@ class BridgeConnection:
         Returns the result dict on success, or {"error": "..."} on failure.
         Handles connection errors gracefully — the next call will auto-reconnect.
         """
+        # Merge positional dict and kwargs so callers can use either style
         if params_dict is not None:
             if isinstance(params_dict, dict):
                 params = {**params_dict, **params}
@@ -178,26 +179,29 @@ class BridgeConnection:
         self._id += 1
         req = json.dumps({"jsonrpc": "2.0", "method": method, "params": params, "id": self._id})
         try:
+            # Protocol: newline-delimited JSON, one request/response per line
             self.sock.sendall(req.encode() + b"\n")
-            # Read until we get a complete line (newline-delimited JSON)
             while b"\n" not in self._buf:
                 chunk = self.sock.recv(16777216)  # 16MB — FCPXML responses can be large
                 if not chunk:
-                    self.sock = None
+                    self.sock = None  # server closed the connection, force reconnect next call
                     return {"error": "Connection closed by SpliceKit"}
                 self._buf += chunk
+            # Split off the first complete message, keep any leftovers for next call
             line, self._buf = self._buf.split(b"\n", 1)
             resp = json.loads(line)
             if "error" in resp:
                 return {"error": resp["error"]}
             return resp.get("result", {})
         except Exception as e:
-            self.sock = None
+            self.sock = None  # toss the broken socket so the next call reconnects
             return {"error": f"Bridge communication error: {e}"}
 
 
-bridge = BridgeConnection()
+bridge = BridgeConnection()  # singleton -- shared by all tool functions below
 
+
+# -- Helpers used by every tool function --
 
 def _err(r):
     """Check if a bridge response contains an error."""
@@ -372,6 +376,8 @@ def seek_to_time(seconds: float) -> str:
 # ============================================================
 # Timeline State (structured)
 # ============================================================
+# Read the timeline's current contents as structured data.
+# This is how the AI "sees" what's in the project.
 
 @mcp.tool()
 def get_timeline_clips(limit: int = 100) -> str:
@@ -384,6 +390,7 @@ def get_timeline_clips(limit: int = 100) -> str:
     if _err(r):
         return f"Error: {r.get('error', r)}"
 
+    # Build a human-readable table -- the AI reads this to understand the timeline
     lines = []
     lines.append(f"Sequence: {r.get('sequenceName', '?')}")
     pt = r.get("playheadTime", {})
@@ -395,6 +402,7 @@ def get_timeline_clips(limit: int = 100) -> str:
 
     items = r.get("items", [])
     if items:
+        # Two table formats: with start/end times if available, otherwise just duration + lane
         has_pos = any("startTime" in i for i in items)
         if has_pos:
             lines.append(f"\n{'Idx':<4} {'Class':<30} {'Name':<20} {'Start':>8} {'End':>8} {'Duration':>10} {'Sel':>4} {'Handle'}")
@@ -549,6 +557,7 @@ def call_method_with_args(target: str, selector: str, args: str = "[]",
     except json.JSONDecodeError as e:
         return f"Invalid args JSON: {e}"
 
+    # Safety rail: these selectors crash FCP when the error: out-pointer is nil
     unsafe_nil_error_selectors = {
         "actionTrimDuration:forEdits:isDelta:error:",
         "operationTrimDuration:forEdits:isDelta:error:",
@@ -631,6 +640,7 @@ def set_object_property(handle: str, key: str, value: str, value_type: str = "st
     value: the value to set (as string, will be converted based on value_type)
     value_type: string, int, double, bool, nil
     """
+    # Convert the string value to the correct Python type before sending to the bridge
     val_spec = {"type": value_type, "value": value}
     if value_type == "int":
         val_spec["value"] = int(value)
@@ -696,7 +706,8 @@ def generate_fcpxml(event_name: str = "SpliceKit Event", project_name: str = "Sp
     except json.JSONDecodeError:
         item_list = []
 
-    # Rational frame rate mapping (numerator/denominator for exact frame boundaries)
+    # FCPXML uses rational time (e.g. "100/2400s") to avoid floating-point frame drift.
+    # This maps user-friendly frame rates to numerator/denominator pairs.
     fr_map = {
         "23.976": (1001, 24000), "24": (100, 2400), "25": (100, 2500),
         "29.97": (1001, 30000), "30": (100, 3000), "48": (100, 4800),
@@ -710,18 +721,18 @@ def generate_fcpxml(event_name: str = "SpliceKit Event", project_name: str = "Sp
         frames = round(seconds * fd_den / fd_num)
         return f"{frames * fd_num}/{fd_den}s"
 
-    # Separate spine items from markers
+    # Spine items go inside <spine> (the primary storyline), markers attach to the sequence
     spine_items = [i for i in item_list if i.get("type") in ("gap", "title", "transition", None)]
     markers = [i for i in item_list if i.get("type") == "marker"]
 
     if not spine_items:
         spine_items = [{"type": "gap", "duration": 10.0}]
 
-    # Build spine XML - respecting DTD child ordering
+    # Build spine XML -- items must follow Apple's DTD child ordering
     spine_xml = ""
-    offset_seconds = 0.0
+    offset_seconds = 0.0  # running offset for placing items sequentially
     total_seconds = 0.0
-    ts_counter = 1
+    ts_counter = 1        # unique ID for text-style-def elements
 
     for item in spine_items:
         itype = item.get("type", "gap")
@@ -820,6 +831,8 @@ def get_clip_effects(handle: str = "") -> str:
 # ============================================================
 # Batch Operations
 # ============================================================
+# Lets the AI chain many small edits in one round-trip instead
+# of making a separate tool call for each step.
 
 @mcp.tool()
 def batch_timeline_actions(actions: str) -> str:
@@ -875,6 +888,8 @@ def batch_timeline_actions(actions: str) -> str:
 # ============================================================
 # Timeline Analysis
 # ============================================================
+# Computes statistics the AI can use to understand the timeline
+# before suggesting edits (pacing, flash frames, etc).
 
 @mcp.tool()
 def analyze_timeline() -> str:
@@ -889,11 +904,12 @@ def analyze_timeline() -> str:
     total_dur = r.get("duration", {}).get("seconds", 0)
     playhead = r.get("playheadTime", {}).get("seconds", 0)
 
-    # Analyze clips
+    # Split items into clips vs transitions for separate stats
     clips = [i for i in items if "Transition" not in i.get("class", "")]
     transitions = [i for i in items if "Transition" in i.get("class", "")]
     durations = [i.get("duration", {}).get("seconds", 0) for i in clips]
 
+    # Flag potential problems: flash frames (<0.5s) and overly long shots (>30s)
     short_clips = [i for i in clips if i.get("duration", {}).get("seconds", 0) < 0.5]
     long_clips = [i for i in clips if i.get("duration", {}).get("seconds", 0) > 30]
 
@@ -901,7 +917,8 @@ def analyze_timeline() -> str:
     min_dur = min(durations) if durations else 0
     max_dur = max(durations) if durations else 0
 
-    # Pacing analysis (quartiles)
+    # Pacing: compare average clip length in the first vs last quarter
+    # to detect if the edit is accelerating or decelerating over time
     pacing = ""
     if len(durations) >= 4:
         q = len(durations) // 4
@@ -950,6 +967,8 @@ def analyze_timeline() -> str:
 # ============================================================
 # SRT/Transcript to Markers
 # ============================================================
+# Bulk marker placement. The bridge handles seeking internally
+# so we don't have to move the playhead for each marker.
 
 @mcp.tool()
 def add_markers_at_times(markers: str) -> str:
@@ -997,16 +1016,16 @@ def import_srt_as_markers(srt_content: str) -> str:
     """
     import re
 
-    # Parse SRT
+    # Parse SRT format: sequential blocks of "index / timestamp / text"
     blocks = re.split(r'\n\n+', srt_content.strip())
     marker_list = []
 
     for block in blocks:
         lines = block.strip().split('\n')
-        if len(lines) < 3:
+        if len(lines) < 3:  # need at least: index line, timestamp line, text line
             continue
 
-        # Parse timestamp line: 00:00:05,000 --> 00:00:10,000
+        # We only use the start time -- FCP markers are points, not ranges
         ts_match = re.match(r'(\d{2}):(\d{2}):(\d{2})[,.](\d{3})', lines[1])
         if not ts_match:
             continue
@@ -1038,6 +1057,7 @@ def import_srt_as_markers(srt_content: str) -> str:
 # ============================================================
 # Library & Project Management
 # ============================================================
+# Thin wrappers around FCP's FFLibraryDocument class methods.
 
 @mcp.tool()
 def get_active_libraries() -> str:
@@ -1169,6 +1189,7 @@ def explore_class(class_name: str) -> str:
             lines.append(f"\nClass methods:")
             for name in sorted(r.get("classMethods", {}).keys()):
                 lines.append(f"  + {name}")
+        # Surface the most interesting methods -- the ones an AI is likely to want to call
         keywords = ['get', 'set', 'current', 'active', 'selected', 'add', 'remove',
                     'create', 'delete', 'open', 'close', 'name', 'items', 'clip', 'effect', 'marker']
         notable = [m for m in sorted(r.get("instanceMethods", {}).keys()) if any(k in m.lower() for k in keywords)]
@@ -1197,6 +1218,8 @@ def search_methods(class_name: str, keyword: str) -> str:
     return f"Methods matching '{keyword}' on {class_name} ({len(lines)}):\n" + "\n".join(lines)
 
 
+# -- Low-level escape hatches for arbitrary ObjC calls --
+
 @mcp.tool()
 def call_method(class_name: str, selector: str, class_method: bool = True) -> str:
     """Call a zero-argument ObjC method. For methods WITH arguments, use call_method_with_args instead."""
@@ -1208,7 +1231,7 @@ def call_method(class_name: str, selector: str, class_method: bool = True) -> st
 
 @mcp.tool()
 def raw_call(method: str, params: str = "{}") -> str:
-    """Send a raw JSON-RPC call to SpliceKit."""
+    """Send a raw JSON-RPC call to SpliceKit. Last resort when no other tool fits."""
     try:
         p = json.loads(params)
     except json.JSONDecodeError as e:
@@ -1447,6 +1470,8 @@ def set_silence_threshold(threshold: float) -> str:
 # ============================================================
 # Effects (video filters, generators, titles, audio)
 # ============================================================
+# Enumerate FCP's installed effects and apply them to clips.
+# FCP organizes effects by type (filter, generator, title, audio).
 
 @mcp.tool()
 def list_effects(type: str = "filter", filter: str = "") -> str:
@@ -1516,6 +1541,8 @@ def apply_effect(name: str = "", effectID: str = "") -> str:
 # ============================================================
 # Transitions
 # ============================================================
+# FCP has 376+ built-in transitions. These tools enumerate them
+# and apply them at edit points (between adjacent clips).
 
 @mcp.tool()
 def list_transitions(filter: str = "") -> str:
@@ -1596,6 +1623,9 @@ def apply_transition(name: str = "", effectID: str = "", freeze_extend: bool = T
 # ============================================================
 # Command Palette
 # ============================================================
+# A floating search palette (like VS Code's Cmd+Shift+P) that
+# can also pipe queries through Apple Intelligence for natural
+# language editing commands.
 
 @mcp.tool()
 def show_command_palette() -> str:
@@ -1686,7 +1716,7 @@ def ai_command(query: str) -> str:
     if not actions:
         return "No actions determined from query."
 
-    # Execute each action
+    # Apple Intelligence returns a list of FCP actions — execute them in order
     results = []
     for act in actions:
         act_type = act.get("type", "timeline")
@@ -1706,6 +1736,8 @@ def ai_command(query: str) -> str:
 # ============================================================
 # Menu Execute (universal menu access)
 # ============================================================
+# Fallback for anything that doesn't have a dedicated tool.
+# Walks FCP's NSMenu hierarchy by title to reach any menu item.
 
 @mcp.tool()
 def execute_menu_command(menu_path: list[str]) -> str:
@@ -1748,6 +1780,8 @@ def list_menus(menu: str = "", depth: int = 2) -> str:
 # ============================================================
 # Inspector Properties (read/write clip properties)
 # ============================================================
+# Reads/writes FCP's internal effect parameter channels directly,
+# bypassing the inspector UI. Works on transform, compositing, audio, crop.
 
 @mcp.tool()
 def get_inspector_properties(property: str = "all") -> str:
@@ -1803,6 +1837,7 @@ def set_inspector_property(property: str, value: float | str | bool) -> str:
 # ============================================================
 # View/Panel Toggles
 # ============================================================
+# Show/hide FCP's various panels and viewers.
 
 @mcp.tool()
 def toggle_panel(panel: str) -> str:
@@ -1840,6 +1875,7 @@ def set_workspace(workspace: str) -> str:
 # ============================================================
 # Tool Selection
 # ============================================================
+# Switch the active editing tool (blade, trim, range, etc).
 
 @mcp.tool()
 def select_tool(tool: str) -> str:
@@ -1858,6 +1894,8 @@ def select_tool(tool: str) -> str:
 # ============================================================
 # Roles Management
 # ============================================================
+# Roles control how clips appear in the timeline index and
+# how they're grouped during export (e.g. separate Dialogue/Music stems).
 
 @mcp.tool()
 def assign_role(type: str, role: str) -> str:
@@ -1876,6 +1914,7 @@ def assign_role(type: str, role: str) -> str:
 # ============================================================
 # Share/Export
 # ============================================================
+# Triggers FCP's share destinations (Export File, YouTube, etc).
 
 @mcp.tool()
 def share_project(destination: str = "") -> str:
@@ -1898,6 +1937,7 @@ def share_project(destination: str = "") -> str:
 # ============================================================
 # Project/Library/Event Management
 # ============================================================
+# Create new projects, events, and libraries via FCP's internal APIs.
 
 @mcp.tool()
 def create_project() -> str:
@@ -1929,6 +1969,7 @@ def create_library() -> str:
 # ============================================================
 # Playhead Position & Monitoring
 # ============================================================
+# Query current playhead position, frame rate, and play state.
 
 @mcp.tool()
 def get_playhead_position() -> str:
@@ -1952,6 +1993,9 @@ def get_playhead_position() -> str:
 # ============================================================
 # Dialog Detection & Interaction
 # ============================================================
+# FCP pops up modal dialogs for various operations (project settings,
+# export, missing media, etc). These tools detect and interact with
+# them so the AI can handle dialogs without human intervention.
 
 @mcp.tool()
 def detect_dialog() -> str:
@@ -2070,6 +2114,7 @@ def dismiss_dialog(action: str = "default") -> str:
 # ============================================================
 # Viewer Zoom
 # ============================================================
+# Get/set the canvas zoom level. 0.0 = fit-to-window.
 
 @mcp.tool()
 def get_viewer_zoom() -> str:
@@ -2102,6 +2147,7 @@ def set_viewer_zoom(zoom: float) -> str:
 # ============================================================
 # SpliceKit Options
 # ============================================================
+# Runtime configuration for SpliceKit's own behavioral tweaks.
 
 @mcp.tool()
 def get_bridge_options() -> str:
@@ -2138,6 +2184,9 @@ def set_bridge_option(option: str, enabled: bool) -> str:
 # ============================================================
 # Beat Detection (Any Audio File)
 # ============================================================
+# Runs an external Swift tool (not in-process, because AVFoundation
+# deadlocks inside FCP's hardened runtime). Returns beat/bar/section
+# timestamps for syncing video cuts to music.
 
 @mcp.tool()
 def detect_beats(file_path: str, sensitivity: float = 0.5, min_bpm: float = 60.0, max_bpm: float = 200.0) -> str:
@@ -2158,7 +2207,7 @@ def detect_beats(file_path: str, sensitivity: float = 0.5, min_bpm: float = 60.0
     Returns beat timestamps, bar timestamps, section timestamps, BPM, and duration.
     """
     import subprocess, os
-    # Run beat-detector as an external process (AVFoundation deadlocks inside FCP)
+    # Search common install locations for the beat-detector binary
     tool_paths = [
         os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "build", "beat-detector"),
         os.path.expanduser("~/Applications/SpliceKit/tools/beat-detector"),
@@ -2190,6 +2239,8 @@ def detect_beats(file_path: str, sensitivity: float = 0.5, min_bpm: float = 60.0
 # ============================================================
 # FlexMusic (Dynamic Soundtrack)
 # ============================================================
+# FCP's built-in AI music engine. Songs can stretch/shrink to
+# any duration by rearranging their musical sections dynamically.
 
 @mcp.tool()
 def flexmusic_list_songs(filter: str = "") -> str:
@@ -2285,6 +2336,9 @@ def flexmusic_add_to_timeline(song_uid: str, duration_seconds: float = 0) -> str
 # ============================================================
 # Montage Maker (Auto-Edit to Beat)
 # ============================================================
+# End-to-end pipeline: analyze clips -> plan cuts to music beats
+# -> assemble a montage timeline. Can run as individual steps
+# or as a single montage_auto() call.
 
 @mcp.tool()
 def montage_analyze_clips(event_name: str = "") -> str:
@@ -2377,6 +2431,9 @@ def montage_auto(song_uid: str = "", event_name: str = "", style: str = "bar", p
 # ============================================================
 # Debug & Diagnostics
 # ============================================================
+# Exposes FCP's hidden internal debug flags (TLK visual overlays,
+# ProAppSupport logging, CFPreferences keys) and SpliceKit's own
+# debugging toolkit (breakpoints, tracing, eval, crash handling).
 
 @mcp.tool()
 def debug_get_config() -> str:
@@ -2385,7 +2442,7 @@ def debug_get_config() -> str:
     Returns the current values of:
     - Timeline debug flags (TLK*): visual overlays, logging, performance monitors
     - CFPreferences debug flags: video decoder log level, frame drop logging, GPU logging
-    - ProAppSupport log settings: log level, categories, UI toggle, thread info
+    - ProAppSupport log settings: log level, categories, in-app panel visibility, thread info
     - FCP behavior flags: gap coalescing, snapping, skimming overrides
 
     Use this to see what debug options are currently active before changing them.
@@ -2437,8 +2494,8 @@ def debug_set_config(key: str, value: str = "true") -> str:
 
             ProAppSupport log system:
               LogLevel (trace/debug/info/warning/error/failure),
-              LogUI (shows in-app log viewer),
-              LogThread (include thread info),
+              LogUI (show/hide the in-app SpliceKit log panel),
+              LogThread (include thread info in emitted SpliceKit log lines),
               LogCategory (bitmask)
 
             FCP behavior overrides:
@@ -2447,7 +2504,7 @@ def debug_set_config(key: str, value: str = "true") -> str:
         value: Value to set. "true"/"false" for bools, integer string for int keys,
                or level name for LogLevel (trace/debug/info/warning/error/failure).
     """
-    # Parse value
+    # Coerce the string value to the right type -- the bridge expects bool/int/string
     if value.lower() in ("true", "yes", "1"):
         parsed = True
     elif value.lower() in ("false", "no", "0"):
@@ -2456,7 +2513,7 @@ def debug_set_config(key: str, value: str = "true") -> str:
         try:
             parsed = int(value)
         except ValueError:
-            parsed = value  # pass as string (for LogLevel names etc.)
+            parsed = value  # pass as string (for LogLevel names like "trace", "debug", etc.)
 
     r = bridge.call("debug.setConfig", key=key, value=parsed)
     if _err(r):
@@ -2531,6 +2588,8 @@ def debug_stop_framerate_monitor() -> str:
         return f"Error: {r.get('error', r)}"
     return _fmt(r)
 
+
+# -- Runtime metadata export (for reverse engineering / IDA Pro) --
 
 @mcp.tool()
 def dump_runtime_metadata(binary: str = "", classes_only: bool = False) -> str:
@@ -2637,7 +2696,8 @@ def get_notification_names(binary: str = "") -> str:
 # ---------------------------------------------------------------------------
 # Debug: Breakpoints
 # ---------------------------------------------------------------------------
-
+# True breakpoints that freeze FCP mid-execution. The JSON-RPC server
+# stays alive on a background thread so you can inspect state while paused.
 
 @mcp.tool()
 def debug_breakpoint(action: str = "list", class_name: str = "", selector: str = "",
@@ -2706,7 +2766,8 @@ def debug_breakpoint(action: str = "list", class_name: str = "", selector: str =
 # ---------------------------------------------------------------------------
 # Debug: Method Tracing
 # ---------------------------------------------------------------------------
-
+# Non-blocking alternative to breakpoints. Swizzles methods to log calls
+# without pausing. Good for understanding call patterns and frequencies.
 
 @mcp.tool()
 def debug_trace_method(action: str = "list", class_name: str = "", selector: str = "",
@@ -2758,7 +2819,8 @@ def debug_trace_method(action: str = "list", class_name: str = "", selector: str
 # ---------------------------------------------------------------------------
 # Debug: Property Watching (KVO)
 # ---------------------------------------------------------------------------
-
+# Uses ObjC Key-Value Observing to fire events whenever a property changes.
+# Replaces hardware watchpoints -- works on any KVO-compliant property.
 
 @mcp.tool()
 def debug_watch(action: str = "list", handle: str = "", class_name: str = "",
@@ -2796,7 +2858,8 @@ def debug_watch(action: str = "list", handle: str = "", class_name: str = "",
 # ---------------------------------------------------------------------------
 # Debug: Crash Handler
 # ---------------------------------------------------------------------------
-
+# Catches NSExceptions and Unix signals before the process dies,
+# so you get a stack trace instead of a silent crash.
 
 @mcp.tool()
 def debug_crash_handler(action: str = "install") -> str:
@@ -2822,7 +2885,7 @@ def debug_crash_handler(action: str = "install") -> str:
 # ---------------------------------------------------------------------------
 # Debug: Thread Inspection
 # ---------------------------------------------------------------------------
-
+# Lists all ~45 threads in FCP's process with CPU usage via Mach APIs.
 
 @mcp.tool()
 def debug_threads(detailed: bool = False) -> str:
@@ -2849,7 +2912,7 @@ def debug_threads(detailed: bool = False) -> str:
 # ---------------------------------------------------------------------------
 # Debug: Expression Evaluation
 # ---------------------------------------------------------------------------
-
+# Like lldb's `po` command. Walks ObjC property chains at runtime.
 
 @mcp.tool()
 def debug_eval(expression: str = "", chain: str = "", target: str = "",
@@ -2891,7 +2954,7 @@ def debug_eval(expression: str = "", chain: str = "", target: str = "",
 # ---------------------------------------------------------------------------
 # Debug: Hot Plugin Loading
 # ---------------------------------------------------------------------------
-
+# dlopen/dlclose for live-patching FCP without restarting.
 
 @mcp.tool()
 def debug_load_plugin(action: str = "list", path: str = "") -> str:
@@ -2927,7 +2990,8 @@ def debug_load_plugin(action: str = "list", path: str = "") -> str:
 # ---------------------------------------------------------------------------
 # Debug: Notification Observation
 # ---------------------------------------------------------------------------
-
+# Subscribe to NSNotificationCenter events. FCP posts 337+ named
+# notifications internally -- this lets you see them in real time.
 
 @mcp.tool()
 def debug_observe_notification(action: str = "list", name: str = "",
@@ -2969,7 +3033,10 @@ def debug_observe_notification(action: str = "list", name: str = "",
 # ---------------------------------------------------------------------------
 # Direct Timeline Actions (parameterized Flexo methods)
 # ---------------------------------------------------------------------------
-
+# Unlike timeline_action() which dispatches through the responder chain
+# with no arguments, these call Flexo's action* methods directly with
+# real parameters (rates, durations, flags, etc). More powerful but
+# requires knowing which parameters each action needs.
 
 @mcp.tool()
 def direct_timeline_action(action: str = "", selector: str = "",
@@ -3060,6 +3127,8 @@ def direct_timeline_action(action: str = "", selector: str = "",
 
         selector: Raw ObjC selector for fallback (e.g. "actionValidateAndRepair:validateMode:error:")
     """
+    # Only include params that were explicitly set -- the bridge uses their
+    # presence/absence to determine which ObjC selector variant to call
     params = {}
     if action:
         params["action"] = action
@@ -3128,11 +3197,13 @@ def direct_timeline_action(action: str = "", selector: str = "",
 
 
 # ---------------------------------------------------------------------------
-# Missing endpoints: beats, browser, pasteboard, seek, stabilize, swizzle,
-# titles, transcript engine
+# Additional tools: browser, pasteboard import, seek, stabilize, titles,
+# transcript engine selection
 # ---------------------------------------------------------------------------
 
 
+# This is the bridge-side beat detection (delegates to the dylib).
+# The earlier detect_beats() runs an external subprocess instead.
 @mcp.tool()
 def detect_beats(file_path: str, sensitivity: float = 0.5,
                  min_bpm: int = 0, max_bpm: int = 0) -> str:
@@ -3287,5 +3358,273 @@ def set_transcript_engine(engine: str) -> str:
     return _fmt(r)
 
 
+# ============================================================
+# Social Media Captions
+# ============================================================
+# Word-by-word highlighted, animated caption titles overlaid
+# on the timeline as a connected storyline. Uses the Parakeet
+# transcript engine for word timing, then generates styled
+# FCPXML title elements and imports via pasteboard.
+
+
+@mcp.tool()
+def open_captions(file_url: str = "", style: str = "") -> str:
+    """Open the social captions panel and start transcribing the timeline.
+
+    Transcribes timeline audio using Parakeet (word-level timing), then lets
+    you choose a visual style and generate social-media-style captions
+    (word-by-word highlighted, animated) as FCPXML title clips.
+
+    Args:
+        file_url: Optional path to a specific media file to transcribe.
+                  If empty, transcribes all clips on the current timeline.
+        style: Optional preset ID to apply (e.g. "bold_pop", "neon_glow").
+               Use get_caption_styles() to see all available presets.
+
+    Transcription is async — use get_caption_state() to check progress.
+    """
+    params = {}
+    if file_url:
+        params["fileURL"] = file_url
+    if style:
+        params["style"] = style
+    r = bridge.call("captions.open", **params)
+    if _err(r):
+        return f"Error: {r.get('error', r)}"
+    return _fmt(r)
+
+
+@mcp.tool()
+def close_captions() -> str:
+    """Close the social captions panel."""
+    r = bridge.call("captions.close")
+    if _err(r):
+        return f"Error: {r.get('error', r)}"
+    return "Captions panel closed."
+
+
+@mcp.tool()
+def get_caption_state() -> str:
+    """Get the current caption panel state.
+
+    Returns status, word count, segment count, current style, and segment list.
+    Use after open_captions() to check transcription progress.
+    """
+    r = bridge.call("captions.getState")
+    if _err(r):
+        return f"Error: {r.get('error', r)}"
+
+    lines = [f"Status: {r.get('status', 'unknown')}"]
+    lines.append(f"Words: {r.get('wordCount', 0)}")
+    lines.append(f"Segments: {r.get('segmentCount', 0)}")
+
+    if r.get('style'):
+        s = r['style']
+        lines.append(f"\nStyle: {s.get('name', 'Custom')}")
+        lines.append(f"  Font: {s.get('font', '?')} {s.get('fontSize', '?')}pt")
+        lines.append(f"  Position: {s.get('position', '?')}")
+        lines.append(f"  Animation: {s.get('animation', 'none')}")
+        lines.append(f"  Word highlight: {s.get('wordByWordHighlight', False)}")
+
+    if r.get('segments'):
+        lines.append(f"\nSegments ({len(r['segments'])}):")
+        for seg in r['segments'][:20]:
+            lines.append(f"  [{seg['index']:3d}] {seg['startTime']:.2f}s - "
+                         f"{seg['endTime']:.2f}s \"{seg['text']}\"")
+        if len(r['segments']) > 20:
+            lines.append(f"  ... and {len(r['segments']) - 20} more")
+
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def get_caption_styles() -> str:
+    """List all available caption style presets.
+
+    Returns preset IDs and their visual characteristics (font, colors, animation).
+    Use set_caption_style() or generate_captions() with a preset ID to apply one.
+    """
+    r = bridge.call("captions.getStyles")
+    if _err(r):
+        return f"Error: {r.get('error', r)}"
+
+    lines = [f"Available caption styles ({r.get('count', 0)}):"]
+    for s in r.get('styles', []):
+        lines.append(f"\n  {s['presetID']}: \"{s['name']}\"")
+        lines.append(f"    Font: {s.get('font', '?')} {s.get('fontSize', '?')}pt")
+        hl = s.get('highlightColor', 'none')
+        lines.append(f"    Text: {s.get('textColor', '?')}  Highlight: {hl}")
+        lines.append(f"    Animation: {s.get('animation', 'none')}  Position: {s.get('position', 'bottom')}")
+        lines.append(f"    Caps: {s.get('allCaps', False)}  Word highlight: {s.get('wordByWordHighlight', True)}")
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def set_caption_style(preset_id: str = "", font: str = "", font_size: float = 0,
+                      text_color: str = "", highlight_color: str = "",
+                      outline_color: str = "", outline_width: float = -1,
+                      position: str = "", animation: str = "",
+                      word_highlight: bool = True, all_caps: bool = False) -> str:
+    """Set the caption style, either from a preset or with custom values.
+
+    Args:
+        preset_id: Preset name (e.g. "bold_pop", "neon_glow", "clean_minimal",
+                   "karaoke", "social_bold"). Use get_caption_styles() for full list.
+        font: Font family name (e.g. "Futura-Bold", "Impact", "Avenir-Heavy")
+        font_size: Size in points (20-120)
+        text_color: RGBA as "R G B A" (0-1 floats), e.g. "1 1 1 1" for white
+        highlight_color: RGBA for active word highlight
+        outline_color: RGBA for text outline/stroke
+        outline_width: Stroke width (0-6)
+        position: "bottom", "center", "top"
+        animation: "none", "fade", "pop", "slide_up", "typewriter", "bounce"
+        word_highlight: Enable word-by-word karaoke highlighting (default True)
+        all_caps: Convert text to uppercase
+
+    If preset_id is given, it's used as the base and other params override it.
+    """
+    params = {}
+    if preset_id:
+        params["presetID"] = preset_id
+    if font:
+        params["font"] = font
+    if font_size > 0:
+        params["fontSize"] = font_size
+    if text_color:
+        params["textColor"] = text_color
+    if highlight_color:
+        params["highlightColor"] = highlight_color
+    if outline_color:
+        params["outlineColor"] = outline_color
+    if outline_width >= 0:
+        params["outlineWidth"] = outline_width
+    if position:
+        params["position"] = position
+    if animation:
+        params["animation"] = animation
+    params["wordByWordHighlight"] = word_highlight
+    params["allCaps"] = all_caps
+
+    r = bridge.call("captions.setStyle", **params)
+    if _err(r):
+        return f"Error: {r.get('error', r)}"
+    return _fmt(r)
+
+
+@mcp.tool()
+def set_caption_grouping(mode: str = "social", max_words: int = 3,
+                         max_chars: int = 20, max_seconds: float = 3.0) -> str:
+    """Configure how words are grouped into caption segments.
+
+    Args:
+        mode: "social" (2-3 words, 0.5s silence break — best for TikTok/Reels),
+              "words" (by word count), "sentence" (by punctuation),
+              "time" (by duration), "chars" (by character count)
+        max_words: Max words per segment (when mode="words", default 3)
+        max_chars: Max characters per segment (when mode="chars", default 20)
+        max_seconds: Max duration per segment (when mode="time", default 3.0)
+    """
+    r = bridge.call("captions.setGrouping",
+                    mode=mode, maxWords=max_words,
+                    maxChars=max_chars, maxSeconds=max_seconds)
+    if _err(r):
+        return f"Error: {r.get('error', r)}"
+    return _fmt(r)
+
+
+@mcp.tool()
+def generate_captions(style: str = "", position: str = "center",
+                      animation: str = "pop", word_highlight: bool = True,
+                      max_words: int = 3, all_caps: bool = True) -> str:
+    """Generate social-media-style captions and add them to the timeline.
+
+    One-shot tool: uses the current transcription (or existing words),
+    applies the style, generates FCPXML title clips, and imports them
+    as a connected storyline above the primary storyline.
+
+    Requires words to be loaded first via open_captions() or set_caption_words().
+
+    Args:
+        style: Preset ID (e.g. "bold_pop", "social_bold"). Empty = current style.
+        position: "bottom", "center", "top"
+        animation: "none", "fade", "pop", "slide_up", "typewriter", "bounce"
+        word_highlight: Word-by-word karaoke highlighting (default True)
+        max_words: Max words per caption segment (default 5)
+        all_caps: Convert text to uppercase
+
+    Returns the number of caption clips generated and import status.
+    """
+    params = {}
+    if style:
+        params["style"] = style
+    params["position"] = position
+    params["animation"] = animation
+    params["wordByWordHighlight"] = word_highlight
+    params["maxWords"] = max_words
+    params["allCaps"] = all_caps
+
+    r = bridge.call("captions.generate", **params)
+    if _err(r):
+        return f"Error: {r.get('error', r)}"
+    return _fmt(r)
+
+
+@mcp.tool()
+def export_captions_srt(path: str) -> str:
+    """Export the current captions as an SRT subtitle file.
+
+    Args:
+        path: Output file path (e.g. "/Users/you/Desktop/captions.srt")
+
+    Requires captions to have been transcribed first.
+    """
+    r = bridge.call("captions.exportSRT", path=path)
+    if _err(r):
+        return f"Error: {r.get('error', r)}"
+    return _fmt(r)
+
+
+@mcp.tool()
+def export_captions_txt(path: str) -> str:
+    """Export the current captions as plain text.
+
+    Args:
+        path: Output file path (e.g. "/Users/you/Desktop/captions.txt")
+    """
+    r = bridge.call("captions.exportTXT", path=path)
+    if _err(r):
+        return f"Error: {r.get('error', r)}"
+    return _fmt(r)
+
+
+@mcp.tool()
+def set_caption_words(words: str) -> str:
+    """Manually set caption words with timing (bypasses transcription).
+
+    Args:
+        words: JSON array of word objects, each with:
+            {"text": "hello", "startTime": 1.5, "duration": 0.3}
+
+    Use this when you already have word-level timing (e.g. from an SRT file
+    or external transcription service).
+
+    Example:
+        set_caption_words('[
+            {"text": "Hello", "startTime": 0.5, "duration": 0.3},
+            {"text": "world", "startTime": 0.9, "duration": 0.4}
+        ]')
+    """
+    try:
+        word_list = json.loads(words)
+    except json.JSONDecodeError as e:
+        return f"Invalid JSON: {e}"
+
+    r = bridge.call("captions.setWords", words=word_list)
+    if _err(r):
+        return f"Error: {r.get('error', r)}"
+    return _fmt(r)
+
+
+# MCP servers communicate over stdio -- the AI tool framework handles the transport
 if __name__ == "__main__":
     mcp.run(transport="stdio")

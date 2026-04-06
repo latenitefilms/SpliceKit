@@ -1,5 +1,5 @@
 """
-ida_objc_types.py — Parse ObjC type encoding strings into C type declarations.
+ida_objc_types.py -- Parse ObjC type encoding strings into C type declarations.
 
 ObjC runtime type encodings are compact strings like:
     @"NSArray"          -> NSArray *
@@ -20,7 +20,8 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 
-# Primitive type map: encoding char -> (C type, size in bytes on arm64)
+# Primitive type map: single-char encoding -> (C type, size in bytes on arm64).
+# See Apple docs: "Type Encodings" in the ObjC Runtime Programming Guide.
 PRIMITIVE_TYPES = {
     "c": ("char", 1),
     "i": ("int", 4),
@@ -44,7 +45,8 @@ PRIMITIVE_TYPES = {
     "@?": ("id /* block */", 8),
 }
 
-# IDA-safe type mappings (IDA's C parser doesn't know ObjC types)
+# IDA-safe type mappings -- IDA's C parser doesn't know ObjC types,
+# so we map them to plain C equivalents for SetType().
 IDA_TYPE_MAP = {
     "id": "void *",
     "id /* block */": "void *",
@@ -53,7 +55,8 @@ IDA_TYPE_MAP = {
     "BOOL": "unsigned char",
 }
 
-# Well-known struct definitions so we don't re-create them
+# Well-known struct definitions -- skip re-creating these from encodings
+# since their field names are standardized across Apple frameworks.
 KNOWN_STRUCTS = {
     "CGPoint": "struct CGPoint { double x; double y; };",
     "CGSize": "struct CGSize { double width; double height; };",
@@ -82,7 +85,11 @@ class ParsedType:
 
 
 class ObjCTypeParser:
-    """Stateful parser for ObjC type encoding strings."""
+    """Stateful parser for ObjC type encoding strings.
+
+    Accumulates struct definitions as it parses, so you can call parse()
+    many times and then get_struct_definitions() to collect them all.
+    """
 
     def __init__(self):
         self.discovered_structs: dict[str, str] = {}  # name -> C definition
@@ -99,7 +106,8 @@ class ObjCTypeParser:
         """Parse a full method type encoding like 'v24@0:8@16'.
 
         Returns (return_type, [param_types]).
-        The first two params are always (id self, SEL _cmd) — included in the list.
+        The first two params are always (id self, SEL _cmd) -- included in the list.
+        The numbers between types are stack frame offsets (ignored here).
         """
         if not encoding:
             return ParsedType(c_type="void"), []
@@ -108,7 +116,7 @@ class ObjCTypeParser:
         types = []
 
         while pos < len(encoding):
-            # Skip stack frame size numbers
+            # Skip stack frame offset numbers between types
             while pos < len(encoding) and encoding[pos].isdigit():
                 pos += 1
             if pos >= len(encoding):
@@ -168,7 +176,11 @@ class ObjCTypeParser:
         return {**KNOWN_STRUCTS, **self.discovered_structs}
 
     def _parse_one(self, s: str, pos: int) -> tuple[int, ParsedType]:
-        """Parse one type at position. Returns (new_pos, ParsedType)."""
+        """Parse one type at position. Returns (new_pos, ParsedType).
+
+        This is the recursive core -- handles pointers, objects, structs,
+        unions, arrays, bitfields, const/in/out qualifiers, and primitives.
+        """
         if pos >= len(s):
             return pos, ParsedType(c_type="void")
 
@@ -231,7 +243,7 @@ class ObjCTypeParser:
             inner.c_type = f"const {inner.c_type}"
             return inner_pos, inner
 
-        # in/out/inout/bycopy/byref/oneway qualifiers
+        # in/out/inout/bycopy/byref/oneway qualifiers -- just skip them
         if ch in "nNoORV":
             pos += 1
             return self._parse_one(s, pos)
@@ -249,7 +261,11 @@ class ObjCTypeParser:
         return pos + 1, ParsedType(c_type=f"/* unknown:{ch} */ int")
 
     def _parse_struct(self, s: str, pos: int) -> tuple[int, ParsedType]:
-        """Parse {StructName=field1field2...} or {StructName}."""
+        """Parse {StructName=field1field2...} or {StructName}.
+
+        Opaque structs (no '=') just produce 'struct Name' with no fields.
+        Full structs recursively parse each field type and generate a C definition.
+        """
         assert s[pos] == "{"
         pos += 1
 
@@ -266,7 +282,7 @@ class ObjCTypeParser:
             struct_name = f"anon_struct_{name_start}"
 
         if pos < len(s) and s[pos] == "}":
-            # Opaque struct: {Name}
+            # Opaque struct: {Name} -- no field info available
             return pos + 1, ParsedType(
                 c_type=f"struct {struct_name}", is_struct=True,
                 struct_name=struct_name)
@@ -278,7 +294,7 @@ class ObjCTypeParser:
         fields = []
         field_idx = 0
         while pos < len(s) and s[pos] != "}":
-            # Check for quoted field name
+            # Check for quoted field name (e.g. "origin" in {CGRect="origin"{CGPoint=dd}...})
             field_name = None
             if s[pos] == '"':
                 end_quote = s.index('"', pos + 1)
@@ -295,7 +311,7 @@ class ObjCTypeParser:
         if pos < len(s) and s[pos] == "}":
             pos += 1
 
-        # Generate C struct definition
+        # Auto-generate a C struct definition for newly discovered types
         if struct_name not in KNOWN_STRUCTS and struct_name not in self.discovered_structs:
             if fields:
                 field_strs = [f"    {ft.c_type} {fn};" for fn, ft in fields]
@@ -307,7 +323,11 @@ class ObjCTypeParser:
             struct_name=struct_name, struct_fields=fields)
 
     def _parse_union(self, s: str, pos: int) -> tuple[int, ParsedType]:
-        """Parse (UnionName=field1field2...)."""
+        """Parse (UnionName=field1field2...).
+
+        We don't fully parse union fields -- just skip to the closing paren.
+        Unions are rare in FCP metadata and IDA handles them fine with just the name.
+        """
         assert s[pos] == "("
         pos += 1
 
@@ -322,7 +342,7 @@ class ObjCTypeParser:
             return pos + 1, ParsedType(c_type=f"union {union_name}")
 
         pos += 1  # skip '='
-        # Skip fields — just find closing paren
+        # Skip fields -- just find closing paren
         depth = 1
         while pos < len(s) and depth > 0:
             if s[pos] == "(":
@@ -334,7 +354,7 @@ class ObjCTypeParser:
         return pos, ParsedType(c_type=f"union {union_name}")
 
     def _parse_array(self, s: str, pos: int) -> tuple[int, ParsedType]:
-        """Parse [countType]."""
+        """Parse [countType] -- e.g. [16c] is char[16]."""
         assert s[pos] == "["
         pos += 1
 
@@ -356,6 +376,10 @@ class ObjCTypeParser:
 
 def build_class_struct(class_info: dict, parser: ObjCTypeParser) -> Optional[str]:
     """Build a C struct definition from class ivar metadata.
+
+    This is the main entry point for IDA integration -- each ObjC class gets
+    a struct with typed fields at the correct byte offsets, which IDA uses
+    for type propagation during decompilation.
 
     Args:
         class_info: dict with "name", "ivars", "instanceSize"
@@ -390,7 +414,7 @@ def build_class_struct(class_info: dict, parser: ObjCTypeParser) -> Optional[str
     return "\n".join(lines)
 
 
-# --- Self-test when run directly ---
+# --- Self-test when run directly (verifies the parser against known encodings) ---
 
 if __name__ == "__main__":
     parser = ObjCTypeParser()

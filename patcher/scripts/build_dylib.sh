@@ -2,8 +2,19 @@
 # Build SpliceKit dylib and tools during Xcode build phase
 set -e
 
-REPO_DIR="${PROJECT_DIR}/.."
-BUILD_OUT="${BUILT_PRODUCTS_DIR}/SpliceKit_prebuilt"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -n "${PROJECT_DIR:-}" ]; then
+    REPO_DIR="${PROJECT_DIR}/.."
+else
+    REPO_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
+fi
+
+if [ -n "${BUILT_PRODUCTS_DIR:-}" ]; then
+    BUILD_OUT="${BUILT_PRODUCTS_DIR}/SpliceKit_prebuilt"
+else
+    BUILD_OUT="$REPO_DIR/build/SpliceKit_prebuilt"
+fi
+
 mkdir -p "$BUILD_OUT"
 
 SOURCES=(
@@ -12,6 +23,7 @@ SOURCES=(
     "$REPO_DIR/Sources/SpliceKitSwizzle.m"
     "$REPO_DIR/Sources/SpliceKitServer.m"
     "$REPO_DIR/Sources/SpliceKitTranscriptPanel.m"
+    "$REPO_DIR/Sources/SpliceKitCaptionPanel.m"
     "$REPO_DIR/Sources/SpliceKitCommandPalette.m"
     "$REPO_DIR/Sources/SpliceKitDebugUI.m"
 )

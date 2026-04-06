@@ -1,6 +1,11 @@
 #!/usr/bin/env swift
-// Beat detector - standalone tool for audio beat/tempo detection
-// Reads any audio file and outputs JSON with beats, bars, sections, BPM
+// beat-detector.swift -- Standalone audio beat/tempo detection tool.
+//
+// Reads any audio file via AVAssetReader, converts to mono 44.1kHz PCM,
+// detects onsets using energy-based peak picking, estimates BPM from
+// inter-onset intervals, and quantizes to a beat grid.
+//
+// Output: JSON with beats, bars (4-beat groups), sections (16-beat groups), and BPM.
 // Usage: beat-detector <file_path> [sensitivity] [min_bpm] [max_bpm]
 
 import Foundation
@@ -49,6 +54,7 @@ guard !audioTracks.isEmpty else {
     exit(1)
 }
 
+// Decode audio as mono 32-bit float PCM at 44.1kHz for consistent analysis
 let outputSettings: [String: Any] = [
     AVFormatIDKey: kAudioFormatLinearPCM,
     AVLinearPCMBitDepthKey: 32,
@@ -63,6 +69,7 @@ let output = AVAssetReaderTrackOutput(track: audioTracks[0], outputSettings: out
 reader.add(output)
 reader.startReading()
 
+// Read all PCM samples into memory
 var pcmData = Data()
 while reader.status == .reading {
     guard let sampleBuffer = output.copyNextSampleBuffer() else { break }
@@ -88,7 +95,8 @@ let samples = pcmData.withUnsafeBytes { (ptr: UnsafeRawBufferPointer) -> [Float]
     return Array(floatPtr)
 }
 
-// Onset detection via energy-based peak picking
+// --- Onset detection via energy-based peak picking ---
+// Slide a 1024-sample window across the audio, computing RMS energy at each hop.
 let hopSize = 512
 let windowSize = 1024
 let hopDuration = Double(hopSize) / sampleRate
@@ -111,7 +119,7 @@ for i in 0..<numFrames {
     energy[i] = sqrtf(sum / Float(windowSize))
 }
 
-// Local average energy
+// Sliding local average (~0.5s window) for adaptive thresholding
 let avgWindow = max(4, Int(0.5 / hopDuration))
 var localAvg = [Float](repeating: 0, count: numFrames)
 for i in 0..<numFrames {
@@ -122,9 +130,10 @@ for i in 0..<numFrames {
     localAvg[i] = sum / Float(end - start)
 }
 
-// Detect onsets
+// An onset is a local peak that exceeds the local average by a threshold factor.
+// Higher sensitivity = lower threshold = more onsets detected.
 let threshold = 1.3 + (1.0 - sensitivity) * 1.0
-let minOnsetInterval = 60.0 / maxBPM
+let minOnsetInterval = 60.0 / maxBPM  // reject onsets closer than the fastest allowed tempo
 var onsets = [Double]()
 var lastOnsetTime = -999.0
 
@@ -143,11 +152,13 @@ guard onsets.count >= 4 else {
     exit(1)
 }
 
-// Estimate tempo
+// --- Tempo estimation ---
+// Collect inter-onset intervals, take the median, and average nearby values
+// to get a robust beat period estimate.
 var intervals = [Double]()
 for i in 1..<onsets.count {
     let interval = onsets[i] - onsets[i-1]
-    if interval > 0.1 && interval < 2.0 {
+    if interval > 0.1 && interval < 2.0 {  // filter out outliers
         intervals.append(interval)
     }
 }
@@ -156,18 +167,22 @@ var bestInterval = 0.5
 if !intervals.isEmpty {
     let sorted = intervals.sorted()
     let median = sorted[sorted.count / 2]
+    // Average intervals within 20% of the median for stability
     let nearMedian = sorted.filter { abs($0 - median) / median < 0.2 }
     if !nearMedian.isEmpty {
         bestInterval = nearMedian.reduce(0, +) / Double(nearMedian.count)
     }
 }
 
+// Octave-fold the BPM into the requested range (e.g. 120 vs 60 vs 240)
 var bpm = 60.0 / bestInterval
 while bpm < minBPM && bpm > 0 { bpm *= 2.0 }
 while bpm > maxBPM { bpm /= 2.0 }
 let beatInterval = 60.0 / bpm
 
-// Find best grid offset
+// --- Grid alignment ---
+// Try 20 phase offsets and pick the one where onsets land closest to grid lines.
+// This aligns the beat grid to the actual transients in the audio.
 var bestOffset = 0.0
 var bestScore = -1.0
 for s in 0..<20 {
@@ -176,7 +191,7 @@ for s in 0..<20 {
     for onset in onsets {
         var dist = (onset - testOffset).truncatingRemainder(dividingBy: beatInterval)
         if dist > beatInterval / 2 { dist = beatInterval - dist }
-        score += 1.0 / (1.0 + dist * 20.0)
+        score += 1.0 / (1.0 + dist * 20.0)  // inverse-distance weighting
     }
     if score > bestScore {
         bestScore = score
@@ -184,7 +199,7 @@ for s in 0..<20 {
     }
 }
 
-// Generate beat grid
+// Generate the evenly-spaced beat grid from the aligned offset
 var beats = [Double]()
 var t = bestOffset
 while t < totalDuration {
@@ -192,6 +207,7 @@ while t < totalDuration {
     t += beatInterval
 }
 
+// Bars = every 4 beats (assuming 4/4 time), sections = every 16 beats
 var bars = [Double]()
 for i in stride(from: 0, to: beats.count, by: 4) {
     bars.append(beats[i])

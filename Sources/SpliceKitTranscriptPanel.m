@@ -1579,6 +1579,7 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
 
             SpliceKit_log(@"[Transcript] FCP Native complete: %lu words, %lu silences",
                           (unsigned long)self.mutableWords.count, (unsigned long)silenceCount);
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"SpliceKitTranscriptDidComplete" object:self];
         });
 
     } @catch (NSException *e) {
@@ -1721,6 +1722,7 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
 
             SpliceKit_log(@"[Transcript] Complete: %lu words, %lu silences",
                           (unsigned long)self.mutableWords.count, (unsigned long)silenceCount);
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"SpliceKitTranscriptDidComplete" object:self];
         });
     }];
 }
@@ -2384,6 +2386,7 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
 
         SpliceKit_log(@"[Transcript] Parakeet transcription complete: %lu words, %lu silences",
             (unsigned long)self.mutableWords.count, (unsigned long)self.mutableSilences.count);
+        [[NSNotificationCenter defaultCenter] postNotificationName:@"SpliceKitTranscriptDidComplete" object:self];
     });
 }
 
@@ -2846,6 +2849,7 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
                     NSUInteger silenceCount = self.mutableSilences.count;
                     [self updateStatusUI:[NSString stringWithFormat:@"%lu words, %lu pauses",
                         (unsigned long)self.mutableWords.count, (unsigned long)silenceCount]];
+                    [[NSNotificationCenter defaultCenter] postNotificationName:@"SpliceKitTranscriptDidComplete" object:self];
                 }
 
                 self.spinner.hidden = YES;
@@ -3395,7 +3399,14 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
 }
 
 #pragma mark - Timeline Editing Operations
+//
+// Low-level timeline manipulation. These methods blade, select, and delete segments
+// by driving FCP's own editing commands through the responder chain. The sleeps
+// between operations give FCP's undo system and layout engine time to catch up —
+// without them, rapid-fire edits can desync the timeline state.
+//
 
+/// Blade at start, blade at end, select the segment in between, ripple delete it.
 - (NSDictionary *)deleteTimelineRange:(double)deleteStart end:(double)deleteEnd {
     __block NSDictionary *result = nil;
     SpliceKit_executeOnMainThread(^{
@@ -3453,6 +3464,9 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
     return result;
 }
 
+/// Deletes a contiguous range of words from both the timeline and our data model.
+/// After the timeline edit, we remove the words from the array, re-index, and
+/// resync timestamps from FCP's actual clip positions (since blade changes durations).
 - (NSDictionary *)deleteWordsFromIndex:(NSUInteger)startIndex count:(NSUInteger)count {
     @synchronized (self.mutableWords) {
         if (startIndex >= self.mutableWords.count) {
@@ -3501,6 +3515,10 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
 }
 
 #pragma mark - Delete Silences (Batch)
+// Removes silence gaps from the timeline. Works from end to start so each
+// removal's time shift doesn't affect the positions of not-yet-deleted silences.
+// After all timeline edits, we walk forward through the word array and shift
+// timestamps by the cumulative duration of removed silences before each word.
 
 - (NSDictionary *)deleteAllSilences {
     return [self deleteSilencesLongerThan:0];
@@ -3612,6 +3630,10 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
 
 #pragma mark - Move Words (Drag to Reorder)
 
+/// Moves a range of words to a new position in the timeline. The operation is:
+/// blade at source boundaries, cut the segment, seek to destination, paste.
+/// The destination time is adjusted if it's after the source (since cutting
+/// the source shifts everything after it earlier by the source duration).
 - (NSDictionary *)moveWordsFromIndex:(NSUInteger)startIndex count:(NSUInteger)count toIndex:(NSUInteger)destIndex {
     @synchronized (self.mutableWords) {
         if (startIndex >= self.mutableWords.count || destIndex > self.mutableWords.count) {
@@ -3755,9 +3777,15 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
 }
 
 #pragma mark - Resync Timestamps from Timeline
+//
+// After any edit (move, delete), the word timestamps in our data model may not
+// match FCP's actual timeline anymore. This method re-reads the real clip positions
+// from FCP and re-maps each word using its immutable sourceMediaTime (position in
+// the original source file). This is the most reliable way to stay in sync —
+// trying to track cumulative shifts manually is fragile with compound edits.
+//
 
 - (void)resyncTimestampsFromTimeline {
-    // After edits (move, delete), re-read actual clip positions from FCP's timeline.
     // Each word has an immutable sourceMediaTime (its position in the source file).
     // We match each word to the clip that contains its source time, then compute:
     //   word.startTime = clip.timelineStart + (word.sourceMediaTime - clip.trimStart)
@@ -3868,6 +3896,12 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
 }
 
 #pragma mark - Playhead Sync
+// A 100ms timer that reads FCP's current playhead position and highlights the
+// corresponding word in the transcript. Uses three different selector fallbacks
+// (currentSequenceTime, playheadTime, playheadSequenceTime) because different
+// FCP versions expose the playhead through different methods.
+// We only update the highlight when the word changes (not every tick) and
+// only clear/set the single affected range to avoid flickering the whole document.
 
 - (void)startPlayheadTimer {
     [self stopPlayheadTimer];
@@ -3999,6 +4033,8 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
 }
 
 #pragma mark - FCP Integration Helpers
+// These reach into FCP's runtime to get the active timeline module and move the
+// playhead. The chain is: NSApp -> delegate -> activeEditorContainer -> timelineModule.
 
 - (id)getEditorContainer {
     id app = ((id (*)(id, SEL))objc_msgSend)(
@@ -4022,6 +4058,9 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
     return nil;
 }
 
+/// Moves the playhead to an exact time (in seconds) by constructing a CMTime and
+/// calling setPlayheadTime: on the timeline module. The timescale is read from
+/// the sequence's frame duration so we snap to exact frame boundaries.
 - (void)setPlayheadToTime:(double)seconds {
     id timeline = [self getActiveTimelineModule];
     if (!timeline) return;
@@ -4047,6 +4086,8 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
 }
 
 #pragma mark - State
+// Thread-safe accessors and the getState method used by the MCP API to
+// return the full transcript state (words, silences, timecodes, progress).
 
 - (NSArray<SpliceKitTranscriptWord *> *)words {
     @synchronized (self.mutableWords) {
@@ -4163,6 +4204,9 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
 }
 
 #pragma mark - NSTextView Delegate
+// We block all direct text editing — the transcript is not a regular text document.
+// Insertions are always rejected. Deletions are handled by keyDown: in the custom
+// text view subclass, which calls handleDeleteKeyInTextView instead.
 
 - (BOOL)textView:(NSTextView *)textView shouldChangeTextInRange:(NSRange)range
                                                replacementString:(NSString *)string {

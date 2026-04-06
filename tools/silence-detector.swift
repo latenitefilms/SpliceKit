@@ -1,11 +1,17 @@
 #!/usr/bin/env swift
 //
-//  silence-detector.swift
-//  Analyzes audio in media files to find silent time ranges.
-//  Uses AVAssetReader + vDSP (Accelerate) — all Apple-native, no ffmpeg.
+//  silence-detector.swift — Finds silent time ranges in audio/video files.
+//
+//  Uses AVAssetReader + vDSP (Accelerate) for all-native audio analysis.
+//  Two modes:
+//    - Fixed threshold: silence = RMS below a given dB level
+//    - Adaptive (default): classifies speech vs silence using sliding-window
+//      energy variance, so it works across different recording levels.
+//
+//  SpliceKit uses this to power "delete all silences" in the transcript panel.
 //
 //  Usage: silence-detector <file> [--threshold auto] [--min-duration 0.5] [--padding 0.08]
-//  Output: JSON with silent time ranges
+//  Output: JSON with silent time ranges to stdout
 //
 
 import AVFoundation
@@ -42,9 +48,10 @@ struct AnalysisResult: Codable {
     }
 }
 
-// MARK: - High-pass filter (removes room tone below cutoff)
+// MARK: - High-pass filter
+// Removes low-frequency room tone / HVAC rumble that would throw off silence detection.
 
-/// Simple 2nd-order Butterworth high-pass filter coefficients
+/// 2nd-order Butterworth high-pass filter coefficients (Q = 0.7071 for flat passband).
 func highPassCoefficients(cutoff: Double, sampleRate: Double) -> [Double] {
     let w0 = 2.0 * Double.pi * cutoff / sampleRate
     let alpha = sin(w0) / (2.0 * 0.7071) // Q = 0.7071 for Butterworth
@@ -59,11 +66,11 @@ func highPassCoefficients(cutoff: Double, sampleRate: Double) -> [Double] {
     return [b0, b1, b2, a1, a2]
 }
 
+/// Apply high-pass filter in-place using a manual biquad (Direct Form I).
 func applyHighPass(samples: UnsafeMutablePointer<Float>, count: Int, cutoff: Double, sampleRate: Double) {
     let c = highPassCoefficients(cutoff: cutoff, sampleRate: sampleRate)
-    // vDSP_deq22 coefficients: [b0, b1, b2, a1, a2]
     var coeffs: [Double] = c
-    // Manual biquad: y[n] = b0*x[n] + b1*x[n-1] + b2*x[n-2] - a1*y[n-1] - a2*y[n-2]
+    // Direct Form I: y[n] = b0*x[n] + b1*x[n-1] + b2*x[n-2] - a1*y[n-1] - a2*y[n-2]
     var x1: Float = 0, x2: Float = 0, y1: Float = 0, y2: Float = 0
     let b0 = Float(c[0]), b1 = Float(c[1]), b2 = Float(c[2])
     let a1 = Float(c[3]), a2 = Float(c[4])
@@ -78,6 +85,8 @@ func applyHighPass(samples: UnsafeMutablePointer<Float>, count: Int, cutoff: Dou
 
 // MARK: - Read audio RMS values
 
+/// Read audio from a file and compute RMS energy for each chunk (~93ms at 4096/44100).
+/// Returns an array of (timestamp, RMS) pairs for the analysis pipeline.
 func readRMSValues(
     filePath: String,
     startTime: Double?,
@@ -110,6 +119,7 @@ func readRMSValues(
         return nil
     }
 
+    // Optionally restrict analysis to a subrange of the file
     if let start = startTime {
         let end = endTime ?? totalDuration
         reader.timeRange = CMTimeRange(
@@ -118,6 +128,7 @@ func readRMSValues(
         )
     }
 
+    // Decode to mono 32-bit float PCM at 44.1kHz for consistent analysis
     let outputSettings: [String: Any] = [
         AVFormatIDKey: kAudioFormatLinearPCM,
         AVLinearPCMBitDepthKey: 32,
@@ -141,7 +152,8 @@ func readRMSValues(
     var totalSamplesProcessed = 0
     let analysisStartTime = startTime ?? 0.0
 
-    // Accumulate samples across buffers to handle small buffer sizes
+    // AVAssetReader may return buffers smaller than our chunk size,
+    // so we accumulate samples and process in full chunks.
     var accumulator = [Float]()
 
     while let sampleBuffer = output.copyNextSampleBuffer() {
@@ -176,9 +188,12 @@ func readRMSValues(
 }
 
 // MARK: - Adaptive threshold using energy variance
+//
+// The key insight: speech has *varying* energy (words, pauses, emphasis),
+// while silence/room tone has *constant* energy. We detect this by computing
+// the variance of dB values in a sliding window. High variance = speech.
 
-/// Classify each chunk as speech or silence using a sliding window variance approach.
-/// Speech causes RMS to fluctuate; silence/room tone has constant energy.
+/// Classify each chunk as speech or silence using sliding window energy variance.
 func classifySpeechSilence(
     rmsValues: [(time: Double, rms: Float)],
     windowChunks: Int = 8  // ~0.75s window at 4096/44100
@@ -186,6 +201,7 @@ func classifySpeechSilence(
     let count = rmsValues.count
     guard count > windowChunks else { return (Array(repeating: false, count: count), -96, -96) }
 
+    // Convert to dB for perceptually meaningful variance calculation
     let dbValues = rmsValues.map { $0.rms > 0 ? 20.0 * log10(Double($0.rms)) : -96.0 }
 
     // Compute sliding window variance of dB values
@@ -204,17 +220,15 @@ func classifySpeechSilence(
         variances[i] = sumSq / Double(n) - mean * mean
     }
 
-    // Find threshold: sort variances, pick a point that separates low-variance (silence) from high-variance (speech)
+    // Threshold: chunks with variance above median*0.3 have enough fluctuation to be speech.
+    // The 0.5 floor prevents false positives in very quiet content.
     let sortedVar = variances.sorted()
     let medianVar = sortedVar[count / 2]
-
-    // Chunks with variance > median * 0.3 are speech (they have more fluctuation)
-    // Use a minimum variance floor to avoid false positives in very quiet content
     let varThreshold = max(medianVar * 0.3, 0.5)
 
     var isSpeech = variances.map { $0 > varThreshold }
 
-    // Smooth: fill small gaps in speech (< 3 chunks ≈ 0.28s)
+    // Smooth: fill small gaps in speech (< 3 chunks ~ 0.28s) to avoid choppy cuts
     for i in 0..<count {
         if !isSpeech[i] {
             let lookback = max(0, i - 3)
@@ -225,10 +239,10 @@ func classifySpeechSilence(
         }
     }
 
-    // Also mark as speech if the absolute level is significantly above the noise floor
+    // Also mark as speech if the absolute level is well above the noise floor
     let sortedDB = dbValues.sorted()
-    let noiseFloor = sortedDB[max(0, count / 10)]
-    let speechLevel = sortedDB[min(count - 1, count * 8 / 10)]
+    let noiseFloor = sortedDB[max(0, count / 10)]      // 10th percentile = noise floor
+    let speechLevel = sortedDB[min(count - 1, count * 8 / 10)]  // 80th percentile = speech
 
     // If a chunk is > noise floor + 70% of dynamic range, it's definitely speech
     let highLevelThreshold = noiseFloor + (speechLevel - noiseFloor) * 0.7
@@ -241,6 +255,8 @@ func classifySpeechSilence(
 
 // MARK: - Find silent ranges from RMS values
 
+/// Convert RMS measurements into discrete silent time ranges.
+/// Applies minimum duration filtering and padding to avoid cutting into speech.
 func findSilentRanges(
     rmsValues: [(time: Double, rms: Float)],
     thresholdLinear: Float,
@@ -261,6 +277,7 @@ func findSilentRanges(
             if let silStart = currentSilenceStart {
                 let silDuration = time - silStart
                 if silDuration >= minSilenceDuration {
+                    // Inset by padding to keep a small buffer of silence around cuts
                     let paddedStart = silStart + padding
                     let paddedEnd = time - padding
                     if paddedEnd > paddedStart {
@@ -275,7 +292,7 @@ func findSilentRanges(
         }
     }
 
-    // Handle trailing silence
+    // Handle trailing silence (file ends during a silent period)
     if let silStart = currentSilenceStart {
         let endSeconds = rmsValues.last?.time ?? (startTime ?? 0.0)
         let silDuration = endSeconds - silStart
@@ -296,9 +313,10 @@ func findSilentRanges(
 
 // MARK: - Main analysis
 
+/// Orchestrates the full analysis pipeline: read audio -> classify -> extract ranges.
 func analyzeAudio(
     filePath: String,
-    thresholdDB: Double?,  // nil = auto
+    thresholdDB: Double?,  // nil = auto (adaptive mode)
     minSilenceDuration: Double,
     padding: Double,
     startTime: Double?,
@@ -324,7 +342,7 @@ func analyzeAudio(
     let silentRanges: [SilentRange]
 
     if let manualDB = thresholdDB {
-        // Fixed threshold mode
+        // Fixed threshold mode -- user specified an exact dB level
         let thresholdLinear = Float(pow(10.0, manualDB / 20.0))
         effectiveDB = manualDB
         silentRanges = findSilentRanges(
@@ -340,11 +358,12 @@ func analyzeAudio(
         let (isSpeech, noise, speech) = classifySpeechSilence(rmsValues: rmsValues)
         noiseFloorDB = noise
         speechDB = speech
+        // Place the threshold at 35% of the dynamic range above the noise floor
         effectiveDB = noise + (speech - noise) * 0.35
         computedDB = effectiveDB
         fputs("Adaptive: noise=\(String(format: "%.1f", noise)) dB, speech=\(String(format: "%.1f", speech)) dB\n", stderr)
 
-        // Convert isSpeech classification to silent ranges
+        // Convert boolean classification to time ranges
         var ranges: [SilentRange] = []
         var silenceStart: Double? = nil
         for i in 0..<rmsValues.count {

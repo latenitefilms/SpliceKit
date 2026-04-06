@@ -13,7 +13,9 @@
 //
 
 #import "SpliceKit.h"
+#import "SpliceKitLogPanel.h"
 #import "SpliceKitTranscriptPanel.h"
+#import "SpliceKitCaptionPanel.h"
 #import "SpliceKitCommandPalette.h"
 #import "SpliceKitDebugUI.h"
 #import <sys/socket.h>
@@ -55,7 +57,7 @@ static int sServerFd = -1;
 // Forward declarations
 static NSDictionary *SpliceKit_sendAppAction(NSString *selectorName);
 static NSDictionary *SpliceKit_sendPlayerAction(NSString *selectorName);
-static id SpliceKit_getActiveTimelineModule(void);
+id SpliceKit_getActiveTimelineModule(void);
 static id SpliceKit_getEditorContainer(void);
 
 #pragma mark - Object Handle System
@@ -217,7 +219,12 @@ void SpliceKit_broadcastEvent(NSDictionary *event) {
     });
 }
 
-#pragma mark - Request Handler
+#pragma mark - Request Handlers: Runtime Introspection (system.*)
+//
+// These handlers let clients explore FCP's ObjC runtime: list classes,
+// enumerate methods, read ivars, walk inheritance chains. Essential for
+// reverse-engineering FCP's private APIs without a debugger attached.
+//
 
 static NSDictionary *SpliceKit_handleSystemGetClasses(NSDictionary *params) {
     NSString *filter = params[@"filter"];
@@ -954,7 +961,7 @@ NSDictionary *SpliceKit_handleTimelineGetDetailedState(NSDictionary *params) {
 //    This triggers FCP's normal import flow which may show a library picker dialog.
 //
 
-static NSDictionary *SpliceKit_handlePasteboardImportXML(NSDictionary *params);
+NSDictionary *SpliceKit_handlePasteboardImportXML(NSDictionary *params);
 static NSDictionary *SpliceKit_handleInspectorSet(NSDictionary *params);
 
 static NSDictionary *SpliceKit_handleFCPXMLImport(NSDictionary *params) {
@@ -1009,7 +1016,7 @@ static NSDictionary *SpliceKit_handleFCPXMLImport(NSDictionary *params) {
 // doesn't always apply them to the imported clips.
 //
 
-static NSDictionary *SpliceKit_handlePasteboardImportXML(NSDictionary *params) {
+NSDictionary *SpliceKit_handlePasteboardImportXML(NSDictionary *params) {
     NSString *xml = params[@"xml"];
 
     __block NSDictionary *result = nil;
@@ -1443,7 +1450,7 @@ static NSDictionary *SpliceKit_handleGetClipEffects(NSDictionary *params) {
 // where all the editing magic happens.
 //
 
-static id SpliceKit_getActiveTimelineModule(void) {
+id SpliceKit_getActiveTimelineModule(void) {
     id app = ((id (*)(id, SEL))objc_msgSend)(
         objc_getClass("NSApplication"), @selector(sharedApplication));
     id delegate = ((id (*)(id, SEL))objc_msgSend)(app, @selector(delegate));
@@ -2103,6 +2110,8 @@ NSDictionary *SpliceKit_handleDirectTimelineAction(NSDictionary *params) {
             };
 
             // === Marker Operations ===
+            // Markers are owned by the sequence, not the timeline module. The action
+            // methods live on FFAnchoredSequence and take the marker object directly.
 
             if ([action isEqualToString:@"changeMarkerType"]) {
                 // Change marker type: "chapter", "todo", "note"
@@ -2176,6 +2185,9 @@ NSDictionary *SpliceKit_handleDirectTimelineAction(NSDictionary *params) {
             }
 
             // === Retiming / Speed (Direct API) ===
+            // These call Flexo's parameterized retime methods directly, bypassing the
+            // simple IBAction wrappers. They give precise control over rate, ripple
+            // behavior, and variable speed settings. Each one operates on selected items.
 
             if ([action isEqualToString:@"retimeSetRate"]) {
                 // Set exact retime rate with ripple control
@@ -2293,6 +2305,8 @@ NSDictionary *SpliceKit_handleDirectTimelineAction(NSDictionary *params) {
             }
 
             // === Trim / Edit (Direct API) ===
+            // More precise than the IBAction trim commands, which are mode-dependent
+            // and coarse. These take explicit parameters and return errors properly.
 
             if ([action isEqualToString:@"splitAtTime"]) {
                 // Blade/split at exact time on a specific clip or all clips
@@ -2405,6 +2419,8 @@ NSDictionary *SpliceKit_handleDirectTimelineAction(NSDictionary *params) {
             }
 
             // === Audio Operations ===
+            // Direct audio manipulation — volume (absolute or relative dB), fades,
+            // background music flag, audio detach, and A/V sync alignment.
 
             if ([action isEqualToString:@"changeAudioVolume"]) {
                 double amount = [params[@"amount"] doubleValue];
@@ -2476,6 +2492,8 @@ NSDictionary *SpliceKit_handleDirectTimelineAction(NSDictionary *params) {
             }
 
             // === Multicam / Angles ===
+            // FCP's multicam clips have "angles" that can be renamed, deleted,
+            // or audio-synced independently.
 
             if ([action isEqualToString:@"deleteMultiAngle"]) {
                 id selectedItems = getSelectedItems();
@@ -2512,6 +2530,8 @@ NSDictionary *SpliceKit_handleDirectTimelineAction(NSDictionary *params) {
             }
 
             // === Keywords / Roles ===
+            // Keywords are FCP's tagging system. Roles control audio/video routing
+            // for export (Dialogue, Music, Effects, Titles, etc).
 
             if ([action isEqualToString:@"addKeywords"]) {
                 NSArray *keywords = params[@"keywords"];
@@ -2549,6 +2569,8 @@ NSDictionary *SpliceKit_handleDirectTimelineAction(NSDictionary *params) {
             }
 
             // === Effects / Masks ===
+            // Manipulate effects on selected clips: remove by ID, invert masks,
+            // toggle enabled state.
 
             if ([action isEqualToString:@"removeEffectByID"]) {
                 NSString *effectID = params[@"effectID"];
@@ -2585,6 +2607,8 @@ NSDictionary *SpliceKit_handleDirectTimelineAction(NSDictionary *params) {
             }
 
             // === Clip Operations ===
+            // Structural operations on clips: break apart compound clips, create new
+            // compound clips, lift from storyline, rename, delete, move to trash.
 
             if ([action isEqualToString:@"breakApartClipItems"]) {
                 id selectedItems = getSelectedItems();
@@ -2654,6 +2678,7 @@ NSDictionary *SpliceKit_handleDirectTimelineAction(NSDictionary *params) {
             }
 
             // === Captions ===
+            // Duplicate captions to a different language/format for localization.
 
             if ([action isEqualToString:@"duplicateCaptions"]) {
                 NSString *language = params[@"language"] ?: @"en";
@@ -2667,6 +2692,8 @@ NSDictionary *SpliceKit_handleDirectTimelineAction(NSDictionary *params) {
             }
 
             // === Audition / Variants ===
+            // Auditions let you stack multiple takes in one timeline slot and cycle
+            // through them. "Variants" are the individual takes within an audition.
 
             if ([action isEqualToString:@"addVariants"]) {
                 id selectedItems = getSelectedItems();
@@ -4078,7 +4105,157 @@ static NSDictionary *SpliceKit_handleTranscriptSetSpeaker(NSDictionary *params) 
     return @{@"status": @"ok", @"speaker": speaker, @"startIndex": @(startIndex), @"count": @(count)};
 }
 
+#pragma mark - Social Media Captions
+//
+// Handlers for the social captions panel — word-by-word highlighted titles
+// generated as FCPXML and imported into the timeline. The caption panel does
+// the heavy lifting; these handlers just proxy parameters through.
+//
+
+static NSDictionary *SpliceKit_handleCaptionsOpen(NSDictionary *params) {
+    NSString *fileURL = params[@"fileURL"];
+    NSString *presetID = params[@"style"];
+
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        SpliceKitCaptionPanel *panel = [SpliceKitCaptionPanel sharedPanel];
+        if (presetID) {
+            SpliceKitCaptionStyle *style = [SpliceKitCaptionStyle presetWithID:presetID];
+            if (style) [panel setStyle:style];
+        }
+        [panel showPanel];
+        if (panel.words.count == 0) {
+            [panel transcribeTimeline];
+        }
+    });
+    return @{@"status": @"ok", @"message": @"Caption panel opened. Transcription starting..."};
+}
+
+static NSDictionary *SpliceKit_handleCaptionsClose(NSDictionary *params) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [[SpliceKitCaptionPanel sharedPanel] hidePanel];
+    });
+    return @{@"status": @"ok"};
+}
+
+static NSDictionary *SpliceKit_handleCaptionsGetState(NSDictionary *params) {
+    return [[SpliceKitCaptionPanel sharedPanel] getState] ?: @{@"status": @"idle"};
+}
+
+static NSDictionary *SpliceKit_handleCaptionsGetStyles(NSDictionary *params) {
+    NSArray *presets = [SpliceKitCaptionStyle builtInPresets];
+    NSMutableArray *list = [NSMutableArray array];
+    for (SpliceKitCaptionStyle *s in presets) {
+        [list addObject:[s toDictionary]];
+    }
+    return @{@"styles": list, @"count": @(list.count)};
+}
+
+static NSDictionary *SpliceKit_handleCaptionsSetStyle(NSDictionary *params) {
+    NSString *presetID = params[@"presetID"];
+    SpliceKitCaptionStyle *style = nil;
+
+    if (presetID) {
+        style = [SpliceKitCaptionStyle presetWithID:presetID];
+        if (!style) return @{@"error": [NSString stringWithFormat:@"Unknown preset: %@", presetID]};
+        // Merge all params as overrides on top of the preset
+        NSMutableDictionary *merged = [[style toDictionary] mutableCopy];
+        for (NSString *key in params) {
+            if (![key isEqualToString:@"presetID"]) merged[key] = params[key];
+        }
+        style = [SpliceKitCaptionStyle fromDictionary:merged];
+    } else {
+        style = [SpliceKitCaptionStyle fromDictionary:params];
+    }
+
+    [[SpliceKitCaptionPanel sharedPanel] setStyle:style];
+    return @{@"status": @"ok", @"style": [style toDictionary]};
+}
+
+static NSDictionary *SpliceKit_handleCaptionsSetGrouping(NSDictionary *params) {
+    SpliceKitCaptionPanel *panel = [SpliceKitCaptionPanel sharedPanel];
+    NSString *mode = params[@"mode"];
+    if ([mode isEqualToString:@"words"]) panel.groupingMode = SpliceKitCaptionGroupingByWordCount;
+    else if ([mode isEqualToString:@"sentence"]) panel.groupingMode = SpliceKitCaptionGroupingBySentence;
+    else if ([mode isEqualToString:@"time"]) panel.groupingMode = SpliceKitCaptionGroupingByTime;
+    else if ([mode isEqualToString:@"chars"]) panel.groupingMode = SpliceKitCaptionGroupingByCharCount;
+    else if ([mode isEqualToString:@"social"]) panel.groupingMode = SpliceKitCaptionGroupingSocial;
+
+    if (params[@"maxWords"]) panel.maxWordsPerSegment = [params[@"maxWords"] unsignedIntegerValue];
+    if (params[@"maxChars"]) panel.maxCharsPerSegment = [params[@"maxChars"] unsignedIntegerValue];
+    if (params[@"maxSeconds"]) panel.maxSecondsPerSegment = [params[@"maxSeconds"] doubleValue];
+
+    [panel regroupSegments];
+    return @{@"status": @"ok", @"segmentCount": @(panel.segments.count)};
+}
+
+static NSDictionary *SpliceKit_handleCaptionsGenerate(NSDictionary *params) {
+    SpliceKitCaptionPanel *panel = [SpliceKitCaptionPanel sharedPanel];
+
+    // Support one-shot: set style + grouping + generate in one call
+    if (params[@"style"] || params[@"presetID"]) {
+        NSString *pid = params[@"style"] ?: params[@"presetID"];
+        SpliceKitCaptionStyle *style = [SpliceKitCaptionStyle presetWithID:pid];
+        if (style) {
+            // Apply overrides via serialization round-trip
+            NSMutableDictionary *merged = [[style toDictionary] mutableCopy];
+            for (NSString *key in params) {
+                if (![key isEqualToString:@"style"] && ![key isEqualToString:@"presetID"] &&
+                    ![key isEqualToString:@"maxWords"]) {
+                    merged[key] = params[key];
+                }
+            }
+            style = [SpliceKitCaptionStyle fromDictionary:merged];
+            [panel setStyle:style];
+        }
+    }
+    if (params[@"maxWords"]) {
+        panel.maxWordsPerSegment = [params[@"maxWords"] unsignedIntegerValue];
+        [panel regroupSegments];
+    }
+
+    // Run on background thread — generateCaptions touches FCP on the main thread
+    // as needed, then stores the final result on the caption panel for getState.
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSDictionary *genResult = [panel generateCaptions];
+        SpliceKit_log(@"[Captions] Generate result: %@", genResult);
+    });
+    return @{@"status": @"ok", @"message": @"Caption generation started. Check captions.getState for results."};
+}
+
+static NSDictionary *SpliceKit_handleCaptionsExportSRT(NSDictionary *params) {
+    NSString *path = params[@"path"];
+    if (!path) return @{@"error": @"path parameter required"};
+    return [[SpliceKitCaptionPanel sharedPanel] exportSRT:path];
+}
+
+static NSDictionary *SpliceKit_handleCaptionsExportTXT(NSDictionary *params) {
+    NSString *path = params[@"path"];
+    if (!path) return @{@"error": @"path parameter required"};
+    return [[SpliceKitCaptionPanel sharedPanel] exportTXT:path];
+}
+
+static NSDictionary *SpliceKit_handleCaptionsSetWords(NSDictionary *params) {
+    NSArray *wordDicts = params[@"words"];
+    if (!wordDicts || ![wordDicts isKindOfClass:[NSArray class]])
+        return @{@"error": @"words array required"};
+    [[SpliceKitCaptionPanel sharedPanel] setWordsManually:wordDicts];
+    return @{@"status": @"ok", @"wordCount": @(wordDicts.count)};
+}
+
+static NSDictionary *SpliceKit_handleCaptionsSetXML(NSDictionary *params) {
+    NSString *xml = params[@"xml"];
+    if (!xml) return @{@"error": @"xml parameter required"};
+    SpliceKitCaptionPanel *panel = [SpliceKitCaptionPanel sharedPanel];
+    panel.generatedFCPXML = xml;
+    return @{@"status": @"ok", @"xmlLength": @(xml.length)};
+}
+
 #pragma mark - Scene Change Detection
+//
+// Detects visual cuts in timeline media by comparing histogram differences
+// between consecutive frames. Optionally places markers or blades at cuts.
+//
 
 NSDictionary *SpliceKit_handleDetectSceneChanges(NSDictionary *params) {
     // Get parameters
@@ -4364,6 +4541,11 @@ NSDictionary *SpliceKit_handleDetectSceneChanges(NSDictionary *params) {
 }
 
 #pragma mark - Effects Browse & Apply Handlers
+//
+// Browse and apply FCP's effect library (376+ transitions, 200+ filters, generators,
+// titles, audio effects). We query the effect registry at runtime and apply effects
+// through FCP's pasteboard + drag infrastructure.
+//
 
 // Generalized handler that lists effects filtered by type(s)
 NSDictionary *SpliceKit_handleEffectsListAvailable(NSDictionary *params) {
@@ -4701,6 +4883,11 @@ NSDictionary *SpliceKit_handleTitleInsert(NSDictionary *params) {
 }
 
 #pragma mark - Subject Stabilization (Lock-On)
+//
+// Uses Apple's Vision framework to track a person in a clip, then applies
+// inverse position/scale keyframes to keep the subject centered. Think of it
+// as a "lock-on" camera that stabilizes around the detected subject.
+//
 
 NSDictionary *SpliceKit_handleSubjectStabilize(NSDictionary *params) {
     // Stabilize the selected clip around a tracked subject.
@@ -8517,6 +8704,10 @@ void SpliceKit_installSuppressAutoImport(void) {
 }
 
 #pragma mark - Transition Handlers
+//
+// List and apply FCP's 376+ built-in transitions. The freeze_extend option
+// auto-extends clip edges with hold frames when there's not enough media overlap.
+//
 
 NSDictionary *SpliceKit_handleTransitionsList(NSDictionary *params) {
     NSString *filter = params[@"filter"];
@@ -8905,6 +9096,9 @@ static NSDictionary *SpliceKit_handleCommandAI(NSDictionary *params) {
 }
 
 #pragma mark - Browser Clip Handlers
+//
+// Access clips in the event browser (source media, not timeline items).
+//
 
 // List clips available in the event browser
 static NSDictionary *SpliceKit_handleBrowserListClips(NSDictionary *params) {
@@ -9147,6 +9341,10 @@ static NSDictionary *SpliceKit_handleBrowserAppendClip(NSDictionary *params) {
 }
 
 #pragma mark - Menu Execute Handler
+//
+// Navigate and click any FCP menu item by path, e.g. ["File", "New", "Project..."].
+// This is the escape hatch for actions that don't have a known ObjC selector.
+//
 
 static NSDictionary *SpliceKit_handleMenuExecute(NSDictionary *params) {
     NSArray *menuPath = params[@"menuPath"];
@@ -9325,6 +9523,10 @@ static NSDictionary *SpliceKit_handleMenuList(NSDictionary *params) {
 }
 
 #pragma mark - Effect Parameter Helpers
+//
+// FCP's effect parameters live in a channel tree: clip -> effectStack -> channels
+// (groups) -> sub-channels (individual params like position.x, opacity, etc).
+//
 
 // Get the selected clip's effect stack, creating it if needed
 static id SpliceKit_getSelectedClipEffectStack(id timeline, id *outClip) {
@@ -9452,6 +9654,10 @@ static void SpliceKit_collectChannels(id obj, NSMutableArray *channels, NSString
 }
 
 #pragma mark - Inspector Handlers
+//
+// Read and write clip properties (transform, compositing, audio volume, etc.)
+// by walking FCP's channel-based parameter model.
+//
 
 // Helper: read a double from a channel at time=0 (kCMTimeIndefinite for constant)
 static double SpliceKit_channelValue(id channel) {
@@ -9922,6 +10128,11 @@ static NSDictionary *SpliceKit_handleToolSelect(NSDictionary *params) {
 }
 
 #pragma mark - Dialog Detection & Interaction
+//
+// FCP shows modal dialogs (sheets) for various operations. These handlers detect
+// open dialogs, read their buttons/fields/checkboxes, and interact with them
+// programmatically — so MCP clients can handle dialogs without user intervention.
+//
 
 // Recursively collect UI elements from a view hierarchy
 // Forward declarations for dialog helpers
@@ -10864,6 +11075,11 @@ static NSString *SpliceKit_getMediaURLForClip(id clip) {
 }
 
 #pragma mark - FlexMusic & Montage Maker
+//
+// FlexMusic is FCP's dynamic soundtrack system — royalty-free songs that render
+// to any duration with proper musical phrasing. Montage Maker uses FlexMusic
+// timing data + clip analysis to auto-assemble highlight reels.
+//
 
 // ---------- FlexMusic static state ----------
 static id sFMSongLibrary = nil; // FMSongLibrary singleton
@@ -12769,6 +12985,11 @@ static NSDictionary *SpliceKit_handleMontageAuto(NSDictionary *params) {
 }
 
 #pragma mark - Debug & Diagnostics
+//
+// Exposes FCP's hidden developer tools: TimelineKit visual overlays (TLK* keys),
+// ProAppSupport logging, video decoder diagnostics, GPU logging, and frame rate
+// monitoring. All controlled through NSUserDefaults and CFPreferences.
+//
 
 // All known TLK debug UserDefaults keys
 static NSArray *SpliceKit_tlkDebugKeys(void) {
@@ -12842,9 +13063,13 @@ static NSArray *SpliceKit_logCategoryNames(void) {
 }
 
 #pragma mark - Runtime Metadata Export (for IDA Pro)
+//
+// Extracts rich ObjC runtime metadata from the live FCP process as JSON.
+// This data feeds into IDA Pro scripts that rename sub_XXXX functions to
+// ObjC selectors, declare struct types from ivars, and add protocol comments.
+//
 
-// Helper: collect full metadata for a single class
-// Helper: serialize a single method with dladdr info
+// Helper: serialize a single method with dladdr info (which binary owns the IMP)
 static NSDictionary *SpliceKit_serializeMethod(Method m) {
     SEL sel = method_getName(m);
     const char *types = method_getTypeEncoding(m);
@@ -13198,6 +13423,11 @@ static NSDictionary *SpliceKit_handleListLoadedImages(NSDictionary *params) {
 }
 
 #pragma mark - Mach-O Section & Symbol Table Export
+//
+// Reads raw Mach-O sections (__objc_selrefs, __objc_classrefs) and the symbol
+// table from loaded binaries, revealing cross-reference patterns. Falls back to
+// runtime APIs for shared-cache frameworks where raw section walking is unsafe.
+//
 
 // Enumerate ObjC selector references, class references, and categories for an image
 // Helper: check if an image is in the dyld shared cache (unsafe for section/symtab walking)
@@ -13653,6 +13883,10 @@ static NSDictionary *SpliceKit_handleDebugSetConfig(NSDictionary *params) {
         BOOL boolVal = [value boolValue];
         [defaults setBool:boolVal forKey:@"LogUI"];
         [defaults synchronize];
+        SpliceKit_executeOnMainThread(^{
+            if (boolVal) [[SpliceKitLogPanel sharedPanel] showPanel];
+            else [[SpliceKitLogPanel sharedPanel] hidePanel];
+        });
         return @{@"status": @"ok", @"key": @"LogUI", @"value": @(boolVal), @"type": @"proapp_log"};
     }
 
@@ -13719,6 +13953,9 @@ static NSDictionary *SpliceKit_handleDebugResetConfig(NSDictionary *params) {
             [defaults removeObjectForKey:key];
             [removedKeys addObject:key];
         }
+        SpliceKit_executeOnMainThread(^{
+            [[SpliceKitLogPanel sharedPanel] hidePanel];
+        });
     }
 
     [defaults synchronize];
@@ -13851,6 +14088,9 @@ static NSDictionary *SpliceKit_handleDebugEnablePreset(NSDictionary *params) {
             [defaults removeObjectForKey:key];
             [changed addObject:@{@"key": key, @"value": @"removed"}];
         }
+        SpliceKit_executeOnMainThread(^{
+            [[SpliceKitLogPanel sharedPanel] hidePanel];
+        });
     } else {
         return @{@"error": [NSString stringWithFormat:@"Unknown preset: %@", preset],
                  @"available": @[@"timeline_visual", @"timeline_logging",
@@ -13858,6 +14098,11 @@ static NSDictionary *SpliceKit_handleDebugEnablePreset(NSDictionary *params) {
     }
 
     [defaults synchronize];
+    if ([[defaults objectForKey:@"LogUI"] boolValue]) {
+        SpliceKit_executeOnMainThread(^{
+            [[SpliceKitLogPanel sharedPanel] showPanel];
+        });
+    }
 
     // Reload TLK
     Class tlkClass = NSClassFromString(@"TLKUserDefaults");
@@ -13869,6 +14114,11 @@ static NSDictionary *SpliceKit_handleDebugEnablePreset(NSDictionary *params) {
 }
 
 #pragma mark - Debug: Method Tracing
+//
+// Non-blocking alternative to breakpoints. Swizzles target methods to log every
+// call with arguments, return value, and optional call stack. Traces are stored
+// in a circular buffer and broadcast to MCP clients in real-time.
+//
 
 // Storage for active traces: key = "ClassName.selectorName", value = trace config
 static NSMutableDictionary<NSString *, NSDictionary *> *sActiveTraces = nil;
@@ -14075,10 +14325,14 @@ static NSDictionary *SpliceKit_handleDebugTraceMethod(NSDictionary *params) {
 }
 
 #pragma mark - Debug: KVO Property Watching
+//
+// Replaces lldb watchpoints. Uses KVO to monitor property changes on any ObjC
+// object and broadcasts old/new values to MCP clients in real-time.
+//
 
 static NSMutableDictionary<NSString *, id> *sActiveWatches = nil;
 
-// Simple KVO observer helper
+// KVO observer that broadcasts change events to connected clients
 @interface SpliceKitKVOObserver : NSObject
 @property (nonatomic, copy) NSString *watchKey;
 @property (nonatomic, copy) NSString *keyPath;
@@ -14211,6 +14465,10 @@ static NSDictionary *SpliceKit_handleDebugWatch(NSDictionary *params) {
 }
 
 #pragma mark - Debug: Crash Handler
+//
+// Catches NSExceptions and Unix signals (SIGABRT, SIGSEGV, SIGBUS) with full
+// stack traces. Replaces debugger crash catching for when lldb isn't attached.
+//
 
 static BOOL sCrashHandlerInstalled = NO;
 static NSMutableArray<NSDictionary *> *sCrashLog = nil;
@@ -14308,6 +14566,10 @@ static NSDictionary *SpliceKit_handleDebugCrashHandler(NSDictionary *params) {
 }
 
 #pragma mark - Debug: Thread Inspection
+//
+// Uses Mach kernel APIs to enumerate all ~45 threads in FCP's process.
+// Detailed mode shows per-thread CPU usage, run state, and stack traces.
+//
 
 // debug.threads
 // {"method":"debug.threads","params":{}}
@@ -14407,6 +14669,10 @@ static NSDictionary *SpliceKit_handleDebugThreads(NSDictionary *params) {
 }
 
 #pragma mark - Debug: Expression Evaluation
+//
+// Replaces lldb's `po` command. Walks ObjC property chains like
+// "NSApp.delegate._targetLibrary.displayName" and returns the result.
+//
 
 // debug.eval - Evaluate an ObjC expression chain in FCP's process
 // {"method":"debug.eval","params":{"expression":"[NSApp delegate]"}}
@@ -14559,6 +14825,10 @@ static NSDictionary *SpliceKit_handleDebugEval(NSDictionary *params) {
 }
 
 #pragma mark - Debug: Hot Plugin Loading
+//
+// Inject compiled .dylib code into FCP at runtime without restarting.
+// Compile a patch, load it here, and it has full access to FCP's process space.
+//
 
 static NSMutableDictionary<NSString *, id> *sLoadedPlugins = nil;
 
@@ -14644,6 +14914,10 @@ static NSDictionary *SpliceKit_handleDebugLoadPlugin(NSDictionary *params) {
 }
 
 #pragma mark - Debug: Notification Observation
+//
+// Subscribe to FCP's internal NSNotification events. Events are broadcast to
+// MCP clients in real-time. Use "*" for all notifications (high volume).
+//
 
 static NSMutableDictionary<NSString *, id> *sNotificationObservers = nil;
 
@@ -15342,6 +15616,30 @@ static NSDictionary *SpliceKit_handleRequest(NSDictionary *request) {
     } else if ([method isEqualToString:@"transcript.setEngine"]) {
         result = SpliceKit_handleTranscriptSetEngine(params);
     }
+    // captions.* namespace
+    else if ([method isEqualToString:@"captions.open"]) {
+        result = SpliceKit_handleCaptionsOpen(params);
+    } else if ([method isEqualToString:@"captions.close"]) {
+        result = SpliceKit_handleCaptionsClose(params);
+    } else if ([method isEqualToString:@"captions.getState"]) {
+        result = SpliceKit_handleCaptionsGetState(params);
+    } else if ([method isEqualToString:@"captions.getStyles"]) {
+        result = SpliceKit_handleCaptionsGetStyles(params);
+    } else if ([method isEqualToString:@"captions.setStyle"]) {
+        result = SpliceKit_handleCaptionsSetStyle(params);
+    } else if ([method isEqualToString:@"captions.setGrouping"]) {
+        result = SpliceKit_handleCaptionsSetGrouping(params);
+    } else if ([method isEqualToString:@"captions.generate"]) {
+        result = SpliceKit_handleCaptionsGenerate(params);
+    } else if ([method isEqualToString:@"captions.exportSRT"]) {
+        result = SpliceKit_handleCaptionsExportSRT(params);
+    } else if ([method isEqualToString:@"captions.exportTXT"]) {
+        result = SpliceKit_handleCaptionsExportTXT(params);
+    } else if ([method isEqualToString:@"captions.setWords"]) {
+        result = SpliceKit_handleCaptionsSetWords(params);
+    } else if ([method isEqualToString:@"captions.setXML"]) {
+        result = SpliceKit_handleCaptionsSetXML(params);
+    }
     // scene detection
     else if ([method isEqualToString:@"scene.detect"]) {
         result = SpliceKit_handleDetectSceneChanges(params);
@@ -15539,8 +15837,6 @@ static NSDictionary *SpliceKit_handleRequest(NSDictionary *request) {
 //
 
 static void SpliceKit_handleClient(int clientFd) {
-    SpliceKit_log(@"Client connected (fd=%d)", clientFd);
-
     dispatch_async(sClientQueue, ^{
         [sConnectedClients addObject:@(clientFd)];
     });
@@ -15550,6 +15846,11 @@ static void SpliceKit_handleClient(int clientFd) {
         close(clientFd);
         return;
     }
+
+    CFAbsoluteTime connectedAt = CFAbsoluteTimeGetCurrent();
+    NSUInteger requestCount = 0;
+    NSString *firstMethod = nil;
+    NSString *lastMethod = nil;
 
     char buffer[65536];
     while (fgets(buffer, sizeof(buffer), stream)) {
@@ -15571,6 +15872,13 @@ static void SpliceKit_handleClient(int clientFd) {
                 response[@"error"] = @{@"code": @(-32700),
                                        @"message": @"Parse error"};
             } else {
+                NSString *method = [request[@"method"] isKindOfClass:[NSString class]]
+                    ? request[@"method"] : nil;
+                if (method.length > 0) {
+                    requestCount += 1;
+                    if (!firstMethod) firstMethod = [method copy];
+                    lastMethod = [method copy];
+                }
                 @try {
                     NSDictionary *result = SpliceKit_handleRequest(request);
                     if (result[@"error"]) {
@@ -15599,7 +15907,17 @@ static void SpliceKit_handleClient(int clientFd) {
         }
     }
 
-    SpliceKit_log(@"Client disconnected (fd=%d)", clientFd);
+    if (requestCount > 0) {
+        NSTimeInterval duration = CFAbsoluteTimeGetCurrent() - connectedAt;
+        if (requestCount == 1) {
+            SpliceKit_log(@"Client session ended (fd=%d requests=1 method=%@ duration=%.2fs)",
+                          clientFd, firstMethod ?: @"<unknown>", duration);
+        } else {
+            SpliceKit_log(@"Client session ended (fd=%d requests=%lu first=%@ last=%@ duration=%.2fs)",
+                          clientFd, (unsigned long)requestCount, firstMethod ?: @"<unknown>",
+                          lastMethod ?: @"<unknown>", duration);
+        }
+    }
     dispatch_async(sClientQueue, ^{
         [sConnectedClients removeObject:@(clientFd)];
     });

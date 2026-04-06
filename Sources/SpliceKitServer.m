@@ -8540,18 +8540,20 @@ void SpliceKit_installSuppressAutoImport(void) {
 
 // FCP defaults to "Fit" (letterbox/pillarbox) when a clip's native resolution
 // doesn't match the project. This feature overrides the default to "Fill" or "None"
-// for newly added clips. It swizzles the four main edit action methods on
-// FFEditActionMgr, then modifies the conform effect on clips added by the edit.
+// for every newly created clip, regardless of how it's added (keyboard edit, drag &
+// drop, paste, etc.).
+//
+// Mechanism: swizzle -[FFHeConformEffect createChannelsInFolder:]. This is called
+// when FCP builds a new conform effect — i.e. whenever a new clip is placed on the
+// timeline. For clips loaded from an existing project, the archived channel values
+// overwrite our modified default after creation, so saved projects are unaffected.
+//
+// The conform type lives in the _chType ivar (CHChannelEnum) on FFHeConformEffect.
+// Its strings array is ["Fit", "Fill", "None"] → int values 0, 1, 2.
 
 static NSString * const kSpliceKitDefaultSpatialConformType = @"SpliceKitDefaultSpatialConformType";
-static IMP sOrigInsertConform = NULL;
-static IMP sOrigAppendConform = NULL;
-static IMP sOrigOverwriteConform = NULL;
-static IMP sOrigAnchorConform = NULL;
+static IMP sOrigCreateChannelsInFolder = NULL;
 static BOOL sDefaultConformInstalled = NO;
-
-// Cached selector for -[FFEffectStack conformEffect], discovered at install time.
-static SEL sCachedConformEffectSel = NULL;
 
 NSString *SpliceKit_getDefaultSpatialConformType(void) {
     NSString *val = [[NSUserDefaults standardUserDefaults] stringForKey:kSpliceKitDefaultSpatialConformType];
@@ -8583,208 +8585,50 @@ static int SpliceKit_conformTypeToInt(NSString *type) {
     return 0; // "fit" default
 }
 
-// Verify FFEffectStack has a conformEffect accessor. Returns YES if found.
-static BOOL SpliceKit_discoverConformSelectors(void) {
-    if (sCachedConformEffectSel) return YES;
+// Swizzled -[FFHeConformEffect createChannelsInFolder:]
+// Called when FCP builds a new conform effect for a clip. We let the original
+// create the channels (including _chType with default "Fit"), then immediately
+// override _chType's int value to the user's preference.
+static void SpliceKit_swizzled_createChannelsInFolder(id self, SEL _cmd, id folder) {
+    // Call original to create all channels normally
+    ((void (*)(id, SEL, id))sOrigCreateChannelsInFolder)(self, _cmd, folder);
 
-    Class stackClass = objc_getClass("FFEffectStack");
-    if (!stackClass) {
-        SpliceKit_log(@"[DefaultConform] FFEffectStack class not found");
-        return NO;
-    }
-
-    SEL sel = NSSelectorFromString(@"conformEffect");
-    if (class_getInstanceMethod(stackClass, sel)) {
-        sCachedConformEffectSel = sel;
-        SpliceKit_log(@"[DefaultConform] Found -[FFEffectStack conformEffect]");
-        return YES;
-    }
-
-    SpliceKit_log(@"[DefaultConform] -[FFEffectStack conformEffect] not found");
-    return NO;
-}
-
-// Snapshot selected items from the timeline module
-static NSArray *SpliceKit_conformGetSelectedItems(id timelineModule) {
-    if (!timelineModule) return @[];
-    SEL sel = NSSelectorFromString(@"selectedItems");
-    if (![timelineModule respondsToSelector:sel]) return @[];
-    id items = ((id (*)(id, SEL))objc_msgSend)(timelineModule, sel);
-    return [items isKindOfClass:[NSArray class]] ? [items copy] : @[];
-}
-
-// Build pointer set for fast identity comparison
-static NSSet *SpliceKit_conformPointerSet(NSArray *items) {
-    NSMutableSet *set = [NSMutableSet setWithCapacity:items.count];
-    for (id item in items) {
-        [set addObject:[NSValue valueWithNonretainedObject:item]];
-    }
-    return set;
-}
-
-// After an edit, find newly added clips and set their spatial conform type.
-// The conform type lives on FFHeConformEffect._chType (a CHChannelEnum).
-// We access it via KVC and call -[CHChannelEnum setIntValue:].
-static void SpliceKit_conformSetNewClipType(id timelineModule, NSArray *selectedBefore) {
     NSString *conformType = SpliceKit_getDefaultSpatialConformType();
-    if ([conformType isEqualToString:@"fit"]) return; // FCP default, nothing to do
-    if (!sCachedConformEffectSel) return;
-    if (!timelineModule) return;
+    if ([conformType isEqualToString:@"fit"]) return; // FCP default, nothing to change
 
-    NSArray *selectedAfter = SpliceKit_conformGetSelectedItems(timelineModule);
-    if (!selectedAfter.count) return;
+    @try {
+        id chType = [self valueForKey:@"_chType"];
+        if (!chType) return;
 
-    NSSet *beforeSet = SpliceKit_conformPointerSet(selectedBefore);
-    int conformInt = SpliceKit_conformTypeToInt(conformType);
-    SEL setIntValueSel = NSSelectorFromString(@"setIntValue:");
-
-    // Get the sequence for undo grouping
-    id sequence = nil;
-    SEL seqSel = NSSelectorFromString(@"sequence");
-    if ([timelineModule respondsToSelector:seqSel]) {
-        sequence = ((id (*)(id, SEL))objc_msgSend)(timelineModule, seqSel);
-    }
-
-    NSString *actionName = @"Set Spatial Conform";
-    if (sequence) {
-        SEL beginSel = NSSelectorFromString(@"actionBegin:");
-        if ([sequence respondsToSelector:beginSel]) {
-            ((void (*)(id, SEL, id))objc_msgSend)(sequence, beginSel, actionName);
+        int targetInt = SpliceKit_conformTypeToInt(conformType);
+        SEL setIntSel = NSSelectorFromString(@"setIntValue:");
+        if ([chType respondsToSelector:setIntSel]) {
+            ((void (*)(id, SEL, int))objc_msgSend)(chType, setIntSel, targetInt);
         }
+    } @catch (NSException *e) {
+        SpliceKit_log(@"[DefaultConform] Exception in createChannelsInFolder: swizzle: %@", e.reason);
     }
-
-    NSInteger modifiedCount = 0;
-    for (id clip in selectedAfter) {
-        if ([beforeSet containsObject:[NSValue valueWithNonretainedObject:clip]])
-            continue; // Not a new clip
-
-        @try {
-            // Get the clip's effect stack
-            SEL esSel = NSSelectorFromString(@"effectStack");
-            if (![clip respondsToSelector:esSel]) continue;
-            id effectStack = ((id (*)(id, SEL))objc_msgSend)(clip, esSel);
-            if (!effectStack) continue;
-
-            // Get the conform effect from the stack
-            if (![effectStack respondsToSelector:sCachedConformEffectSel]) continue;
-            id conformEffect = ((id (*)(id, SEL))objc_msgSend)(effectStack, sCachedConformEffectSel);
-            if (!conformEffect) continue;
-
-            // Get the _chType channel (CHChannelEnum) via KVC
-            id chType = [conformEffect valueForKey:@"_chType"];
-            if (!chType) continue;
-
-            // Set the integer value on the channel
-            if ([chType respondsToSelector:setIntValueSel]) {
-                ((void (*)(id, SEL, int))objc_msgSend)(chType, setIntValueSel, conformInt);
-                modifiedCount++;
-            }
-        } @catch (NSException *e) {
-            SpliceKit_log(@"[DefaultConform] Exception on clip %@: %@",
-                          NSStringFromClass([clip class]), e.reason);
-        }
-    }
-
-    if (sequence) {
-        SEL endSel = NSSelectorFromString(@"actionEnd:save:error:");
-        if ([sequence respondsToSelector:endSel]) {
-            ((void (*)(id, SEL, id, BOOL, id))objc_msgSend)(
-                sequence, endSel, actionName, YES, nil);
-        }
-    }
-
-    if (modifiedCount > 0) {
-        SpliceKit_log(@"[DefaultConform] Set %ld clip(s) to '%@'", (long)modifiedCount, conformType);
-    }
-}
-
-// --- Swizzled edit methods ---
-
-static void SpliceKit_swizzled_insertConform(id self, SEL _cmd, id sender) {
-    if ([SpliceKit_getDefaultSpatialConformType() isEqualToString:@"fit"]) {
-        ((void (*)(id, SEL, id))sOrigInsertConform)(self, _cmd, sender);
-        return;
-    }
-    id timeline = SpliceKit_getActiveTimelineModule();
-    NSArray *before = SpliceKit_conformGetSelectedItems(timeline);
-    ((void (*)(id, SEL, id))sOrigInsertConform)(self, _cmd, sender);
-    SpliceKit_conformSetNewClipType(timeline, before);
-}
-
-static void SpliceKit_swizzled_appendConform(id self, SEL _cmd, id sender) {
-    if ([SpliceKit_getDefaultSpatialConformType() isEqualToString:@"fit"]) {
-        ((void (*)(id, SEL, id))sOrigAppendConform)(self, _cmd, sender);
-        return;
-    }
-    id timeline = SpliceKit_getActiveTimelineModule();
-    NSArray *before = SpliceKit_conformGetSelectedItems(timeline);
-    ((void (*)(id, SEL, id))sOrigAppendConform)(self, _cmd, sender);
-    SpliceKit_conformSetNewClipType(timeline, before);
-}
-
-static void SpliceKit_swizzled_overwriteConform(id self, SEL _cmd, id sender) {
-    if ([SpliceKit_getDefaultSpatialConformType() isEqualToString:@"fit"]) {
-        ((void (*)(id, SEL, id))sOrigOverwriteConform)(self, _cmd, sender);
-        return;
-    }
-    id timeline = SpliceKit_getActiveTimelineModule();
-    NSArray *before = SpliceKit_conformGetSelectedItems(timeline);
-    ((void (*)(id, SEL, id))sOrigOverwriteConform)(self, _cmd, sender);
-    SpliceKit_conformSetNewClipType(timeline, before);
-}
-
-static void SpliceKit_swizzled_anchorConform(id self, SEL _cmd, id sender) {
-    if ([SpliceKit_getDefaultSpatialConformType() isEqualToString:@"fit"]) {
-        ((void (*)(id, SEL, id))sOrigAnchorConform)(self, _cmd, sender);
-        return;
-    }
-    id timeline = SpliceKit_getActiveTimelineModule();
-    NSArray *before = SpliceKit_conformGetSelectedItems(timeline);
-    ((void (*)(id, SEL, id))sOrigAnchorConform)(self, _cmd, sender);
-    SpliceKit_conformSetNewClipType(timeline, before);
 }
 
 void SpliceKit_installDefaultSpatialConformType(void) {
     if (sDefaultConformInstalled) return;
 
-    // Verify FFEffectStack.conformEffect exists at runtime
-    if (!SpliceKit_discoverConformSelectors()) {
-        SpliceKit_log(@"[DefaultConform] Selector discovery failed — feature unavailable");
-        return;
-    }
-
-    Class cls = objc_getClass("FFEditActionMgr");
+    Class cls = objc_getClass("FFHeConformEffect");
     if (!cls) {
-        SpliceKit_log(@"[DefaultConform] FFEditActionMgr class not found");
+        SpliceKit_log(@"[DefaultConform] FFHeConformEffect class not found");
         return;
     }
 
-    struct { SEL sel; IMP *origPtr; IMP newImp; } swizzles[] = {
-        { NSSelectorFromString(@"insertWithSelectedMedia:"),
-          &sOrigInsertConform,
-          (IMP)SpliceKit_swizzled_insertConform },
-        { NSSelectorFromString(@"appendWithSelectedMedia:"),
-          &sOrigAppendConform,
-          (IMP)SpliceKit_swizzled_appendConform },
-        { NSSelectorFromString(@"overwriteWithSelectedMedia:"),
-          &sOrigOverwriteConform,
-          (IMP)SpliceKit_swizzled_overwriteConform },
-        { NSSelectorFromString(@"anchorWithSelectedMedia:"),
-          &sOrigAnchorConform,
-          (IMP)SpliceKit_swizzled_anchorConform },
-    };
-
-    for (int i = 0; i < 4; i++) {
-        Method m = class_getInstanceMethod(cls, swizzles[i].sel);
-        if (m && !*swizzles[i].origPtr) {
-            *swizzles[i].origPtr = method_setImplementation(m, swizzles[i].newImp);
-            SpliceKit_log(@"[DefaultConform] Swizzled -[FFEditActionMgr %@]",
-                          NSStringFromSelector(swizzles[i].sel));
-        }
+    SEL sel = NSSelectorFromString(@"createChannelsInFolder:");
+    Method m = class_getInstanceMethod(cls, sel);
+    if (!m) {
+        SpliceKit_log(@"[DefaultConform] -[FFHeConformEffect createChannelsInFolder:] not found");
+        return;
     }
 
+    sOrigCreateChannelsInFolder = method_setImplementation(m, (IMP)SpliceKit_swizzled_createChannelsInFolder);
     sDefaultConformInstalled = YES;
-    SpliceKit_log(@"[DefaultConform] Swizzle installed (current: %@)",
+    SpliceKit_log(@"[DefaultConform] Swizzled -[FFHeConformEffect createChannelsInFolder:] (current: %@)",
                   SpliceKit_getDefaultSpatialConformType());
 }
 

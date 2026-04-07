@@ -6372,6 +6372,7 @@ static NSDictionary *SpliceKit_handleOptionsGet(NSDictionary *params) {
         @"suppressAutoImport": @(SpliceKit_isSuppressAutoImportEnabled()),
         @"lLadder": SpliceKit_getLLadder(),
         @"jLadder": SpliceKit_getJLadder(),
+        @"defaultSpatialConformType": SpliceKit_getDefaultSpatialConformType(),
     };
 }
 
@@ -6412,6 +6413,25 @@ static NSDictionary *SpliceKit_handleOptionsSet(NSDictionary *params) {
         if (!value) return @{@"error": @"'value' parameter required (array of numbers)"};
         SpliceKit_setJLadder(value);
         return @{@"status": @"ok", @"jLadder": SpliceKit_getJLadder()};
+    } else if ([option isEqualToString:@"defaultSpatialConformType"]) {
+        NSString *value = params[@"value"];
+        if (!value) {
+            // Backward compat: accept enabled bool (true -> "fill", false -> "fit")
+            NSNumber *enabled = params[@"enabled"];
+            if (enabled) {
+                value = [enabled boolValue] ? @"fill" : @"fit";
+            } else {
+                return @{@"error": @"'value' parameter required (\"fit\", \"fill\", or \"none\")"};
+            }
+        }
+        value = [value lowercaseString];
+        if (!([value isEqualToString:@"fit"] || [value isEqualToString:@"fill"] || [value isEqualToString:@"none"])) {
+            return @{@"error": [NSString stringWithFormat:
+                @"Invalid value '%@'. Must be \"fit\", \"fill\", or \"none\".", value]};
+        }
+        SpliceKit_setDefaultSpatialConformType(value);
+        return @{@"status": @"ok",
+                 @"defaultSpatialConformType": SpliceKit_getDefaultSpatialConformType()};
     }
 
     return @{@"error": [NSString stringWithFormat:@"Unknown option: %@", option]};
@@ -6902,14 +6922,14 @@ static void SpliceKit_captureTransitionReplayRequest(id sequence, id spineObject
     sFreezeExtendActionRootItem = rootItem;
     sFreezeExtendActionReportErrors = reportErrors;
 
-    SpliceKit_log([NSString stringWithFormat:
+    SpliceKit_log(
         @"[FreezeExtend] Captured transition request from %@ before=%@ after=%@ reportErrors=%@ effects=%@ root=%@",
         source ?: @"transition",
         before ? @"YES" : @"NO",
         after ? @"YES" : @"NO",
         reportErrors ? @"YES" : @"NO",
         NSStringFromClass([effects class]) ?: @"<nil>",
-        NSStringFromClass([rootItem class]) ?: @"<nil>"]);
+        NSStringFromClass([rootItem class]) ?: @"<nil>");
 }
 
 static void SpliceKit_captureOperationTransitionReplayRequest(
@@ -6935,14 +6955,14 @@ static void SpliceKit_captureOperationTransitionReplayRequest(
         durationSeconds = (double)transitionDuration.value / (double)transitionDuration.timescale;
     }
 
-    SpliceKit_log([NSString stringWithFormat:
+    SpliceKit_log(
         @"[FreezeExtend] Captured operation replay from %@ before=%@ after=%@ reportErrors=%d duration=%.4f spare=%@",
         source ?: @"transition",
         before ? @"YES" : @"NO",
         after ? @"YES" : @"NO",
         reportErrors,
         durationSeconds,
-        NSStringFromClass([spareTransition class]) ?: @"<nil>"]);
+        NSStringFromClass([spareTransition class]) ?: @"<nil>");
 }
 
 static void SpliceKit_clearCapturedTransitionRequest(void) {
@@ -7022,12 +7042,12 @@ static BOOL SpliceKit_replayCapturedTransitionRequest(id timeline, NSString **ou
             @"captured sequence no longer responds to actionAddTransitionsToSpineObjects");
     }
 
-    SpliceKit_log([NSString stringWithFormat:
+    SpliceKit_log(
         @"[FreezeExtend] Action replay using sequence=%@ spineObjects=%@ root=%@ liveRight=%@",
         NSStringFromClass([sequence class]) ?: @"<nil>",
         NSStringFromClass([spineObjects class]) ?: @"<nil>",
         NSStringFromClass([rootItem class]) ?: @"<nil>",
-        NSStringFromClass([liveRightClip class]) ?: @"<nil>"]);
+        NSStringFromClass([liveRightClip class]) ?: @"<nil>");
 
     id transitionsCreated = nil;
     __autoreleasing id error = nil;
@@ -7113,7 +7133,7 @@ static BOOL SpliceKit_replayCapturedOperationTransitionRequest(id timeline, NSSt
             @"captured sequence no longer responds to operationAddTransitions...askedRetry");
     }
 
-    SpliceKit_log([NSString stringWithFormat:
+    SpliceKit_log(@"%@", [NSString stringWithFormat:
         @"[FreezeExtend] Operation replay using sequence=%@ spineObject=%@ objects=%@ liveRight=%@ spare=%@",
         NSStringFromClass([sequence class]) ?: @"<nil>",
         NSStringFromClass([spineObject class]) ?: @"<nil>",
@@ -7213,7 +7233,7 @@ static double SpliceKit_defaultTransitionDurationSeconds(id timeline) {
 static BOOL SpliceKit_failFreezeExtendRepair(NSString **outReason, NSString *reason) {
     NSString *message = reason ?: @"unknown reason";
     if (outReason) *outReason = message;
-    SpliceKit_log([NSString stringWithFormat:
+    SpliceKit_log(@"%@", [NSString stringWithFormat:
         @"[FreezeExtend] Synthetic repair step failed: %@", message]);
     return NO;
 }
@@ -7288,7 +7308,7 @@ static BOOL SpliceKit_attemptFreezeExtendRepairRightSide(NSString **outReason) {
             }
         }
         sForceOverlap = YES;
-        SpliceKit_log([NSString stringWithFormat:
+        SpliceKit_log(@"%@", [NSString stringWithFormat:
             @"[FreezeExtend] Repair: reduced duration from %.4f to %.4f "
             @"(left=%.4f target=%.4f minClip=%.4f)",
             defaultDur, maxFeasible, leftDurForRepair, targetDuration, minClipDur]);
@@ -7311,7 +7331,7 @@ static BOOL SpliceKit_attemptFreezeExtendRepairRightSide(NSString **outReason) {
                 SpliceKit_log(@"[FreezeExtend] Captured operation replay returned success but no transition appeared");
             }
         } else {
-            SpliceKit_log([NSString stringWithFormat:
+            SpliceKit_log(@"%@", [NSString stringWithFormat:
                 @"[FreezeExtend] Captured operation replay failed: %@",
                 opReplayReason ?: @"unknown reason"]);
         }
@@ -7334,7 +7354,7 @@ static BOOL SpliceKit_attemptFreezeExtendRepairRightSide(NSString **outReason) {
                 SpliceKit_log(@"[FreezeExtend] Captured replay returned success but no transition appeared");
             }
         } else {
-            SpliceKit_log([NSString stringWithFormat:
+            SpliceKit_log(@"%@", [NSString stringWithFormat:
                 @"[FreezeExtend] Captured replay failed: %@",
                 replayReason ?: @"unknown reason"]);
         }
@@ -7383,7 +7403,7 @@ static BOOL SpliceKit_attemptFreezeExtendRepairRightSide(NSString **outReason) {
     }
 
     if (rightEnd <= targetEnd + (frame * 4.0)) {
-        SpliceKit_log([NSString stringWithFormat:
+        SpliceKit_log(@"%@", [NSString stringWithFormat:
             @"[FreezeExtend] Right clip already within captured bounds start=%.4f end=%.4f targetEnd=%.4f",
             rightStart, rightEnd, targetEnd]);
         repairResult = YES;
@@ -7400,7 +7420,7 @@ static BOOL SpliceKit_attemptFreezeExtendRepairRightSide(NSString **outReason) {
         double leftStart = 0.0;
         double leftEnd = 0.0;
         SpliceKit_transitionGetItemBounds(leftClip, &leftStart, &leftEnd);
-        SpliceKit_log([NSString stringWithFormat:
+        SpliceKit_log(@"%@", [NSString stringWithFormat:
             @"[FreezeExtend] Corrective trim left=%.4f-%.4f right=%.4f-%.4f targetCut=%.4f targetEnd=%.4f",
             leftStart, leftEnd, rightStart, rightEnd, targetStart, targetEnd]);
 
@@ -7433,7 +7453,7 @@ static BOOL SpliceKit_attemptFreezeExtendRepairRightSide(NSString **outReason) {
             goto repair_cleanup;
         }
 
-        SpliceKit_log([NSString stringWithFormat:
+        SpliceKit_log(@"%@", [NSString stringWithFormat:
             @"[FreezeExtend] Corrective trim completed right=%.4f-%.4f",
             correctedRightStart, correctedRightEnd]);
         SpliceKit_sendTimelineSimpleAction(timeline, @"deselectAll:");
@@ -7468,7 +7488,7 @@ static void SpliceKit_scheduleFreezeExtendRepairAttempt(NSInteger attemptNumber)
             BOOL ok = SpliceKit_attemptFreezeExtendRepairRightSide(&reason);
             if (ok) {
                 sFreezeExtendDidApply = YES;
-                SpliceKit_log([NSString stringWithFormat:
+                SpliceKit_log(@"%@", [NSString stringWithFormat:
                     @"[FreezeExtend] Synthetic repair completed on attempt %ld",
                     (long)attemptNumber]);
                 SpliceKit_clearCapturedTransitionRequest();
@@ -7481,7 +7501,7 @@ static void SpliceKit_scheduleFreezeExtendRepairAttempt(NSInteger attemptNumber)
             }
 
             sFreezeExtendDidApply = NO;
-            SpliceKit_log([NSString stringWithFormat:
+            SpliceKit_log(@"%@", [NSString stringWithFormat:
                 @"[FreezeExtend] Synthetic repair failed on attempt %ld: %@",
                 (long)attemptNumber, reason ?: @"unknown reason"]);
             SpliceKit_clearCapturedTransitionRequest();
@@ -7509,7 +7529,7 @@ static int SpliceKit_effectiveTransitionOverlapType(int overlapType, NSString *s
     if (overlapType != 2) {
         SpliceKit_log(@"[FreezeExtend] Forcing transitionOverlapType -> 2");
         if (source.length > 0) {
-            SpliceKit_log([NSString stringWithFormat:
+            SpliceKit_log(@"%@", [NSString stringWithFormat:
                 @"[FreezeExtend] Source=%@ original transitionOverlapType=%d",
                 source, overlapType]);
         }
@@ -7589,7 +7609,7 @@ static BOOL SpliceKit_swizzled_operationAddTransitionsAskedRetry(
 
 static void SpliceKit_swizzled_NSApp_stopModalWithCode(id self, SEL _cmd, NSModalResponse code) {
     if (sFreezeExtendInTransitionAlert) {
-        SpliceKit_log([NSString stringWithFormat:
+        SpliceKit_log(@"%@", [NSString stringWithFormat:
             @"[FreezeExtend] stopModalWithCode raw=%ld", (long)code]);
         if (SpliceKit_isFreezeFramesResponse(code)) {
             SpliceKit_log(@"[FreezeExtend] stopModalWithCode detected 'Use Freeze Frames'");
@@ -9681,6 +9701,102 @@ void SpliceKit_installSuppressAutoImport(void) {
 
     sSuppressAutoImportInstalled = YES;
     SpliceKit_log(@"[SuppressAutoImport] Swizzle installed");
+}
+
+#pragma mark - Default Spatial Conform Type
+
+// FCP defaults to "Fit" (letterbox/pillarbox) when a clip's native resolution
+// doesn't match the project. This feature overrides the default to "Fill" or "None"
+// for every newly created clip, regardless of how it's added (keyboard edit, drag &
+// drop, paste, etc.).
+//
+// Mechanism: swizzle -[FFHeConformEffect createChannelsInFolder:]. This is called
+// when FCP builds a new conform effect — i.e. whenever a new clip is placed on the
+// timeline. For clips loaded from an existing project, the archived channel values
+// overwrite our modified default after creation, so saved projects are unaffected.
+//
+// The conform type lives in the _chType ivar (CHChannelEnum) on FFHeConformEffect.
+// Its strings array is ["Fit", "Fill", "None"] → int values 0, 1, 2.
+
+static NSString * const kSpliceKitDefaultSpatialConformType = @"SpliceKitDefaultSpatialConformType";
+static IMP sOrigCreateChannelsInFolder = NULL;
+static BOOL sDefaultConformInstalled = NO;
+
+NSString *SpliceKit_getDefaultSpatialConformType(void) {
+    NSString *val = [[NSUserDefaults standardUserDefaults] stringForKey:kSpliceKitDefaultSpatialConformType];
+    if (val && ([val isEqualToString:@"fit"] || [val isEqualToString:@"fill"] || [val isEqualToString:@"none"])) {
+        return val;
+    }
+    return @"fit"; // default
+}
+
+void SpliceKit_setDefaultSpatialConformType(NSString *value) {
+    if (!value) value = @"fit";
+    value = [value lowercaseString];
+    if (!([value isEqualToString:@"fit"] || [value isEqualToString:@"fill"] || [value isEqualToString:@"none"])) {
+        SpliceKit_log(@"[DefaultConform] Invalid value '%@', ignoring (must be fit/fill/none)", value);
+        return;
+    }
+    [[NSUserDefaults standardUserDefaults] setObject:value forKey:kSpliceKitDefaultSpatialConformType];
+    if (![value isEqualToString:@"fit"]) {
+        SpliceKit_installDefaultSpatialConformType();
+    }
+    SpliceKit_log(@"[DefaultConform] Set to '%@'", value);
+}
+
+// Map string type to CHChannelEnum integer value on FFHeConformEffect._chType.
+// The channel's strings array is ["Fit", "Fill", "None"], so: 0 = Fit, 1 = Fill, 2 = None.
+static int SpliceKit_conformTypeToInt(NSString *type) {
+    if ([type isEqualToString:@"fill"]) return 1;
+    if ([type isEqualToString:@"none"]) return 2;
+    return 0; // "fit" default
+}
+
+// Swizzled -[FFHeConformEffect createChannelsInFolder:]
+// Called when FCP builds a new conform effect for a clip. We let the original
+// create the channels (including _chType with default "Fit"), then immediately
+// override _chType's int value to the user's preference.
+static void SpliceKit_swizzled_createChannelsInFolder(id self, SEL _cmd, id folder) {
+    // Call original to create all channels normally
+    ((void (*)(id, SEL, id))sOrigCreateChannelsInFolder)(self, _cmd, folder);
+
+    NSString *conformType = SpliceKit_getDefaultSpatialConformType();
+    if ([conformType isEqualToString:@"fit"]) return; // FCP default, nothing to change
+
+    @try {
+        id chType = [self valueForKey:@"_chType"];
+        if (!chType) return;
+
+        int targetInt = SpliceKit_conformTypeToInt(conformType);
+        SEL setIntSel = NSSelectorFromString(@"setIntValue:");
+        if ([chType respondsToSelector:setIntSel]) {
+            ((void (*)(id, SEL, int))objc_msgSend)(chType, setIntSel, targetInt);
+        }
+    } @catch (NSException *e) {
+        SpliceKit_log(@"[DefaultConform] Exception in createChannelsInFolder: swizzle: %@", e.reason);
+    }
+}
+
+void SpliceKit_installDefaultSpatialConformType(void) {
+    if (sDefaultConformInstalled) return;
+
+    Class cls = objc_getClass("FFHeConformEffect");
+    if (!cls) {
+        SpliceKit_log(@"[DefaultConform] FFHeConformEffect class not found");
+        return;
+    }
+
+    SEL sel = NSSelectorFromString(@"createChannelsInFolder:");
+    Method m = class_getInstanceMethod(cls, sel);
+    if (!m) {
+        SpliceKit_log(@"[DefaultConform] -[FFHeConformEffect createChannelsInFolder:] not found");
+        return;
+    }
+
+    sOrigCreateChannelsInFolder = method_setImplementation(m, (IMP)SpliceKit_swizzled_createChannelsInFolder);
+    sDefaultConformInstalled = YES;
+    SpliceKit_log(@"[DefaultConform] Swizzled -[FFHeConformEffect createChannelsInFolder:] (current: %@)",
+                  SpliceKit_getDefaultSpatialConformType());
 }
 
 #pragma mark - Transition Handlers

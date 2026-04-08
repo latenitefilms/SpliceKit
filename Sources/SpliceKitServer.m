@@ -4390,9 +4390,11 @@ static NSDictionary *SpliceKit_handleTimelineGetState(NSDictionary *params) {
 
 static NSDictionary *SpliceKit_handleTranscriptOpen(NSDictionary *params) {
     NSString *fileURL = params[@"fileURL"];
+    __block BOOL startedTranscription = NO;
+    __block BOOL restoredTranscript = NO;
+    __block BOOL alreadyTranscribing = NO;
 
-    __block NSDictionary *result = nil;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+    SpliceKit_executeOnMainThread(^{
         SpliceKitTranscriptPanel *panel = [SpliceKitTranscriptPanel sharedPanel];
         [panel showPanel];
 
@@ -4402,13 +4404,36 @@ static NSDictionary *SpliceKit_handleTranscriptOpen(NSDictionary *params) {
             double trimStart = [params[@"trimStart"] doubleValue];
             double trimDuration = [params[@"trimDuration"] doubleValue] ?: HUGE_VAL;
             [panel transcribeFromURL:url timelineStart:timelineStart trimStart:trimStart trimDuration:trimDuration];
+            startedTranscription = YES;
+        } else if (panel.status == SpliceKitTranscriptStatusReady && panel.words.count > 0) {
+            restoredTranscript = YES;
+        } else if (panel.status == SpliceKitTranscriptStatusTranscribing) {
+            alreadyTranscribing = YES;
         } else {
             [panel transcribeTimeline];
+            startedTranscription = YES;
         }
     });
 
-    // Return immediately - transcription is async
-    return @{@"status": @"ok", @"message": @"Transcript panel opened. Transcription started. Use transcript.getState to check progress."};
+    if (startedTranscription) {
+        return @{
+            @"status": @"ok",
+            @"message": @"Transcript panel opened. Transcription started. Use transcript.getState to check progress.",
+            @"transcriptionStarted": @YES,
+        };
+    }
+    if (alreadyTranscribing) {
+        return @{
+            @"status": @"ok",
+            @"message": @"Transcript panel opened. Transcription already in progress. Use transcript.getState to check progress.",
+            @"transcriptionStarted": @NO,
+        };
+    }
+    return @{
+        @"status": @"ok",
+        @"message": restoredTranscript ? @"Transcript panel opened. Restored persisted transcript." : @"Transcript panel opened.",
+        @"transcriptionStarted": @NO,
+    };
 }
 
 static NSDictionary *SpliceKit_handleTranscriptClose(NSDictionary *params) {
@@ -4508,20 +4533,49 @@ static NSDictionary *SpliceKit_handleTranscriptSetSpeaker(NSDictionary *params) 
 static NSDictionary *SpliceKit_handleCaptionsOpen(NSDictionary *params) {
     NSString *fileURL = params[@"fileURL"];
     NSString *presetID = params[@"style"];
+    __block BOOL startedTranscription = NO;
+    __block BOOL restoredCaptions = NO;
+    __block BOOL alreadyTranscribing = NO;
 
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{
+    SpliceKit_executeOnMainThread(^{
         SpliceKitCaptionPanel *panel = [SpliceKitCaptionPanel sharedPanel];
         if (presetID) {
             SpliceKitCaptionStyle *style = [SpliceKitCaptionStyle presetWithID:presetID];
             if (style) [panel setStyle:style];
         }
         [panel showPanel];
-        if (panel.words.count == 0) {
+        if (fileURL) {
             [panel transcribeTimeline];
+            startedTranscription = YES;
+        } else if (panel.status == SpliceKitCaptionStatusReady && panel.words.count > 0) {
+            restoredCaptions = YES;
+        } else if (panel.status == SpliceKitCaptionStatusTranscribing) {
+            alreadyTranscribing = YES;
+        } else if (panel.words.count == 0) {
+            [panel transcribeTimeline];
+            startedTranscription = YES;
         }
     });
-    return @{@"status": @"ok", @"message": @"Caption panel opened. Transcription starting..."};
+
+    if (startedTranscription) {
+        return @{
+            @"status": @"ok",
+            @"message": @"Caption panel opened. Transcription started. Use captions.getState to check progress.",
+            @"transcriptionStarted": @YES,
+        };
+    }
+    if (alreadyTranscribing) {
+        return @{
+            @"status": @"ok",
+            @"message": @"Caption panel opened. Transcription already in progress. Use captions.getState to check progress.",
+            @"transcriptionStarted": @NO,
+        };
+    }
+    return @{
+        @"status": @"ok",
+        @"message": restoredCaptions ? @"Caption panel opened. Restored persisted captions." : @"Caption panel opened.",
+        @"transcriptionStarted": @NO,
+    };
 }
 
 static NSDictionary *SpliceKit_handleCaptionsClose(NSDictionary *params) {

@@ -50,6 +50,14 @@ void SpliceKit_executeOnMainThread(dispatch_block_t block);
 void SpliceKit_executeOnMainThreadAsync(dispatch_block_t block);
 BOOL SpliceKit_isMainThreadInRPCDispatch(void);
 
+#pragma mark - Sequence State Persistence
+
+// Persist and reload per-sequence JSON state under Application Support so
+// transcript-derived tools can survive an FCP relaunch.
+NSDictionary *SpliceKit_sequenceIdentity(id sequence);
+NSDictionary *SpliceKit_loadSequenceState(id sequence);
+BOOL SpliceKit_saveSequenceState(id sequence, NSDictionary *state, NSError **error);
+
 #pragma mark - Swizzling
 
 // Swap a method implementation and stash the original so we can put it back later.

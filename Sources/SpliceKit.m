@@ -13,6 +13,7 @@
 #import "SpliceKitCommandPalette.h"
 #import "SpliceKitDebugUI.h"
 #import <AppKit/AppKit.h>
+#import <time.h>
 
 #pragma mark - Logging
 //
@@ -24,6 +25,18 @@
 static NSString *sLogPath = nil;
 static NSFileHandle *sLogHandle = nil;
 static dispatch_queue_t sLogQueue = nil;
+
+static NSString *SpliceKit_logTimestamp(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+
+    struct tm localTime;
+    localtime_r(&ts.tv_sec, &localTime);
+
+    char buffer[32];
+    strftime(buffer, sizeof(buffer), "%H:%M:%S", &localTime);
+    return [NSString stringWithFormat:@"%s.%03ld", buffer, ts.tv_nsec / 1000000L];
+}
 
 static void SpliceKit_initLogging(void) {
     sLogQueue = dispatch_queue_create("com.splicekit.log", DISPATCH_QUEUE_SERIAL);
@@ -62,9 +75,7 @@ void SpliceKit_log(NSString *format, ...) {
 
     // Append to log file on a serial queue so we don't block the caller
     if (sLogHandle && sLogQueue) {
-        NSString *timestamp = [NSDateFormatter localizedStringFromDate:[NSDate date]
-                                                            dateStyle:NSDateFormatterNoStyle
-                                                            timeStyle:NSDateFormatterMediumStyle];
+        NSString *timestamp = SpliceKit_logTimestamp();
         NSString *line = [NSString stringWithFormat:@"[%@] [SpliceKit] %@%@\n",
                           timestamp, threadLabel, message];
         NSData *data = [line dataUsingEncoding:NSUTF8StringEncoding];
@@ -969,6 +980,18 @@ static void SpliceKit_appDidLaunch(void) {
 
     // Install effect browser favorites context menu (always on)
     SpliceKit_installEffectFavoritesSwizzle();
+
+    // Restore persisted social caption text after relaunch once a real sequence is
+    // active. Automatic repair is intentionally limited to the Motion effect text
+    // field API so relaunch does not wake the heavier channel/document machinery.
+    Class captionPanelClass = objc_getClass("SpliceKitCaptionPanel");
+    if (captionPanelClass) {
+        id captionPanel = ((id (*)(id, SEL))objc_msgSend)((id)captionPanelClass, @selector(sharedPanel));
+        SEL enableAutoRestoreSel = NSSelectorFromString(@"enableAutomaticRestore");
+        if (captionPanel && [captionPanel respondsToSelector:enableAutoRestoreSel]) {
+            ((void (*)(id, SEL))objc_msgSend)(captionPanel, enableAutoRestoreSel);
+        }
+    }
 
     // Install FCPXML direct paste support (converts FCPXML on pasteboard
     // to native clipboard format so pasteAnchored: can handle it)

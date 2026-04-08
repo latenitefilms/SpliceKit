@@ -2452,102 +2452,126 @@ static BOOL SpliceKitCaption_pollMainThread(BOOL (^condition)(void), double time
                     if (!anchored || anchored.count == 0) continue;
 
                     for (id conn in anchored) {
-                        verifiedTitleCount++;
-
-                        // Reload Motion template
-                        @try {
-                            SEL effectSel = NSSelectorFromString(@"effect");
-                            if ([conn respondsToSelector:effectSel]) {
-                                id eff = ((id (*)(id, SEL))objc_msgSend)(conn, effectSel);
-                                SEL reloadSel = NSSelectorFromString(@"reloadMicaDocument");
-                                if (eff && [eff respondsToSelector:reloadSel]) {
-                                    ((void (*)(id, SEL))objc_msgSend)(eff, reloadSel);
+                        // Connected item may be a storyline (FFAnchoredCollection)
+                        // containing titles, or an individual title. Collect all
+                        // titles to process.
+                        NSMutableArray *titlesToProcess = [NSMutableArray array];
+                        SEL containedSel = NSSelectorFromString(@"containedItems");
+                        if ([conn respondsToSelector:containedSel]) {
+                            NSArray *contained = ((id (*)(id, SEL))objc_msgSend)(conn, containedSel);
+                            if ([contained isKindOfClass:[NSArray class]]) {
+                                for (id sub in contained) {
+                                    // Skip gap spacers — only process titles
+                                    NSString *cls = NSStringFromClass([sub class]);
+                                    if (![cls containsString:@"Gap"]) {
+                                        [titlesToProcess addObject:sub];
+                                    }
                                 }
                             }
-                        } @catch (NSException *e) {}
+                        }
+                        // If no contained items (or not a collection), process conn itself
+                        if (titlesToProcess.count == 0) {
+                            [titlesToProcess addObject:conn];
+                        }
 
-                        // Set position
-                        if (needsPosition) {
+                        for (id title in titlesToProcess) {
+                            verifiedTitleCount++;
+
+                            // Reload Motion template
                             @try {
                                 SEL effectSel = NSSelectorFromString(@"effect");
-                                id eff = [conn respondsToSelector:effectSel]
-                                    ? ((id (*)(id, SEL))objc_msgSend)(conn, effectSel) : nil;
-                                id cf = eff ? ((id (*)(id, SEL))objc_msgSend)(eff,
+                                if ([title respondsToSelector:effectSel]) {
+                                    id eff = ((id (*)(id, SEL))objc_msgSend)(title, effectSel);
+                                    SEL reloadSel = NSSelectorFromString(@"reloadMicaDocument");
+                                    if (eff && [eff respondsToSelector:reloadSel]) {
+                                        ((void (*)(id, SEL))objc_msgSend)(eff, reloadSel);
+                                    }
+                                }
+                            } @catch (NSException *e) {}
+
+                            // Set position via Motion template channel hierarchy
+                            if (needsPosition) {
+                                @try {
+                                    SEL effectSel = NSSelectorFromString(@"effect");
+                                    id eff = [title respondsToSelector:effectSel]
+                                        ? ((id (*)(id, SEL))objc_msgSend)(title, effectSel) : nil;
+                                    id cf = eff ? ((id (*)(id, SEL))objc_msgSend)(eff,
+                                        NSSelectorFromString(@"channelFolder")) : nil;
+                                    if (cf) {
+                                        Class pos3DClass = objc_getClass("CHChannelPosition3D");
+                                        NSMutableArray *stack = [NSMutableArray arrayWithObject:cf];
+                                        BOOL found = NO;
+                                        while (stack.count > 0 && !found) {
+                                            id node = stack.lastObject;
+                                            [stack removeLastObject];
+                                            if (pos3DClass && [node isKindOfClass:pos3DClass]) {
+                                                NSString *nm = ((id (*)(id, SEL))objc_msgSend)(node, NSSelectorFromString(@"name"));
+                                                if ([nm isEqualToString:@"Position"]) {
+                                                    id parent = [node respondsToSelector:NSSelectorFromString(@"parent")]
+                                                        ? ((id (*)(id, SEL))objc_msgSend)(node, NSSelectorFromString(@"parent")) : nil;
+                                                    NSString *parentName = parent
+                                                        ? ((id (*)(id, SEL))objc_msgSend)(parent, NSSelectorFromString(@"name")) : nil;
+                                                    if ([parentName isEqualToString:@"Transform"]) {
+                                                        id yCh = SpliceKitCaption_subChannel(node, @"y");
+                                                        if (yCh && SpliceKitCaption_setChannelDouble(yCh, yOffset))
+                                                            positionAppliedCount++;
+                                                        found = YES;
+                                                    }
+                                                }
+                                            }
+                                            SEL childSel = NSSelectorFromString(@"children");
+                                            if ([node respondsToSelector:childSel]) {
+                                                NSArray *ch = ((id (*)(id, SEL))objc_msgSend)(node, childSel);
+                                                if ([ch isKindOfClass:[NSArray class]])
+                                                    [stack addObjectsFromArray:ch];
+                                            }
+                                        }
+                                    }
+                                } @catch (NSException *e) {}
+                            }
+
+                            // Verify first title only
+                            if (verifiedText) continue;
+                            @try {
+                                SEL effectSel = NSSelectorFromString(@"effect");
+                                id genEffect = [title respondsToSelector:effectSel]
+                                    ? ((id (*)(id, SEL))objc_msgSend)(title, effectSel) : nil;
+                                id cf = genEffect ? ((id (*)(id, SEL))objc_msgSend)(genEffect,
                                     NSSelectorFromString(@"channelFolder")) : nil;
-                                if (cf) {
-                                    Class pos3DClass = objc_getClass("CHChannelPosition3D");
-                                    NSMutableArray *stack = [NSMutableArray arrayWithObject:cf];
-                                    BOOL found = NO;
-                                    while (stack.count > 0 && !found) {
-                                        id node = stack.lastObject;
-                                        [stack removeLastObject];
-                                        if (pos3DClass && [node isKindOfClass:pos3DClass]) {
-                                            NSString *nm = ((id (*)(id, SEL))objc_msgSend)(node, NSSelectorFromString(@"name"));
-                                            if ([nm isEqualToString:@"Position"]) {
-                                                id parent = [node respondsToSelector:NSSelectorFromString(@"parent")]
-                                                    ? ((id (*)(id, SEL))objc_msgSend)(node, NSSelectorFromString(@"parent")) : nil;
-                                                NSString *parentName = parent
-                                                    ? ((id (*)(id, SEL))objc_msgSend)(parent, NSSelectorFromString(@"name")) : nil;
-                                                if ([parentName isEqualToString:@"Transform"]) {
-                                                    id yCh = SpliceKitCaption_subChannel(node, @"y");
-                                                    if (yCh && SpliceKitCaption_setChannelDouble(yCh, yOffset))
-                                                        positionAppliedCount++;
-                                                    found = YES;
+                                if (!cf) continue;
+                                Class chTextClass = objc_getClass("CHChannelText");
+                                NSMutableArray *stack = [NSMutableArray arrayWithObject:cf];
+                                while (stack.count > 0 && !verifiedText) {
+                                    id node = stack.lastObject;
+                                    [stack removeLastObject];
+                                    if (chTextClass && [node isKindOfClass:chTextClass]) {
+                                        SEL strSel = NSSelectorFromString(@"string");
+                                        if ([node respondsToSelector:strSel]) {
+                                            id str = ((id (*)(id, SEL))objc_msgSend)(node, strSel);
+                                            if (str) verifiedText = [str description];
+                                        }
+                                        SEL asSel = NSSelectorFromString(@"attributedString");
+                                        if ([node respondsToSelector:asSel]) {
+                                            NSAttributedString *attrStr = ((id (*)(id, SEL))objc_msgSend)(node, asSel);
+                                            if (attrStr && attrStr.length > 0) {
+                                                NSDictionary *attrs = [attrStr attributesAtIndex:0 effectiveRange:NULL];
+                                                NSFont *font = attrs[NSFontAttributeName];
+                                                if (font) {
+                                                    verifiedFontSize = font.pointSize;
+                                                    verifiedFontFamily = font.familyName;
                                                 }
                                             }
                                         }
-                                        SEL childSel = NSSelectorFromString(@"children");
-                                        if ([node respondsToSelector:childSel]) {
-                                            NSArray *ch = ((id (*)(id, SEL))objc_msgSend)(node, childSel);
-                                            if ([ch isKindOfClass:[NSArray class]])
-                                                [stack addObjectsFromArray:ch];
-                                        }
+                                    }
+                                    SEL childSel = NSSelectorFromString(@"children");
+                                    if ([node respondsToSelector:childSel]) {
+                                        NSArray *ch = ((id (*)(id, SEL))objc_msgSend)(node, childSel);
+                                        if ([ch isKindOfClass:[NSArray class]])
+                                            [stack addObjectsFromArray:ch];
                                     }
                                 }
                             } @catch (NSException *e) {}
                         }
-
-                        // Verify first title only
-                        if (verifiedText) continue;
-                        @try {
-                            SEL effectSel = NSSelectorFromString(@"effect");
-                            id genEffect = [conn respondsToSelector:effectSel]
-                                ? ((id (*)(id, SEL))objc_msgSend)(conn, effectSel) : nil;
-                            id cf = genEffect ? ((id (*)(id, SEL))objc_msgSend)(genEffect,
-                                NSSelectorFromString(@"channelFolder")) : nil;
-                            if (!cf) continue;
-                            Class chTextClass = objc_getClass("CHChannelText");
-                            NSMutableArray *stack = [NSMutableArray arrayWithObject:cf];
-                            while (stack.count > 0 && !verifiedText) {
-                                id node = stack.lastObject;
-                                [stack removeLastObject];
-                                if (chTextClass && [node isKindOfClass:chTextClass]) {
-                                    SEL strSel = NSSelectorFromString(@"string");
-                                    if ([node respondsToSelector:strSel]) {
-                                        id str = ((id (*)(id, SEL))objc_msgSend)(node, strSel);
-                                        if (str) verifiedText = [str description];
-                                    }
-                                    SEL asSel = NSSelectorFromString(@"attributedString");
-                                    if ([node respondsToSelector:asSel]) {
-                                        NSAttributedString *attrStr = ((id (*)(id, SEL))objc_msgSend)(node, asSel);
-                                        if (attrStr && attrStr.length > 0) {
-                                            NSDictionary *attrs = [attrStr attributesAtIndex:0 effectiveRange:NULL];
-                                            NSFont *font = attrs[NSFontAttributeName];
-                                            if (font) {
-                                                verifiedFontSize = font.pointSize;
-                                                verifiedFontFamily = font.familyName;
-                                            }
-                                        }
-                                    }
-                                }
-                                SEL childSel = NSSelectorFromString(@"children");
-                                if ([node respondsToSelector:childSel]) {
-                                    NSArray *ch = ((id (*)(id, SEL))objc_msgSend)(node, childSel);
-                                    if ([ch isKindOfClass:[NSArray class]])
-                                        [stack addObjectsFromArray:ch];
-                                }
-                            }
-                        } @catch (NSException *e) {}
                     }
                 }
             } @catch (NSException *e) {

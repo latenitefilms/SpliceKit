@@ -1800,13 +1800,13 @@ static BOOL SpliceKitCaption_pollMainThread(BOOL (^condition)(void), double time
         self.videoWidth, self.videoHeight, (int)round(self.frameRate),
         fdN, fdD, self.videoWidth, self.videoHeight];
     // Word-progress mode uses the Neon Grow TM4C template (has Sequence Text behaviors).
-    // Standard mode uses Caption Large. ~/Titles.localized/ prefix resolves correctly.
+    // Standard mode uses FCP's built-in Basic Title (available on all installations).
     if (useWordProgress) {
         [xml appendFormat:@"        <effect id=\"r2\" name=\"%@\" uid=\"%@\"/>\n",
             kWP_TemplateName, kWP_TemplateUID];
     } else {
-        [xml appendString:@"        <effect id=\"r2\" name=\"Caption Large\" "
-            @"uid=\"~/Titles.localized/SpliceKit/Caption Large/Caption Large.moti\"/>\n"];
+        [xml appendString:@"        <effect id=\"r2\" name=\"Basic Title\" "
+            @"uid=\".../Titles.localized/Bumper:Opener.localized/Basic Title.localized/Basic Title.moti\"/>\n"];
     }
     [xml appendString:@"    </resources>\n"];
     [xml appendString:@"    <library>\n"];
@@ -2037,7 +2037,7 @@ static BOOL SpliceKitCaption_pollMainThread(BOOL (^condition)(void), double time
     __block int positionAppliedCount = 0;
     CGFloat yOffset = [self yOffsetForPosition];
     // Word-progress mode sets position via FCPXML Content Position param.
-    // Only apply the ObjC runtime transform for standard (Caption Large) mode,
+    // Only apply the ObjC runtime transform for standard (Basic Title) mode,
     // otherwise the two position systems compound and produce insane values.
     BOOL needsPosition = !useWordProgress
         && (s.position != SpliceKitCaptionPositionCenter || s.customYOffset != 0);
@@ -2470,10 +2470,9 @@ static BOOL SpliceKitCaption_pollMainThread(BOOL (^condition)(void), double time
         @"frameDuration=\"%d/%ds\" width=\"%d\" height=\"%d\"/>\n",
         fmtId, self.videoWidth, self.videoHeight, (int)round(self.frameRate),
         fdN, fdD, self.videoWidth, self.videoHeight];
-    // Caption Large effect — ~/Titles.localized/ prefix resolves correctly.
-    // .../Titles.localized/ does NOT load the Motion template properly (text invisible).
-    [xml appendFormat:@"        <effect id=\"r2\" name=\"Caption Large\" "
-        @"uid=\"~/Titles.localized/SpliceKit/Caption Large/Caption Large.moti\"/>\n"];
+    // Use FCP's built-in Basic Title — available on all installations.
+    [xml appendString:@"        <effect id=\"r2\" name=\"Basic Title\" "
+        @"uid=\".../Titles.localized/Bumper:Opener.localized/Basic Title.localized/Basic Title.moti\"/>\n"];
     [xml appendString:@"    </resources>\n"];
     [xml appendString:@"    <spine>\n"];
 

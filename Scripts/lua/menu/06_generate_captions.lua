@@ -1,31 +1,43 @@
 -- Generate social-style captions on the timeline
 -- Uses FCP Native transcription, then generates bold_pop captions.
 
--- Step 1: Transcribe the timeline
-sk.toast("Transcribing timeline...")
-sk.rpc("transcript.setEngine", {engine = "fcpNative"})
-sk.rpc("transcript.open", {})
+-- Check if transcript already has words (from previous transcription)
+local ts = sk.rpc("transcript.getState", {})
+local words = ts and ts.words
 
-local words = nil
-for i = 1, 60 do
-    sk.sleep(1)
-    local ts = sk.rpc("transcript.getState", {})
-    if ts and ts.status == "error" then
-        sk.alert("Captions", "Transcription failed:\n" .. (ts.errorMessage or "unknown"))
-        return
+if not words or #words == 0 then
+    -- No words yet — start transcription if not already running
+    if not ts or ts.status ~= "transcribing" then
+        sk.rpc("transcript.setEngine", {engine = "fcpNative"})
+        sk.rpc("transcript.open", {})
     end
-    if ts and ts.wordCount and ts.wordCount > 0 then
-        words = ts.words
-        break
+    -- Wait up to 15 seconds for short clips
+    sk.toast("Transcribing timeline...")
+    for i = 1, 15 do
+        sk.sleep(1)
+        ts = sk.rpc("transcript.getState", {})
+        if ts and ts.wordCount and ts.wordCount > 0 then
+            words = ts.words
+            break
+        end
+        if ts and ts.status == "error" then
+            sk.alert("Captions", "Transcription error:\n" .. (ts.errorMessage or "unknown"))
+            return
+        end
     end
 end
-if not words then
-    sk.alert("Captions", "Timed out waiting for transcription")
+
+if not words or #words == 0 then
+    -- Still transcribing — long clip, tell user to wait
+    sk.alert("Captions",
+        "Transcription in progress — FCP Native can take several minutes for long clips.\n\n" ..
+        "Run this script again once FCP finishes transcribing.\n" ..
+        "You can check progress in the Transcript panel (Ctrl+Option+T).")
     return
 end
 
--- Step 2: Feed words to caption panel and generate
-sk.toast("Generating captions...")
+-- Words available — generate captions
+sk.toast("Generating captions (" .. #words .. " words)...")
 sk.rpc("captions.open", {style = "bold_pop"})
 sk.sleep(1)
 sk.rpc("captions.setWords", {words = words})
@@ -33,7 +45,7 @@ sk.rpc("captions.setStyle", {preset_id = "bold_pop", position = "bottom"})
 sk.rpc("captions.setGrouping", {mode = "social"})
 sk.rpc("captions.generate", {style = "bold_pop"})
 
--- Step 3: Wait for generation to finish
+-- Wait for generation
 for i = 1, 30 do
     sk.sleep(1)
     local state = sk.rpc("captions.getState", {})
@@ -47,4 +59,4 @@ for i = 1, 30 do
         return
     end
 end
-sk.alert("Captions", "Timed out waiting for caption generation")
+sk.alert("Captions", "Generation started — check timeline for results")

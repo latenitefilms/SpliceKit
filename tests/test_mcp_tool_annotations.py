@@ -75,6 +75,7 @@ class MCPToolAnnotationTests(unittest.TestCase):
         expected = {
             "mark_scene_changes",
             "blade_scene_changes",
+            "history_action",
             "list_handles",
             "inspect_handle",
             "release_handle",
@@ -93,6 +94,7 @@ class MCPToolAnnotationTests(unittest.TestCase):
             "timeline_action": {"readOnlyHint": False, "destructiveHint": True},
             "timeline_navigation_action": {"readOnlyHint": False, "destructiveHint": False},
             "timeline_destructive_action": {"readOnlyHint": False, "destructiveHint": True},
+            "history_action": {"readOnlyHint": False, "destructiveHint": True},
             "call_method": {"readOnlyHint": False, "destructiveHint": True},
             "manage_handles": {"readOnlyHint": False, "destructiveHint": False},
             "list_handles": {"readOnlyHint": True, "destructiveHint": False},
@@ -159,6 +161,7 @@ class MCPToolAnnotationTests(unittest.TestCase):
         self.module.timeline_navigation_action("nextEdit")
         self.module.timeline_edit_action("addMarker")
         self.module.timeline_destructive_action("blade")
+        self.module.history_action("undo")
 
         self.assertEqual(
             calls,
@@ -166,12 +169,44 @@ class MCPToolAnnotationTests(unittest.TestCase):
                 ("timeline.action", {"action": "nextEdit"}),
                 ("timeline.action", {"action": "addMarker"}),
                 ("timeline.action", {"action": "blade"}),
+                ("timeline.action", {"action": "undo"}),
             ],
         )
 
-    def test_read_only_scene_tool_rejects_mutating_legacy_actions(self):
+    def test_detect_scene_changes_keeps_legacy_action_compatibility(self):
+        calls = []
+
+        def fake_call(method, **params):
+            calls.append((method, params))
+            return {
+                "count": 1,
+                "threshold": params["threshold"],
+                "mediaFile": "test.mov",
+                "action": params["action"],
+                "sceneChanges": [{"time": 1.5, "score": 0.9}],
+            }
+
+        self.module.bridge.call = fake_call
+
         result = self.module.detect_scene_changes(action="markers")
-        self.assertIn("read-only", result)
+
+        self.assertIn("Action: markers applied", result)
+        self.assertEqual(
+            calls,
+            [("scene.detect", {"threshold": 0.35, "action": "markers", "sampleInterval": 0.1})],
+        )
+
+    def test_timeline_split_wrappers_accept_documented_actions(self):
+        self.module.bridge.call = lambda method, **params: {"ok": True, "action": params["action"]}
+
+        self.assertIn("ok", self.module.timeline_navigation_action("enableBeatDetection"))
+        self.assertIn("ok", self.module.timeline_navigation_action("nextKeyframe"))
+        self.assertIn("ok", self.module.timeline_edit_action("addKeyframe"))
+        self.assertIn("ok", self.module.timeline_edit_action("transcodeMedia"))
+
+    def test_history_actions_are_rejected_by_non_destructive_split(self):
+        result = self.module.timeline_edit_action("undo")
+        self.assertIn("history_action()", result)
 
 
 if __name__ == "__main__":

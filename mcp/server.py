@@ -214,6 +214,7 @@ READ_ONLY_TOOLS = {
 DESTRUCTIVE_TOOLS = {
     "timeline_action",
     "timeline_destructive_action",
+    "history_action",
     "batch_export",
     "call_method",
     "call_method_with_args",
@@ -371,13 +372,16 @@ CUSTOM_TOOL_TITLES = {
     "timeline_navigation_action": "Timeline Navigation Action",
     "timeline_edit_action": "Timeline Edit Action",
     "timeline_destructive_action": "Timeline Destructive Action",
+    "history_action": "Timeline History Action",
 }
 
 TIMELINE_NAVIGATION_ACTIONS = {
     "nextEdit", "previousEdit", "nextMarker", "previousMarker",
+    "nextKeyframe", "previousKeyframe",
     "selectClipAtPlayhead", "selectToPlayhead", "selectAll", "deselectAll",
     "showVideoAnimation", "showAudioAnimation", "soloAnimation",
     "showTrackingEditor", "showCinematicEditor", "showMagneticMaskEditor",
+    "enableBeatDetection",
     "showPrecisionEditor", "showAudioLanes", "expandSubroles",
     "showDuplicateRanges", "showKeywordEditor", "togglePrecisionEditor",
     "toggleSnapping", "toggleSkimming", "toggleClipSkimming",
@@ -391,7 +395,7 @@ TIMELINE_NAVIGATION_ACTIONS = {
 
 TIMELINE_EDIT_ACTIONS = {
     "addMarker", "addTodoMarker", "addChapterMarker", "addTransition",
-    "copy", "paste", "undo", "redo", "pasteAsConnected", "pasteEffects",
+    "copy", "paste", "pasteAsConnected", "pasteEffects",
     "pasteAttributes", "removeAttributes", "copyAttributes", "copyTimecode",
     "connectToPrimaryStoryline", "insertEdit", "appendEdit", "insertGap",
     "insertPlaceholder", "addAdjustmentClip", "addColorBoard", "addColorWheels",
@@ -400,6 +404,7 @@ TIMELINE_EDIT_ACTIONS = {
     "addMagneticMask", "smartConform", "adjustVolumeUp", "adjustVolumeDown",
     "expandAudio", "expandAudioComponents", "addChannelEQ", "enhanceAudio",
     "matchAudio", "detachAudio", "addBasicTitle", "addBasicLowerThird",
+    "addKeyframe",
     "favorite", "reject", "unrate", "setRangeStart", "setRangeEnd",
     "clearRange", "setClipRange", "solo", "disable", "createCompoundClip",
     "autoReframe", "synchronizeClips", "openClip", "renameClip",
@@ -412,7 +417,7 @@ TIMELINE_EDIT_ACTIONS = {
     "previousColorEffect", "resetColorBoard", "toggleAllColorOff",
     "alignAudioToVideo", "volumeMute", "addDefaultAudioEffect",
     "addDefaultVideoEffect", "applyAudioFades", "makeClipsUnique",
-    "enableDisable", "pasteAllAttributes", "duplicateProject", "snapshotProject",
+    "enableDisable", "transcodeMedia", "pasteAllAttributes", "duplicateProject", "snapshotProject",
     "projectProperties", "libraryProperties", "consolidateEventMedia",
     "mergeEvents", "renderSelection", "renderAll", "exportXML",
     "shareSelection", "find", "findAndReplaceTitle", "revealInBrowser",
@@ -440,6 +445,10 @@ TIMELINE_DESTRUCTIVE_ACTIONS = {
     "retimeReset", "retimeOpticalFlow", "retimeFrameBlending",
     "retimeFloorFrame", "removeAllKeywords", "removeAnalysisKeywords",
     "closeLibrary", "deleteGeneratedFiles", "moveToTrash", "hideClip",
+}
+
+TIMELINE_HISTORY_ACTIONS = {
+    "undo", "redo",
 }
 
 
@@ -675,7 +684,7 @@ def timeline_navigation_action(action: str) -> str:
     if action not in TIMELINE_NAVIGATION_ACTIONS:
         return (
             f"Error: '{action}' is not a supported navigation action. "
-            "Use timeline_edit_action(), timeline_destructive_action(), or legacy timeline_action()."
+            "Use timeline_edit_action(), timeline_destructive_action(), history_action(), or legacy timeline_action()."
         )
     return _call_or_error("timeline.action", action=action)
 
@@ -686,7 +695,7 @@ def timeline_edit_action(action: str) -> str:
     if action not in TIMELINE_EDIT_ACTIONS:
         return (
             f"Error: '{action}' is not a supported non-destructive edit action. "
-            "Use timeline_navigation_action(), timeline_destructive_action(), or legacy timeline_action()."
+            "Use timeline_navigation_action(), timeline_destructive_action(), history_action(), or legacy timeline_action()."
         )
     return _call_or_error("timeline.action", action=action)
 
@@ -697,7 +706,18 @@ def timeline_destructive_action(action: str) -> str:
     if action not in TIMELINE_DESTRUCTIVE_ACTIONS:
         return (
             f"Error: '{action}' is not a supported destructive action. "
-            "Use timeline_navigation_action(), timeline_edit_action(), or legacy timeline_action()."
+            "Use timeline_navigation_action(), timeline_edit_action(), history_action(), or legacy timeline_action()."
+        )
+    return _call_or_error("timeline.action", action=action)
+
+
+@mcp.tool(annotations=_tool_annotations("history_action"))
+def history_action(action: str) -> str:
+    """Use this tool for timeline history operations that can undo or reapply prior edits."""
+    if action not in TIMELINE_HISTORY_ACTIONS:
+        return (
+            f"Error: '{action}' is not a supported history action. "
+            "Valid actions are: undo, redo."
         )
     return _call_or_error("timeline.action", action=action)
 
@@ -757,20 +777,24 @@ def set_playback_speed(rate: float = None, action: str = None) -> str:
 
 @mcp.tool(annotations=_tool_annotations("detect_scene_changes"))
 def detect_scene_changes(threshold: float = 0.35, action: str = "detect", sample_interval: float = 0.1) -> str:
-    """Use this read-only tool to inspect scene changes before deciding whether to mark or blade them.
+    """Inspect scene changes, while still supporting legacy mutating actions for compatibility.
 
     Args:
         threshold: Sensitivity (0.0-1.0). Lower = more sensitive. Default 0.35.
-        action: Deprecated compatibility argument. Only "detect" is accepted here.
+        action: Deprecated compatibility argument. Supports "detect", "markers", or "blade".
+                Prefer mark_scene_changes() or blade_scene_changes() for new callers.
         sample_interval: Seconds between sampled frames. Default 0.1.
 
     Returns list of scene change timestamps with confidence scores.
     Uses GPU-style histogram comparison (same approach as FCP internally).
     """
-    if action != "detect":
-        return "Error: detect_scene_changes() is read-only. Use mark_scene_changes() or blade_scene_changes()."
+    if action not in {"detect", "markers", "blade"}:
+        return (
+            "Error: action must be one of: detect, markers, blade. "
+            "Prefer mark_scene_changes() or blade_scene_changes() for mutating operations."
+        )
 
-    r = bridge.call("scene.detect", threshold=threshold, action="detect", sampleInterval=sample_interval)
+    r = bridge.call("scene.detect", threshold=threshold, action=action, sampleInterval=sample_interval)
     if _err(r):
         return f"Error: {r.get('error', r)}"
 

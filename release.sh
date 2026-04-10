@@ -33,6 +33,7 @@ if [ -z "${PUSH_BRANCH}" ]; then
 fi
 REMOTE_URL="$(git remote get-url "${PUSH_REMOTE}")"
 RELEASE_REPO="$(printf '%s' "${REMOTE_URL}" | sed -E 's#(git@github.com:|https://github.com/)##; s#\.git$##')"
+TAG_NAME="v${VERSION}"
 
 resolve_built_app() {
     local products_dir="${BUILD_DIR}/Build/Products/Release"
@@ -259,12 +260,28 @@ git add -A
 git commit -m "Release v${VERSION}: ${NOTES}"
 git push "${PUSH_REMOTE}" "HEAD:${PUSH_BRANCH}"
 
+if git rev-parse -q --verify "refs/tags/${TAG_NAME}" >/dev/null; then
+    git tag -d "${TAG_NAME}"
+fi
+git tag -a "${TAG_NAME}" -m "Release ${TAG_NAME}"
+
+LOCAL_TAG_SHA="$(git rev-parse "${TAG_NAME}^{}")"
+REMOTE_TAG_SHA="$(git ls-remote --tags "${PUSH_REMOTE}" "refs/tags/${TAG_NAME}^{}" | awk '{print $1}')"
+if [ -n "${REMOTE_TAG_SHA}" ] && [ "${REMOTE_TAG_SHA}" != "${LOCAL_TAG_SHA}" ]; then
+    echo "ERROR: Remote tag ${TAG_NAME} already exists on ${PUSH_REMOTE} at ${REMOTE_TAG_SHA}, expected ${LOCAL_TAG_SHA}" >&2
+    exit 1
+fi
+if [ -z "${REMOTE_TAG_SHA}" ]; then
+    git push "${PUSH_REMOTE}" "refs/tags/${TAG_NAME}:refs/tags/${TAG_NAME}"
+fi
+
 echo "[14/14] Creating GitHub release..."
-gh release create "v${VERSION}" "${DMG_PATH}" \
+gh release create "${TAG_NAME}" "${DMG_PATH}" \
     -R "${RELEASE_REPO}" \
-    --title "v${VERSION}" \
+    --verify-tag \
+    --title "${TAG_NAME}" \
     --notes "${NOTES}" \
-    2>/dev/null && RELEASE_URL=$(gh release view "v${VERSION}" -R "${RELEASE_REPO}" --json url -q '.url') || RELEASE_URL="(check GitHub)"
+    2>/dev/null && RELEASE_URL=$(gh release view "${TAG_NAME}" -R "${RELEASE_REPO}" --json url -q '.url') || RELEASE_URL="(check GitHub)"
 
 echo ""
 echo "========================================="

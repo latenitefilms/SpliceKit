@@ -10,8 +10,8 @@ import UniformTypeIdentifiers
 
 enum InstallState: Equatable {
     case notInstalled       // No modded FCP found
-    case current            // Installed, framework matches patcher's build
-    case updateAvailable    // SpliceKit framework differs from patcher's build
+    case current            // Installed, framework version matches patcher's build
+    case updateAvailable    // SpliceKit framework version differs from patcher's build
     case fcpUpdateAvailable // Stock FCP version changed since modded copy was made
     case unknown
 }
@@ -208,10 +208,10 @@ class PatcherModel: ObservableObject {
     /// Evaluate install state: is SpliceKit injected? Is it the current build? Is FCP up to date?
     func checkStatus() {
         let binary = moddedApp + "/Contents/MacOS/Final Cut Pro"
-        let installedDylib = moddedApp + "/Contents/Frameworks/SpliceKit.framework/Versions/A/SpliceKit"
+        let installedFramework = moddedApp + "/Contents/Frameworks/SpliceKit.framework"
 
         // Read stock FCP version (also shown on the welcome panel)
-        stockFcpVersion = readPlistVersion(sourceApp)
+        stockFcpVersion = readBundleVersion(sourceApp)
         if fcpVersion.isEmpty { fcpVersion = stockFcpVersion }
 
         // Q1: Is a modded FCP present with the SpliceKit load command?
@@ -232,7 +232,7 @@ class PatcherModel: ObservableObject {
         bridgeConnected = !ps.isEmpty
 
         // Read modded FCP version
-        let moddedVer = readPlistVersion(moddedApp)
+        let moddedVer = readBundleVersion(moddedApp)
         if !moddedVer.isEmpty { fcpVersion = moddedVer }
 
         // Q2a: Has stock FCP been updated since the modded copy was made?
@@ -241,13 +241,13 @@ class PatcherModel: ObservableObject {
             return
         }
 
-        // Q2b: Does the installed SpliceKit binary match the patcher's build?
-        let bundledDylib = (Bundle.main.resourcePath ?? "") + "/SpliceKit"
-        if FileManager.default.fileExists(atPath: bundledDylib),
-           FileManager.default.fileExists(atPath: installedDylib) {
-            let bundledHash = fileHash(bundledDylib)
-            let installedHash = fileHash(installedDylib)
-            if !bundledHash.isEmpty && !installedHash.isEmpty && bundledHash != installedHash {
+        // Q2b: Does the installed SpliceKit framework version match this patcher build?
+        // Compare metadata instead of the binary bytes: the installed framework is re-signed
+        // during patch/update, which changes its on-disk hash even when the code is current.
+        let installedFrameworkVersion = readBundleVersion(installedFramework)
+        let patcherVersion = currentSpliceKitVersion()
+        if !patcherVersion.isEmpty {
+            if installedFrameworkVersion.isEmpty || installedFrameworkVersion != patcherVersion {
                 status = .updateAvailable
                 return
             }
@@ -536,13 +536,15 @@ class PatcherModel: ObservableObject {
             cd '\(fwDir)' && ln -sf Versions/Current/SpliceKit SpliceKit
             cd '\(fwDir)' && ln -sf Versions/Current/Resources Resources
             """)
-        let patcherVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.0.0"
+        let currentVersion = currentSpliceKitVersion()
+        let patcherVersion = currentVersion.isEmpty ? "0.0.0" : currentVersion
         let plist = """
             <?xml version="1.0" encoding="UTF-8"?>
             <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "https://www.apple.com/DTDs/PropertyList-1.0.dtd">
             <plist version="1.0"><dict>
             <key>CFBundleIdentifier</key><string>com.splicekit.SpliceKit</string>
             <key>CFBundleName</key><string>SpliceKit</string>
+            <key>CFBundleShortVersionString</key><string>\(patcherVersion)</string>
             <key>CFBundleVersion</key><string>\(patcherVersion)</string>
             <key>CFBundlePackageType</key><string>FMWK</string>
             <key>CFBundleExecutable</key><string>SpliceKit</string>
@@ -749,13 +751,15 @@ class PatcherModel: ObservableObject {
         let fwDir = moddedApp + "/Contents/Frameworks/SpliceKit.framework"
         shell("cp '\(buildDir)/SpliceKit' '\(fwDir)/Versions/A/SpliceKit'")
 
-        let patcherVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.0.0"
+        let currentVersion = currentSpliceKitVersion()
+        let patcherVersion = currentVersion.isEmpty ? "0.0.0" : currentVersion
         let plist = """
             <?xml version="1.0" encoding="UTF-8"?>
             <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "https://www.apple.com/DTDs/PropertyList-1.0.dtd">
             <plist version="1.0"><dict>
             <key>CFBundleIdentifier</key><string>com.splicekit.SpliceKit</string>
             <key>CFBundleName</key><string>SpliceKit</string>
+            <key>CFBundleShortVersionString</key><string>\(patcherVersion)</string>
             <key>CFBundleVersion</key><string>\(patcherVersion)</string>
             <key>CFBundlePackageType</key><string>FMWK</string>
             <key>CFBundleExecutable</key><string>SpliceKit</string>
@@ -839,17 +843,39 @@ class PatcherModel: ObservableObject {
 
     // MARK: - Helpers
 
-    /// SHA-256 hash of a file on disk.
-    nonisolated func fileHash(_ path: String) -> String {
-        shell("shasum -a 256 '\(path)' 2>/dev/null | awk '{print $1}'")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+    /// Read a bundle version from either CFBundleShortVersionString or CFBundleVersion.
+    private nonisolated func readBundleVersion(_ bundlePath: String) -> String {
+        let fm = FileManager.default
+        let plistCandidates = [
+            bundlePath + "/Contents/Info.plist",
+            bundlePath + "/Versions/A/Resources/Info.plist",
+            bundlePath + "/Resources/Info.plist"
+        ]
+
+        for plistPath in plistCandidates where fm.fileExists(atPath: plistPath) {
+            let quotedPath = shellQuote(plistPath)
+            for key in ["CFBundleShortVersionString", "CFBundleVersion"] {
+                let ver = shell("/usr/libexec/PlistBuddy -c 'Print :\(key)' \(quotedPath) 2>/dev/null")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                if !ver.isEmpty && !ver.contains("Doesn't Exist") {
+                    return ver
+                }
+            }
+        }
+
+        return ""
     }
 
-    /// Read CFBundleShortVersionString from an app bundle's Info.plist.
-    private nonisolated func readPlistVersion(_ appPath: String) -> String {
-        let ver = shell("/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' '\(appPath)/Contents/Info.plist' 2>/dev/null")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        return (ver.isEmpty || ver.contains("Doesn't Exist")) ? "" : ver
+    private nonisolated func currentSpliceKitVersion() -> String {
+        if let shortVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String,
+           !shortVersion.isEmpty {
+            return shortVersion
+        }
+        if let buildVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String,
+           !buildVersion.isEmpty {
+            return buildVersion
+        }
+        return ""
     }
 
     /// Run a shell command synchronously; nonisolated for use in background tasks.

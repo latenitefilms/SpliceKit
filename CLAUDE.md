@@ -27,15 +27,22 @@ rather than simulating the keyboard shortcut.
 
 ```
 1. bridge_status()                    -- verify connection
-2. get_timeline_clips()               -- see timeline contents
-3. timeline_action("blade")           -- edit
-4. verify_action("after blade")       -- confirm
+2. open_project("My Project")         -- open a project by name
+3. get_timeline_clips()               -- see timeline contents
+4. timeline_action("blade")           -- edit
+5. verify_action("after blade")       -- confirm
 ```
 
 ## CRITICAL: Must Know Before Editing
 
 ### Opening a Project
-If `get_timeline_clips()` returns an error about "no sequence", load a project:
+Use `open_project()` to load a project by name:
+```python
+open_project("My Project")                   # find by name
+open_project("Edit v2", event="4-5-26")      # filter by event too
+```
+
+If you need lower-level control, you can still navigate manually:
 ```python
 # Navigate: library -> sequences -> find one with content -> load it
 libs = call_method_with_args("FFLibraryDocument", "copyActiveLibraries", "[]", true, true)
@@ -51,8 +58,15 @@ Color correction, retiming, titles, and effects require a selected clip:
 ```
 playback_action("goToStart")              # position
 playback_action("nextFrame") x N          # navigate
-timeline_action("selectClipAtPlayhead")   # select
+timeline_action("selectClipAtPlayhead")   # select primary storyline clip
 timeline_action("addColorBoard")          # now apply
+```
+
+To select a connected clip (title, B-roll, etc.) use `select_clip_in_lane()`:
+```
+select_clip_in_lane(lane=1)               # select connected clip above primary
+select_clip_in_lane(lane=-1)              # select connected clip below
+select_clip_in_lane(lane=0)               # same as selectClipAtPlayhead
 ```
 
 ### Playhead Positioning
@@ -165,12 +179,22 @@ create_library()                     # create new library
 
 ### Blade at a specific time
 ```
-playback_action("goToStart")
-batch_timeline_actions('[{"type":"playback","action":"nextFrame","repeat":72}]')  # 3s at 24fps
-timeline_action("blade")
+seek_to_time(3.0)         # jump to 3 seconds
+timeline_action("blade")  # cut there
 ```
 
-### Multiple cuts
+### Multiple cuts (batch — preferred)
+```
+blade_at_times([3.0, 6.0, 9.0, 12.0, 15.0])   # cut at all times in one call
+```
+
+### Cuts at regular intervals across entire timeline
+```
+# Compute times: every 3s across a 30s timeline
+blade_at_times([3.0, 6.0, 9.0, 12.0, 15.0, 18.0, 21.0, 24.0, 27.0])
+```
+
+### Multiple cuts (batch_timeline_actions alternative)
 ```
 batch_timeline_actions('[
   {"type":"playback","action":"goToStart"},
@@ -357,9 +381,26 @@ get_viewer_zoom()                    # current zoom level (0.0=Fit, 1.0=100%, 2.
 set_viewer_zoom(0.0)                 # fit to window
 set_viewer_zoom(1.0)                 # 100%
 set_viewer_zoom(2.0)                 # 200% — any float value accepted
+capture_viewer()                     # screenshot viewer to /tmp/splicekit_viewer.png
+capture_viewer(path="/tmp/check.png") # screenshot to custom path
+```
+
+## Export FCPXML (No Dialog)
+```
+export_xml()                                       # export to /tmp/splicekit_export.fcpxml
+export_xml(path="/tmp/my_project.fcpxml")           # export to custom path
+```
+Programmatic export — no save dialog. Returns the FCPXML file path.
+
+## Deploy & Restart FCP
+```
+deploy_and_restart()                 # build, deploy, kill FCP, relaunch, wait for bridge
+deploy_and_restart(skip_build=True)  # just restart FCP (skip make deploy)
 ```
 
 ## Dialog Automation
+**Note:** The "video properties of this clip are not recognized" dialog is now
+auto-dismissed at the start of every bridge request. No manual handling needed.
 ```
 detect_dialog()                      # scan for open dialogs, see buttons/fields/checkboxes
 click_dialog_button(button="OK")     # click by title (case-insensitive, partial match)
@@ -399,6 +440,10 @@ get_bridge_options()                                # see all configurable optio
 set_bridge_option("effectDragAsAdjustmentClip", True)   # drag effects to create adjustment clips
 set_bridge_option("viewerPinchZoom", True)              # trackpad pinch-to-zoom on viewer
 set_bridge_option("videoOnlyKeepsAudioDisabled", True)  # keep audio disabled in video-only mode
+set_bridge_option("suppressAutoImport", True)           # stop auto-opening Import window on card/camera mount
+set_bridge_option_value("defaultSpatialConformType", "fill")  # default new clips to Fill (crop to fill frame)
+set_bridge_option_value("defaultSpatialConformType", "none")  # default new clips to None (native resolution)
+set_bridge_option_value("defaultSpatialConformType", "fit")   # restore FCP default (Fit)
 ```
 
 ## Object Handles
@@ -714,7 +759,20 @@ RUNTIME_JSON=ida_export/Flexo.json DECOMPILE_OUTPUT_DIR=output \
 SpliceKit includes a full debugging toolkit that provides Xcode/lldb-level capabilities
 from within FCP's process, accessible via MCP. No debugger attachment required.
 
-### Method Tracing (replaces breakpoints)
+### Breakpoints (pause + inspect + continue)
+```
+debug.breakpoint(action="add", className="FFAnchoredTimelineModule", selector="blade:")
+# ... press B in FCP — execution pauses, breakpoint.hit event fires ...
+debug.breakpoint(action="inspect")                                    # see paused state
+debug.breakpoint(action="inspectSelf", keyPath="sequence.displayName") # inspect properties
+debug.breakpoint(action="continue")                                   # resume execution
+debug.breakpoint(action="step")                                       # resume + break on next call
+```
+Supports conditional breakpoints (`condition="keyPath"`), hit counts (`hitCount=5`),
+and one-shot breakpoints (`oneShot=True`). FCP freezes while paused (same as Xcode).
+The JSON-RPC server stays alive on a separate thread so you can inspect state.
+
+### Method Tracing (non-blocking alternative)
 ```
 debug.traceMethod(action="add", className="FFAnchoredTimelineModule",
                   selector="blade:", logStack=True)
@@ -723,6 +781,8 @@ debug.traceMethod(action="getLog", limit=10)  # see calls + call stacks
 debug.traceMethod(action="removeAll")          # clean up
 ```
 Traces are broadcast to MCP clients in real-time as JSON-RPC notifications.
+Use tracing when you want to observe without pausing, breakpoints when you need
+to inspect state at a specific moment.
 
 ### Property Watching (replaces watchpoints)
 ```
@@ -819,7 +879,79 @@ See `docs/FCP_API_REFERENCE.md` for comprehensive documentation of all key class
 methods, properties, notifications, and patterns. This reference is sufficient to use
 SpliceKit without access to the decompiled FCP source code.
 
+## Social Media Captions
+```
+open_captions()                                    # open panel + transcribe timeline
+open_captions(style="bold_pop")                    # open with preset style
+get_caption_state()                                # check transcription progress + segments
+get_caption_styles()                               # list all 13 style presets
+set_caption_style(preset_id="neon_glow")           # apply a preset
+set_caption_style(preset_id="bold_pop", font_size=80, position="center")  # customize
+set_caption_grouping(mode="words", max_words=4)    # control word grouping
+generate_captions(style="bold_pop")                # generate + paste to user's timeline
+verify_captions()                                  # inspect titles to verify text/font
+get_title_text()                                   # read text/font from selected title
+export_captions_srt(path="/tmp/captions.srt")      # export SRT subtitles
+export_captions_txt(path="/tmp/captions.txt")      # export plain text
+```
+
+Generates word-by-word highlighted, animated caption titles as FCPXML. The pipeline:
+1. Imports FCPXML into a temp project (resolves Motion template)
+2. Copies titles from temp project to clipboard (native format)
+3. Pastes as connected storyline onto the user's actual timeline
+4. Applies position offset via ObjC transform (not FCPXML adjust-transform)
+5. Self-verifies: inspects first title's CHChannelText for text/font/size
+6. Cleans up the temp project
+
+No drag-and-drop, no dialogs, captions land directly on the user's timeline.
+
+**Style presets** (13 built-in): `bold_pop`, `neon_glow`, `clean_minimal`, `handwritten`,
+`gradient_fire`, `outline_bold`, `shadow_deep`, `karaoke`, `typewriter`, `bounce_fun`,
+`subtitle_pro`, `social_bold`, `social_reels`
+
+**Positions**: bottom (default lower third), center, top, custom
+
+**Animations**: none, fade, pop, slide_up, typewriter, bounce
+
+**Word grouping modes**: social (2-3 words, 0.5s silence break — best for TikTok/Reels),
+words (max N per group), sentence (by punctuation), time (max seconds), chars (max characters)
+
+Each caption is a `<title>` element with `<text-style>` attributes. Word-by-word
+highlight uses multiple `<text-style>` refs per title — the active word gets the
+highlight color, others get the base text color.
+
+**Title text inspection**: `get_title_text()` reads text content, font family, font name,
+and point size from the selected Motion title's CHChannelText channel. `verify_captions()`
+walks connected titles on the timeline and checks text/fontSize against the expected style.
+
+## Lua Scripting
+
+SpliceKit embeds a Lua 5.4 VM directly in FCP's process. Scripts use the `sk`
+module to control FCP with zero latency:
+
+```lua
+sk.blade()                          -- blade at playhead
+sk.seek(5.0)                        -- jump to 5 seconds
+sk.select_clip()                    -- select clip at playhead
+sk.color_board()                    -- add color correction
+local clips = sk.clips()           -- get timeline clips as Lua table
+local pos = sk.position()          -- get playhead position
+sk.rpc("effects.apply", {name = "Gaussian Blur"})  -- any RPC method
+sk.eval("NSApp.delegate.className") -- ObjC runtime bridge
+```
+
+**Entry points:**
+- REPL panel: Ctrl+Option+L (Enhancements > Lua REPL)
+- Live coding: save .lua files to `~/Library/Application Support/SpliceKit/lua/auto/`
+- JSON-RPC: `lua.execute`, `lua.executeFile`, `lua.reset`, `lua.getState`, `lua.watch`
+- MCP tools: `lua_execute`, `lua_execute_file`, `lua_reset`, `lua_watch`, `lua_state`
+
+See `docs/LUA_SDK_REFERENCE.md` for the full SDK with 25 sections, 140+ RPC methods,
+and complete cookbook examples.
+
 ## Additional Documentation
+- `docs/LUA_SDK_REFERENCE.md` — **Lua scripting SDK** (sk module, 120+ actions, ObjC bridge, live coding, cookbook)
+- `docs/LUA_SCRIPTING_GUIDE.md` — **Lua scripting tutorial** (data model, patterns, modules, persistence, pipelines, annotated examples)
 - `docs/TRANSCRIPT_EDITING_GUIDE.md` — Transcript-based editing (engines, silence removal, speakers)
 - `docs/COMMAND_PALETTE_GUIDE.md` — Command palette & Apple Intelligence
 - `docs/RUNTIME_INTROSPECTION_GUIDE.md` — ObjC runtime exploration & reverse engineering

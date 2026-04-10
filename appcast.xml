@@ -6,6 +6,91 @@
     <description>SpliceKit Patcher release updates</description>
     <language>en</language>
     <item>
+      <title>SpliceKit v3.1.3</title>
+      <sparkle:version>3.1.3</sparkle:version>
+      <sparkle:shortVersionString>3.1.3</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+      <pubDate>Wed, 08 Apr 2026 05:35:29 +0000</pubDate>
+      <description><![CDATA[
+        <h2>What's New in 3.1.3</h2>
+        <p>Social media captions with word-by-word highlighting and drop shadows, Apple Intelligence+ agentic mode in command palette, Lua scripting in Xcode build, customizable default Spatial Conform Type, caption engine and Lua RPC deadlock fixes, Parakeet transcriber FluidAudio update</p>
+      ]]></description>
+      <enclosure
+        url="https://github.com/elliotttate/SpliceKit/releases/download/v3.1.3/SpliceKit-v3.1.3.dmg"
+        sparkle:edSignature="fRTXLttOlzPvehNBqpaVHzq5PD/uWQkbTdAgrAM1wll2WDF6ID9aKlNVCCo/yMr3De1sOGlC5szNatOom7FSBg=="
+        length="13430204"
+        type="application/octet-stream" />
+    </item>
+    <item>
+      <title>SpliceKit v3.1.2</title>
+      <sparkle:version>3.1.2</sparkle:version>
+      <sparkle:shortVersionString>3.1.2</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+      <pubDate>Tue, 07 Apr 2026 14:18:53 +0000</pubDate>
+      <description><![CDATA[
+        <h2>What's New in 3.1.2</h2>
+        <p>App Store receipt validation for Creator Studio: verify subscription locally via PKCS7 receipt before launching, show alert if no valid subscription found</p>
+      ]]></description>
+      <enclosure
+        url="https://github.com/elliotttate/SpliceKit/releases/download/v3.1.2/SpliceKit-v3.1.2.dmg"
+        sparkle:edSignature="jGtNv/6u2AzX6KgOvAMEX/K4SwWzGjqhakjPTVylVUyOLDNV2OjAPUKah4mQXQarYlggzQ+ni4+bek4Yhn/NBw=="
+        length="10634389"
+        type="application/octet-stream" />
+    </item>
+    <item>
+      <title>SpliceKit v3.1.1</title>
+      <sparkle:version>3.1.1</sparkle:version>
+      <sparkle:shortVersionString>3.1.1</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+      <pubDate>Tue, 07 Apr 2026 13:16:29 +0000</pubDate>
+      <description><![CDATA[
+        <h2>What's New in 3.1.1</h2>
+        <p>Support Final Cut Pro Creator Studio: fixed subscription validation and CloudKit crash on ad-hoc signed builds</p>
+      ]]></description>
+      <enclosure
+        url="https://github.com/elliotttate/SpliceKit/releases/download/v3.1.1/SpliceKit-v3.1.1.dmg"
+        sparkle:edSignature="zEtp28uEs21wtf6/AeO/Rn2PBinZNJi/ZsyzM7jmqtyfuB2Pv88sSyrbxYCiAYH0HWo5Z3El5d6+VqJkFkGJBw=="
+        length="10626976"
+        type="application/octet-stream" />
+    </item>
+    <item>
+      <title>SpliceKit v3.1.0</title>
+      <sparkle:version>3.1.0</sparkle:version>
+      <sparkle:shortVersionString>3.1.0</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+      <pubDate>Mon, 06 Apr 2026 20:11:44 +0000</pubDate>
+      <description><![CDATA[
+        <h2>What's New in 3.1.0</h2>
+        <p>Configurable J/L playback speed ladders — swizzle fastForward:/rewind: to walk user-defined speed steps (e.g. 1, 1.5, 1.8, 2, 4, 8) instead of hardcoded powers-of-two. Configure via Enhancements > Playback Speed menu or bridge API.</p>
+      ]]></description>
+      <enclosure
+        url="https://github.com/elliotttate/SpliceKit/releases/download/v3.1.0/SpliceKit-v3.1.0.dmg"
+        sparkle:edSignature="diXKIQTtV4gPl/iE+gIwtr9ic6ZM6AACWmz04lLkQraT497lhaEEW39uFmcIprFYfhoahRky5kUaZZ2CEzoVCQ=="
+        length="10620408"
+        type="application/octet-stream" />
+    </item>
+    <item>
+      <title>SpliceKit v3.0.2</title>
+      <sparkle:version>3.0.2</sparkle:version>
+      <sparkle:shortVersionString>3.0.2</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+      <pubDate>Sun, 06 Apr 2026 17:57:00 +0000</pubDate>
+      <description><![CDATA[
+        <h2>What's New in 3.0.2</h2>
+        <ul>
+          <li><b>Auto-discover FCP</b> — Uses Spotlight to find Final Cut Pro anywhere on the system, not just /Applications</li>
+          <li><b>Browse for FCP</b> — If auto-discovery fails, a Browse button lets you locate FCP manually</li>
+          <li><b>Fix launch crash</b> — SpliceKitLogPanel was missing from the dylib build, causing FCP to crash on launch</li>
+          <li><b>Fix version display</b> — No longer shows PlistBuddy error text as the FCP version when the app is missing</li>
+        </ul>
+      ]]></description>
+      <enclosure
+        url="https://github.com/elliotttate/SpliceKit/releases/download/v3.0.2/SpliceKit-v3.0.2.dmg"
+        sparkle:edSignature="sPIOFAJG4r9nLdDcaTLDI5j3MdaIvpJPcZi4zfMJ8vtpEc6qhzP3Panb0VFkPlV8oKwc+9Vpd7MOrS3FqFjqDQ=="
+        length="10312489"
+        type="application/octet-stream" />
+    </item>
+    <item>
       <title>SpliceKit v3.0.1</title>
       <sparkle:version>3.0.1</sparkle:version>
       <sparkle:shortVersionString>3.0.1</sparkle:shortVersionString>

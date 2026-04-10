@@ -44,12 +44,19 @@ struct WelcomePanel: View {
                 .font(.subheadline)
             } else if model.availableEditions.isEmpty {
                 Label {
-                    Text("Final Cut Pro is not installed")
+                    Text("Final Cut Pro not found in /Applications")
                 } icon: {
                     Image(systemName: "exclamationmark.triangle.fill")
                         .foregroundStyle(.orange)
                 }
                 .font(.subheadline)
+
+                Button {
+                    model.browseForFCP()
+                } label: {
+                    Label("Browse for Final Cut Pro...", systemImage: "folder")
+                }
+                .controlSize(.regular)
             }
 
             // Error display
@@ -75,7 +82,7 @@ struct WelcomePanel: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
-                .disabled(model.availableEditions.isEmpty)
+                .disabled(!model.fcpFound)
             }
         }
         .padding(24)

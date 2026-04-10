@@ -9,7 +9,9 @@
 //
 
 #import "SpliceKit.h"
+#import "SpliceKitLua.h"
 #import "SpliceKitCommandPalette.h"
+#import "SpliceKitDebugUI.h"
 #import <AppKit/AppKit.h>
 
 #pragma mark - Logging
@@ -42,14 +44,29 @@ void SpliceKit_log(NSString *format, ...) {
     NSString *message = [[NSString alloc] initWithFormat:format arguments:args];
     va_end(args);
 
-    NSLog(@"[SpliceKit] %@", message);
+    BOOL includeThreadInfo = [[NSUserDefaults standardUserDefaults] boolForKey:@"LogThread"];
+    NSString *threadLabel = @"";
+    if (includeThreadInfo) {
+        NSThread *thread = [NSThread currentThread];
+        NSString *name = thread.isMainThread ? @"main" : thread.name;
+        if (name.length == 0) {
+            name = [NSString stringWithFormat:@"%p", thread];
+        }
+        threadLabel = [NSString stringWithFormat:@"[%@] ", name];
+    }
+
+    NSString *consolePrefix = threadLabel.length
+        ? [NSString stringWithFormat:@"[SpliceKit] %@", threadLabel]
+        : @"[SpliceKit] ";
+    NSLog(@"%@%@", consolePrefix, message);
 
     // Append to log file on a serial queue so we don't block the caller
     if (sLogHandle && sLogQueue) {
         NSString *timestamp = [NSDateFormatter localizedStringFromDate:[NSDate date]
                                                             dateStyle:NSDateFormatterNoStyle
                                                             timeStyle:NSDateFormatterMediumStyle];
-        NSString *line = [NSString stringWithFormat:@"[%@] [SpliceKit] %@\n", timestamp, message];
+        NSString *line = [NSString stringWithFormat:@"[%@] [SpliceKit] %@%@\n",
+                          timestamp, threadLabel, message];
         NSData *data = [line dataUsingEncoding:NSUTF8StringEncoding];
         dispatch_async(sLogQueue, ^{
             [sLogHandle writeData:data];
@@ -159,15 +176,25 @@ static void SpliceKit_checkCompatibility(void) {
 // toggleable options (effect drag, pinch zoom, etc).
 //
 
-@interface SpliceKitMenuController : NSObject
+@interface SpliceKitMenuController : NSObject <NSMenuDelegate>
 + (instancetype)shared;
 - (void)toggleTranscriptPanel:(id)sender;
 - (void)toggleCommandPalette:(id)sender;
+- (void)toggleLuaPanel:(id)sender;
+- (void)runLuaScript:(id)sender;
+- (void)openLuaScriptsFolder:(id)sender;
 - (void)toggleEffectDragAsAdjustmentClip:(id)sender;
 - (void)toggleViewerPinchZoom:(id)sender;
 - (void)toggleVideoOnlyKeepsAudioDisabled:(id)sender;
+- (void)toggleSuppressAutoImport:(id)sender;
+- (void)editLLadder:(id)sender;
+- (void)editJLadder:(id)sender;
+- (void)setDefaultConformFit:(id)sender;
+- (void)setDefaultConformFill:(id)sender;
+- (void)setDefaultConformNone:(id)sender;
 @property (nonatomic, weak) NSButton *toolbarButton;
 @property (nonatomic, weak) NSButton *paletteToolbarButton;
+@property (nonatomic, strong) NSMenu *luaScriptsMenu;
 @end
 
 @implementation SpliceKitMenuController
@@ -201,6 +228,163 @@ static void SpliceKit_checkCompatibility(void) {
     [[SpliceKitCommandPalette sharedPalette] togglePalette];
 }
 
+- (void)toggleLuaPanel:(id)sender {
+    Class panelClass = objc_getClass("SpliceKitLuaPanel");
+    if (!panelClass) {
+        SpliceKit_log(@"SpliceKitLuaPanel class not found");
+        return;
+    }
+    id panel = ((id (*)(id, SEL))objc_msgSend)((id)panelClass, @selector(sharedPanel));
+    BOOL visible = ((BOOL (*)(id, SEL))objc_msgSend)(panel, @selector(isVisible));
+    if (visible) {
+        ((void (*)(id, SEL))objc_msgSend)(panel, @selector(hidePanel));
+    } else {
+        ((void (*)(id, SEL))objc_msgSend)(panel, @selector(showPanel));
+    }
+}
+
+#pragma mark - Lua Scripts Menu
+
+// Run a .lua script when its menu item is clicked.
+// The full path is stored in the menu item's representedObject.
+- (void)runLuaScript:(id)sender {
+    NSMenuItem *item = (NSMenuItem *)sender;
+    NSString *path = item.representedObject;
+    if (!path) return;
+
+    SpliceKit_log(@"[Lua] Running script: %@", [path lastPathComponent]);
+
+    // Run on a background thread so the menu dismisses immediately
+    // and the main thread stays free for SpliceKit_executeOnMainThread callbacks.
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSDictionary *result = SpliceKitLua_executeFile(path);
+        NSString *error = result[@"error"];
+        NSString *output = result[@"output"];
+        if (error) {
+            SpliceKit_log(@"[Lua] Error in %@: %@", [path lastPathComponent], error);
+        } else if (output.length > 0) {
+            SpliceKit_log(@"[Lua] %@: %@", [path lastPathComponent], output);
+        } else {
+            SpliceKit_log(@"[Lua] %@ completed", [path lastPathComponent]);
+        }
+    });
+}
+
+// Open the scripts folder in Finder so the user can add/edit scripts.
+- (void)openLuaScriptsFolder:(id)sender {
+    NSString *appSupport = [NSSearchPathForDirectoriesInDomains(
+        NSApplicationSupportDirectory, NSUserDomainMask, YES) firstObject];
+    NSString *scriptsDir = [appSupport stringByAppendingPathComponent:@"SpliceKit/lua/menu"];
+    // Create the directory if it doesn't exist yet
+    [[NSFileManager defaultManager] createDirectoryAtPath:scriptsDir
+                              withIntermediateDirectories:YES
+                                              attributes:nil
+                                                   error:nil];
+    [[NSWorkspace sharedWorkspace] openURL:[NSURL fileURLWithPath:scriptsDir]];
+}
+
+// NSMenuDelegate — rebuild the Lua Scripts submenu every time it opens.
+// This picks up newly added/removed scripts without restarting FCP.
+- (void)menuNeedsUpdate:(NSMenu *)menu {
+    if (menu != self.luaScriptsMenu) return;
+
+    [menu removeAllItems];
+
+    NSString *appSupport = [NSSearchPathForDirectoriesInDomains(
+        NSApplicationSupportDirectory, NSUserDomainMask, YES) firstObject];
+    NSString *menuDir = [appSupport stringByAppendingPathComponent:@"SpliceKit/lua/menu"];
+
+    // Create the directory if it doesn't exist
+    [[NSFileManager defaultManager] createDirectoryAtPath:menuDir
+                              withIntermediateDirectories:YES
+                                              attributes:nil
+                                                   error:nil];
+
+    // Enumerate .lua files, sorted alphabetically
+    NSArray *files = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:menuDir error:nil];
+    NSMutableArray *luaFiles = [NSMutableArray array];
+    for (NSString *file in files) {
+        if ([file.pathExtension isEqualToString:@"lua"]) {
+            [luaFiles addObject:file];
+        }
+    }
+    [luaFiles sortUsingSelector:@selector(localizedCaseInsensitiveCompare:)];
+
+    if (luaFiles.count == 0) {
+        NSMenuItem *emptyItem = [[NSMenuItem alloc]
+            initWithTitle:@"No scripts — add .lua files to menu/ folder"
+                   action:nil
+            keyEquivalent:@""];
+        emptyItem.enabled = NO;
+        [menu addItem:emptyItem];
+    } else {
+        for (NSString *file in luaFiles) {
+            // Display name: strip .lua extension and leading numbers/underscores
+            // "01_blade_every_2s.lua" → "blade every 2s"
+            NSString *displayName = [file stringByDeletingPathExtension];
+            // Strip leading "01_", "02_" etc. for ordering without showing numbers
+            NSRegularExpression *regex = [NSRegularExpression
+                regularExpressionWithPattern:@"^\\d+[_\\-\\s]+"
+                                     options:0 error:nil];
+            displayName = [regex stringByReplacingMatchesInString:displayName
+                                                         options:0
+                                                           range:NSMakeRange(0, displayName.length)
+                                                withTemplate:@""];
+            // Replace underscores with spaces
+            displayName = [displayName stringByReplacingOccurrencesOfString:@"_" withString:@" "];
+
+            NSString *fullPath = [menuDir stringByAppendingPathComponent:file];
+
+            NSMenuItem *item = [[NSMenuItem alloc]
+                initWithTitle:displayName
+                       action:@selector(runLuaScript:)
+                keyEquivalent:@""];
+            item.target = [SpliceKitMenuController shared];
+            item.representedObject = fullPath;
+            item.enabled = YES;
+
+            // Read the first comment line for a tooltip
+            NSString *content = [NSString stringWithContentsOfFile:fullPath
+                                                         encoding:NSUTF8StringEncoding
+                                                            error:nil];
+            if (content) {
+                // Look for first "-- " comment line
+                for (NSString *line in [content componentsSeparatedByString:@"\n"]) {
+                    NSString *trimmed = [line stringByTrimmingCharactersInSet:
+                        [NSCharacterSet whitespaceCharacterSet]];
+                    if ([trimmed hasPrefix:@"-- "] && trimmed.length > 3) {
+                        item.toolTip = [trimmed substringFromIndex:3];
+                        break;
+                    } else if ([trimmed hasPrefix:@"--[["]) {
+                        // Multi-line comment — grab the next non-empty line
+                        continue;
+                    } else if (trimmed.length > 0 && ![trimmed hasPrefix:@"--"]) {
+                        break; // hit code, stop looking
+                    } else if (trimmed.length > 2 && [trimmed hasPrefix:@"  "]) {
+                        // Indented line inside --[[ block — use as tooltip
+                        item.toolTip = [trimmed stringByTrimmingCharactersInSet:
+                            [NSCharacterSet whitespaceCharacterSet]];
+                        break;
+                    }
+                }
+            }
+
+            [menu addItem:item];
+        }
+    }
+
+    [menu addItem:[NSMenuItem separatorItem]];
+
+    // "Open Scripts Folder" item at the bottom
+    NSMenuItem *openFolderItem = [[NSMenuItem alloc]
+        initWithTitle:@"Open Scripts Folder..."
+               action:@selector(openLuaScriptsFolder:)
+        keyEquivalent:@""];
+    openFolderItem.target = [SpliceKitMenuController shared];
+    openFolderItem.enabled = YES;
+    [menu addItem:openFolderItem];
+}
+
 - (void)toggleEffectDragAsAdjustmentClip:(id)sender {
     BOOL newState = !SpliceKit_isEffectDragAsAdjustmentClipEnabled();
     SpliceKit_setEffectDragAsAdjustmentClipEnabled(newState);
@@ -222,6 +406,119 @@ static void SpliceKit_checkCompatibility(void) {
     SpliceKit_setVideoOnlyKeepsAudioDisabledEnabled(newState);
     if ([sender isKindOfClass:[NSMenuItem class]]) {
         [(NSMenuItem *)sender setState:newState ? NSControlStateValueOn : NSControlStateValueOff];
+    }
+}
+
+- (void)toggleSuppressAutoImport:(id)sender {
+    BOOL newState = !SpliceKit_isSuppressAutoImportEnabled();
+    SpliceKit_setSuppressAutoImportEnabled(newState);
+    if ([sender isKindOfClass:[NSMenuItem class]]) {
+        [(NSMenuItem *)sender setState:newState ? NSControlStateValueOn : NSControlStateValueOff];
+    }
+}
+
+// --- Playback Speed ladder editors ---
+
+static NSString *SpliceKit_ladderToString(NSArray<NSNumber *> *ladder) {
+    NSMutableArray *strs = [NSMutableArray array];
+    for (NSNumber *n in ladder) {
+        float v = [n floatValue];
+        if (v == (int)v) [strs addObject:[NSString stringWithFormat:@"%d", (int)v]];
+        else [strs addObject:[NSString stringWithFormat:@"%.1f", v]];
+    }
+    return [strs componentsJoinedByString:@", "];
+}
+
+static NSArray<NSNumber *> *SpliceKit_parseLadderString(NSString *str) {
+    NSMutableArray *result = [NSMutableArray array];
+    for (NSString *part in [str componentsSeparatedByString:@","]) {
+        NSString *trimmed = [part stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+        if (trimmed.length > 0) {
+            float val = [trimmed floatValue];
+            if (val > 0.0f) [result addObject:@(val)];
+        }
+    }
+    // Sort ascending
+    [result sortUsingComparator:^NSComparisonResult(NSNumber *a, NSNumber *b) {
+        return [a compare:b];
+    }];
+    return result;
+}
+
+- (void)editLLadder:(id)sender {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        NSAlert *alert = [[NSAlert alloc] init];
+        alert.messageText = @"L Key Speeds";
+        alert.informativeText = @"Each press of L advances to the next speed.\nEnter values separated by commas:";
+        [alert addButtonWithTitle:@"Save"];
+        [alert addButtonWithTitle:@"Cancel"];
+        NSTextField *input = [[NSTextField alloc] initWithFrame:NSMakeRect(0, 0, 280, 24)];
+        input.stringValue = SpliceKit_ladderToString(SpliceKit_getLLadder());
+        alert.accessoryView = input;
+        [alert.window makeFirstResponder:input];
+        if ([alert runModal] == NSAlertFirstButtonReturn) {
+            NSArray *speeds = SpliceKit_parseLadderString(input.stringValue);
+            if (speeds.count > 0) {
+                SpliceKit_setLLadder(speeds);
+                if ([sender isKindOfClass:[NSMenuItem class]])
+                    [(NSMenuItem *)sender setTitle:
+                        [NSString stringWithFormat:@"L Speeds: %@", SpliceKit_ladderToString(speeds)]];
+            }
+        }
+    });
+}
+
+- (void)editJLadder:(id)sender {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        NSAlert *alert = [[NSAlert alloc] init];
+        alert.messageText = @"J Key Speeds";
+        alert.informativeText = @"Each press of J advances to the next reverse speed.\nEnter values separated by commas:";
+        [alert addButtonWithTitle:@"Save"];
+        [alert addButtonWithTitle:@"Cancel"];
+        NSTextField *input = [[NSTextField alloc] initWithFrame:NSMakeRect(0, 0, 280, 24)];
+        input.stringValue = SpliceKit_ladderToString(SpliceKit_getJLadder());
+        alert.accessoryView = input;
+        [alert.window makeFirstResponder:input];
+        if ([alert runModal] == NSAlertFirstButtonReturn) {
+            NSArray *speeds = SpliceKit_parseLadderString(input.stringValue);
+            if (speeds.count > 0) {
+                SpliceKit_setJLadder(speeds);
+                if ([sender isKindOfClass:[NSMenuItem class]])
+                    [(NSMenuItem *)sender setTitle:
+                        [NSString stringWithFormat:@"J Speeds: %@", SpliceKit_ladderToString(speeds)]];
+            }
+        }
+    });
+}
+
+- (void)setDefaultConformFit:(id)sender {
+    SpliceKit_setDefaultSpatialConformType(@"fit");
+    [self _updateConformMenuFromSender:sender];
+}
+
+- (void)setDefaultConformFill:(id)sender {
+    SpliceKit_setDefaultSpatialConformType(@"fill");
+    [self _updateConformMenuFromSender:sender];
+}
+
+- (void)setDefaultConformNone:(id)sender {
+    SpliceKit_setDefaultSpatialConformType(@"none");
+    [self _updateConformMenuFromSender:sender];
+}
+
+- (void)_updateConformMenuFromSender:(id)sender {
+    if (![sender isKindOfClass:[NSMenuItem class]]) return;
+    NSMenu *menu = [(NSMenuItem *)sender menu];
+    if (!menu) return;
+    NSString *current = SpliceKit_getDefaultSpatialConformType();
+    for (NSMenuItem *item in menu.itemArray) {
+        NSString *tag = nil;
+        if (item.action == @selector(setDefaultConformFit:)) tag = @"fit";
+        else if (item.action == @selector(setDefaultConformFill:)) tag = @"fill";
+        else if (item.action == @selector(setDefaultConformNone:)) tag = @"none";
+        if (tag) {
+            item.state = [current isEqualToString:tag] ? NSControlStateValueOn : NSControlStateValueOff;
+        }
     }
 }
 
@@ -267,6 +564,52 @@ static void SpliceKit_installMenu(void) {
     paletteItem.target = [SpliceKitMenuController shared];
     [bridgeMenu addItem:paletteItem];
 
+    NSMenuItem *luaItem = [[NSMenuItem alloc]
+        initWithTitle:@"Lua REPL"
+               action:@selector(toggleLuaPanel:)
+        keyEquivalent:@"l"];
+    luaItem.keyEquivalentModifierMask = NSEventModifierFlagControl | NSEventModifierFlagOption;
+    luaItem.target = [SpliceKitMenuController shared];
+    [bridgeMenu addItem:luaItem];
+
+    // --- Lua Scripts submenu (dynamically populated) ---
+    NSMenu *luaScriptsMenu = [[NSMenu alloc] initWithTitle:@"Lua Scripts"];
+    luaScriptsMenu.delegate = [SpliceKitMenuController shared];
+    luaScriptsMenu.autoenablesItems = NO;
+    [SpliceKitMenuController shared].luaScriptsMenu = luaScriptsMenu;
+    NSMenuItem *luaScriptsMenuItem = [[NSMenuItem alloc]
+        initWithTitle:@"Lua Scripts"
+               action:nil
+        keyEquivalent:@""];
+    luaScriptsMenuItem.submenu = luaScriptsMenu;
+    [bridgeMenu addItem:luaScriptsMenuItem];
+
+    // --- Playback Speed submenu ---
+    [bridgeMenu addItem:[NSMenuItem separatorItem]];
+
+    NSMenu *speedMenu = [[NSMenu alloc] initWithTitle:@"Playback Speed"];
+    SpliceKitMenuController *mc = [SpliceKitMenuController shared];
+
+    NSMenuItem *lItem = [[NSMenuItem alloc]
+        initWithTitle:[NSString stringWithFormat:@"L Speeds: %@",
+                       SpliceKit_ladderToString(SpliceKit_getLLadder())]
+               action:@selector(editLLadder:)
+        keyEquivalent:@""];
+    lItem.target = mc;
+    [speedMenu addItem:lItem];
+
+    NSMenuItem *jItem = [[NSMenuItem alloc]
+        initWithTitle:[NSString stringWithFormat:@"J Speeds: %@",
+                       SpliceKit_ladderToString(SpliceKit_getJLadder())]
+               action:@selector(editJLadder:)
+        keyEquivalent:@""];
+    jItem.target = mc;
+    [speedMenu addItem:jItem];
+
+    NSMenuItem *speedMenuItem = [[NSMenuItem alloc] initWithTitle:@"Playback Speed" action:nil keyEquivalent:@""];
+    speedMenuItem.submenu = speedMenu;
+    [bridgeMenu addItem:speedMenuItem];
+
     // --- Options submenu ---
     [bridgeMenu addItem:[NSMenuItem separatorItem]];
 
@@ -298,6 +641,42 @@ static void SpliceKit_installMenu(void) {
         ? NSControlStateValueOn : NSControlStateValueOff;
     [optionsMenu addItem:videoOnlyKeepsAudioItem];
 
+    NSMenuItem *suppressAutoImportItem = [[NSMenuItem alloc]
+        initWithTitle:@"Suppress Auto Import Window on Device Connect"
+               action:@selector(toggleSuppressAutoImport:)
+        keyEquivalent:@""];
+    suppressAutoImportItem.target = [SpliceKitMenuController shared];
+    suppressAutoImportItem.state = SpliceKit_isSuppressAutoImportEnabled()
+        ? NSControlStateValueOn : NSControlStateValueOff;
+    [optionsMenu addItem:suppressAutoImportItem];
+
+    // --- Default Spatial Conform submenu ---
+    NSMenu *conformMenu = [[NSMenu alloc] initWithTitle:@"Default Spatial Conform"];
+    NSString *currentConform = SpliceKit_getDefaultSpatialConformType();
+
+    NSMenuItem *conformFitItem = [[NSMenuItem alloc]
+        initWithTitle:@"Fit (Default)" action:@selector(setDefaultConformFit:) keyEquivalent:@""];
+    conformFitItem.target = [SpliceKitMenuController shared];
+    conformFitItem.state = [currentConform isEqualToString:@"fit"] ? NSControlStateValueOn : NSControlStateValueOff;
+    [conformMenu addItem:conformFitItem];
+
+    NSMenuItem *conformFillItem = [[NSMenuItem alloc]
+        initWithTitle:@"Fill" action:@selector(setDefaultConformFill:) keyEquivalent:@""];
+    conformFillItem.target = [SpliceKitMenuController shared];
+    conformFillItem.state = [currentConform isEqualToString:@"fill"] ? NSControlStateValueOn : NSControlStateValueOff;
+    [conformMenu addItem:conformFillItem];
+
+    NSMenuItem *conformNoneItem = [[NSMenuItem alloc]
+        initWithTitle:@"None" action:@selector(setDefaultConformNone:) keyEquivalent:@""];
+    conformNoneItem.target = [SpliceKitMenuController shared];
+    conformNoneItem.state = [currentConform isEqualToString:@"none"] ? NSControlStateValueOn : NSControlStateValueOff;
+    [conformMenu addItem:conformNoneItem];
+
+    NSMenuItem *conformMenuItem = [[NSMenuItem alloc]
+        initWithTitle:@"Default Spatial Conform" action:nil keyEquivalent:@""];
+    conformMenuItem.submenu = conformMenu;
+    [optionsMenu addItem:conformMenuItem];
+
     NSMenuItem *optionsMenuItem = [[NSMenuItem alloc] initWithTitle:@"Options" action:nil keyEquivalent:@""];
     optionsMenuItem.submenu = optionsMenu;
     [bridgeMenu addItem:optionsMenuItem];
@@ -313,7 +692,7 @@ static void SpliceKit_installMenu(void) {
         [mainMenu addItem:bridgeMenuItem];
     }
 
-    SpliceKit_log(@"SpliceKit menu installed (Ctrl+Option+T for Transcript Editor, Cmd+Shift+P for Command Palette)");
+    SpliceKit_log(@"SpliceKit menu installed (Ctrl+Option+T Transcript, Cmd+Shift+P Palette, Ctrl+Option+L Lua REPL)");
 }
 
 static NSString * const kSpliceKitTranscriptToolbarID = @"SpliceKitTranscriptItemID";
@@ -552,13 +931,40 @@ static void SpliceKit_appDidLaunch(void) {
         SpliceKit_installVideoOnlyKeepsAudioDisabled();
     }
 
+    // Install suppress-auto-import swizzle if previously enabled. The mount-notification
+    // observers were already set up at FCP launch before our dylib loaded, so we have
+    // to intercept the handler methods themselves rather than the observer registration.
+    if (SpliceKit_isSuppressAutoImportEnabled()) {
+        SpliceKit_installSuppressAutoImport();
+    }
+
+    // Install default spatial conform swizzle if set to non-default value
+    if (![SpliceKit_getDefaultSpatialConformType() isEqualToString:@"fit"]) {
+        SpliceKit_installDefaultSpatialConformType();
+    }
+
     // Install effect browser favorites context menu (always on)
     SpliceKit_installEffectFavoritesSwizzle();
+
+    // Install FCPXML direct paste support (converts FCPXML on pasteboard
+    // to native clipboard format so pasteAnchored: can handle it)
+    SpliceKit_installFCPXMLPasteSwizzle();
+
+    // Swizzle J/L to use configurable speed ladders
+    SpliceKit_installPlaybackSpeedSwizzle();
+
+    // Rebuild FCP's hidden Debug pane + Debug menu bar (Apple strips the NIB
+    // and leaves the menu unassigned in release builds; we reconstruct both).
+    SpliceKit_installDebugSettingsPanel();
+    SpliceKit_installDebugMenuBar();
 
     // Start the control server on a background thread
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         SpliceKit_startControlServer();
     });
+
+    // Initialize Lua scripting VM
+    SpliceKitLua_initialize();
 }
 
 #pragma mark - Crash Prevention & Startup Fixes
@@ -583,6 +989,12 @@ static void noopMethodWithArg(id self, SEL _cmd, id arg) {
 static BOOL returnNO(id self, SEL _cmd) {
     SpliceKit_log(@"BLOCKED (returning NO): +[%@ %@]",
                   NSStringFromClass(object_getClass(self)), NSStringFromSelector(_cmd));
+    return NO;
+}
+
+// Silent variant — no logging. Used for high-frequency swizzles like isSPVEnabled
+// which gets called dozens of times during startup.
+static BOOL returnNO_silent(id self, SEL _cmd) {
     return NO;
 }
 
@@ -642,7 +1054,316 @@ static void SpliceKit_disableCloudContent(void) {
         }
     }
 
+    // Also handle the CCFirstLaunchHelper directly — on Creator Studio the Swift feature
+    // flag swizzle above may not take effect, so we ensure the CloudContent first-launch
+    // flow (which requires CloudKit entitlements lost after re-signing) doesn't run.
+    Class ccHelper = objc_getClass("CCFirstLaunchHelper");
+    if (ccHelper) {
+        SEL sel = NSSelectorFromString(@"setupAndPresentFirstLaunchIfNeededWithCompletionHandler:");
+        Method m = class_getInstanceMethod(ccHelper, sel);
+        if (m) {
+            method_setImplementation(m, (IMP)noopMethodWithArg);
+            SpliceKit_log(@"  Handled CCFirstLaunchHelper (CloudKit entitlements fix)");
+        }
+    }
+
     SpliceKit_log(@"CloudContent/ImagePlayground disabled.");
+}
+
+#pragma mark - App Store Receipt Validation
+//
+// Validates the App Store receipt from the original (unmodded) FCP installation.
+// The receipt is a PKCS7-signed ASN.1 blob from Apple. We verify the signature
+// via CMSDecoder and parse the payload to extract the bundle ID, confirming the
+// user legitimately downloaded the app from the App Store.
+//
+// This runs locally — no network calls, no Apple servers.
+//
+
+#import <Security/CMSDecoder.h>
+
+// Read a DER length field. Returns bytes consumed (0 on error).
+static size_t SpliceKit_readDERLength(const uint8_t *buf, size_t bufLen, size_t *outLen) {
+    if (bufLen == 0) return 0;
+    uint8_t first = buf[0];
+    if (!(first & 0x80)) {
+        *outLen = first;
+        return 1;
+    }
+    size_t numBytes = first & 0x7F;
+    if (numBytes == 0 || numBytes > 4 || numBytes >= bufLen) return 0;
+    size_t len = 0;
+    for (size_t i = 0; i < numBytes; i++)
+        len = (len << 8) | buf[1 + i];
+    *outLen = len;
+    return 1 + numBytes;
+}
+
+// Parse the ASN.1 receipt payload and extract the bundle ID (attribute type 2).
+// Receipt structure: SET { SEQUENCE { INTEGER type, INTEGER version, OCTET STRING value } ... }
+static NSString *SpliceKit_extractBundleIdFromPayload(NSData *payload) {
+    const uint8_t *buf = payload.bytes;
+    size_t total = payload.length;
+    if (total < 2) return nil;
+
+    // Outer SET (tag 0x31)
+    if (buf[0] != 0x31) return nil;
+    size_t setLen = 0;
+    size_t off = 1 + SpliceKit_readDERLength(buf + 1, total - 1, &setLen);
+    size_t setEnd = off + setLen;
+    if (setEnd > total) setEnd = total;
+
+    while (off < setEnd) {
+        // Each entry is a SEQUENCE (tag 0x30)
+        if (buf[off] != 0x30) break;
+        size_t seqLen = 0;
+        size_t hdr = 1 + SpliceKit_readDERLength(buf + off + 1, setEnd - off - 1, &seqLen);
+        size_t seqStart = off + hdr;
+        size_t seqEnd = seqStart + seqLen;
+        if (seqEnd > setEnd) break;
+
+        // Parse: INTEGER type
+        size_t p = seqStart;
+        if (p >= seqEnd || buf[p] != 0x02) { off = seqEnd; continue; }
+        p++;
+        size_t intLen = 0;
+        p += SpliceKit_readDERLength(buf + p, seqEnd - p, &intLen);
+        int attrType = 0;
+        for (size_t i = 0; i < intLen && i < 4; i++)
+            attrType = (attrType << 8) | buf[p + i];
+        p += intLen;
+
+        // Skip: INTEGER version
+        if (p >= seqEnd || buf[p] != 0x02) { off = seqEnd; continue; }
+        p++;
+        size_t verLen = 0;
+        p += SpliceKit_readDERLength(buf + p, seqEnd - p, &verLen);
+        p += verLen;
+
+        // OCTET STRING value
+        if (p >= seqEnd || buf[p] != 0x04) { off = seqEnd; continue; }
+        p++;
+        size_t valLen = 0;
+        p += SpliceKit_readDERLength(buf + p, seqEnd - p, &valLen);
+
+        // Type 2 = Bundle Identifier. The value is a UTF8String (tag 0x0C) inside the OCTET STRING.
+        if (attrType == 2 && p + valLen <= seqEnd) {
+            const uint8_t *val = buf + p;
+            if (valLen >= 2 && val[0] == 0x0C) {
+                size_t strLen = 0;
+                size_t strHdr = 1 + SpliceKit_readDERLength(val + 1, valLen - 1, &strLen);
+                if (strHdr + strLen <= valLen) {
+                    return [[NSString alloc] initWithBytes:val + strHdr
+                                                    length:strLen
+                                                  encoding:NSUTF8StringEncoding];
+                }
+            }
+        }
+
+        off = seqEnd;
+    }
+    return nil;
+}
+
+// Log diagnostic details about a receipt (PKCS7 signature, bundle ID).
+// This is informational only — the result does not gate app launch.
+static void SpliceKit_logReceiptDiagnostics(NSData *receiptData, NSString *receiptPath) {
+    CMSDecoderRef decoder = NULL;
+    OSStatus status = CMSDecoderCreate(&decoder);
+    if (status != noErr) {
+        SpliceKit_log(@"[Receipt] CMSDecoderCreate failed: %d", (int)status);
+        return;
+    }
+
+    status = CMSDecoderUpdateMessage(decoder, receiptData.bytes, receiptData.length);
+    if (status != noErr) {
+        SpliceKit_log(@"[Receipt] CMSDecoderUpdateMessage failed: %d", (int)status);
+        CFRelease(decoder);
+        return;
+    }
+
+    status = CMSDecoderFinalizeMessage(decoder);
+    if (status != noErr) {
+        SpliceKit_log(@"[Receipt] CMSDecoderFinalizeMessage failed: %d", (int)status);
+        CFRelease(decoder);
+        return;
+    }
+
+    size_t numSigners = 0;
+    CMSDecoderGetNumSigners(decoder, &numSigners);
+    if (numSigners == 0) {
+        SpliceKit_log(@"[Receipt] No signers in receipt");
+        CFRelease(decoder);
+        return;
+    }
+
+    SecPolicyRef policy = SecPolicyCreateBasicX509();
+    CMSSignerStatus signerStatus = kCMSSignerUnsigned;
+    SecTrustRef trust = NULL;
+    OSStatus certVerifyResult = 0;
+
+    status = CMSDecoderCopySignerStatus(decoder, 0, policy, TRUE,
+                                        &signerStatus, &trust, &certVerifyResult);
+
+    BOOL signatureValid = (status == noErr && signerStatus == kCMSSignerValid);
+    SpliceKit_log(@"[Receipt] Signature: %@ (signerStatus=%d certVerify=%d)",
+        signatureValid ? @"VALID" : @"INVALID", (int)signerStatus, (int)certVerifyResult);
+
+    if (trust) CFRelease(trust);
+    if (policy) CFRelease(policy);
+
+    CFDataRef contentRef = NULL;
+    status = CMSDecoderCopyContent(decoder, &contentRef);
+    CFRelease(decoder);
+
+    if (status != noErr || !contentRef) {
+        SpliceKit_log(@"[Receipt] Failed to extract payload: %d", (int)status);
+        return;
+    }
+
+    NSData *payload = (__bridge_transfer NSData *)contentRef;
+    NSString *bundleId = SpliceKit_extractBundleIdFromPayload(payload);
+    if (bundleId) {
+        BOOL bundleIdMatch = [bundleId isEqualToString:@"com.apple.FinalCut"] ||
+                             [bundleId isEqualToString:@"com.apple.FinalCutApp"];
+        SpliceKit_log(@"[Receipt] Bundle ID: \"%@\" %@",
+            bundleId, bundleIdMatch ? @"MATCH" : @"MISMATCH");
+    } else {
+        SpliceKit_log(@"[Receipt] Could not extract bundle ID from payload");
+    }
+}
+
+// Paths checked during the last receipt search (used in error reporting).
+static NSArray *sCheckedReceiptPaths = nil;
+
+// Search for an App Store receipt file at known locations.
+// Returns YES if a receipt file is found (file existence is sufficient).
+// PKCS7/signature details are logged for diagnostics but do not gate the result.
+static BOOL SpliceKit_findReceiptFile(void) {
+    NSMutableArray *paths = [NSMutableArray array];
+
+    // 1. Running app's own receipt (patcher copies it into the modded bundle)
+    NSURL *receiptURL = [[NSBundle mainBundle] appStoreReceiptURL];
+    if (receiptURL.path) {
+        [paths addObject:receiptURL.path];
+    }
+
+    // 2. Original Creator Studio install
+    [paths addObject:
+        @"/Applications/Final Cut Pro Creator Studio.app/Contents/_MASReceipt/receipt"];
+
+    // 3. Standard FCP install (user may have both editions)
+    [paths addObject:
+        @"/Applications/Final Cut Pro.app/Contents/_MASReceipt/receipt"];
+
+    sCheckedReceiptPaths = [paths copy];
+
+    for (NSString *path in paths) {
+        NSData *data = [NSData dataWithContentsOfFile:path];
+        if (data.length > 0) {
+            SpliceKit_log(@"[Receipt] Found: %@ (%lu bytes)", path, (unsigned long)data.length);
+            SpliceKit_logReceiptDiagnostics(data, path);
+            return YES;
+        }
+    }
+
+    SpliceKit_log(@"[Receipt] No App Store receipt found. Checked:");
+    for (NSString *path in paths) {
+        SpliceKit_log(@"[Receipt]   %@", path);
+    }
+    return NO;
+}
+
+// Handle subscription validation based on which FCP edition is running.
+// - Standard FCP (com.apple.FinalCut): perpetual license, no receipt check needed.
+// - Creator Studio (com.apple.FinalCutApp): subscription-based, verify receipt file exists.
+// - Unknown: proceed without blocking (future-proofing).
+//
+// Creator Studio uses an online subscription validation flow (SPV) at launch.
+// After ad-hoc re-signing for dylib injection, the entitlements required for that
+// online check are lost, causing a "Cannot Connect" error on startup. We route
+// around it by making isSPVEnabled return NO.
+static void SpliceKit_handleSubscriptionValidation(void) {
+    SpliceKit_log(@"Checking subscription status...");
+
+    NSString *bundleId = [[NSBundle mainBundle] bundleIdentifier];
+    SpliceKit_log(@"  Bundle identifier: %@", bundleId ?: @"(nil)");
+
+    BOOL isCreatorStudio = [bundleId isEqualToString:@"com.apple.FinalCutApp"];
+    BOOL isStandardFCP   = [bundleId isEqualToString:@"com.apple.FinalCut"];
+
+    if (isStandardFCP) {
+        // Standard FCP is a perpetual license — no subscription to validate.
+        SpliceKit_log(@"  Standard FCP detected — skipping receipt validation");
+    } else if (isCreatorStudio) {
+        // Creator Studio requires a subscription. Verify the App Store receipt
+        // file exists to confirm the user downloaded it from the App Store.
+        SpliceKit_log(@"  Creator Studio detected — checking for App Store receipt");
+        BOOL receiptFound = SpliceKit_findReceiptFile();
+        if (!receiptFound) {
+            SpliceKit_log(@"  No App Store receipt found");
+            [[NSNotificationCenter defaultCenter]
+                addObserverForName:NSApplicationDidFinishLaunchingNotification
+                object:nil queue:nil usingBlock:^(NSNotification *note) {
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        NSMutableString *info = [NSMutableString stringWithString:
+                            @"SpliceKit could not find an App Store receipt for "
+                            @"Final Cut Pro Creator Studio.\n\nChecked locations:\n"];
+                        for (NSString *path in sCheckedReceiptPaths) {
+                            [info appendFormat:@"  \u2022 %@\n", path];
+                        }
+                        [info appendString:
+                            @"\nPossible causes:\n"
+                            @"  \u2022 Final Cut Pro was not installed from the App Store\n"
+                            @"  \u2022 The original app was deleted before patching\n"
+                            @"  \u2022 Volume license or MDM installation (no App Store receipt)\n"
+                            @"\nPlease reinstall Final Cut Pro Creator Studio from the "
+                            @"App Store, then re-run the SpliceKit patcher."];
+
+                        NSAlert *alert = [[NSAlert alloc] init];
+                        [alert setMessageText:@"No Valid Subscription Found"];
+                        [alert setInformativeText:info];
+                        [alert setAlertStyle:NSAlertStyleCritical];
+                        [alert addButtonWithTitle:@"Quit"];
+                        [alert runModal];
+                        [NSApp terminate:nil];
+                    });
+                }];
+            return;
+        }
+        SpliceKit_log(@"  Receipt found — proceeding with offline validation");
+    } else {
+        // Unknown bundle ID — don't block. Could be a renamed app or future edition.
+        SpliceKit_log(@"  Unknown bundle ID \"%@\" — proceeding without receipt check", bundleId);
+    }
+
+    // Route the subscription check through the standard (non-online) launch path.
+    // For standard FCP this is a harmless no-op. For Creator Studio it bypasses
+    // the broken online SPV check.
+    Class flexo = objc_getClass("Flexo");
+    if (flexo) {
+        Method m = class_getClassMethod(flexo, @selector(isSPVEnabled));
+        if (m) {
+            method_setImplementation(m, (IMP)returnNO_silent);
+            SpliceKit_log(@"  Configured offline subscription validation");
+        }
+    }
+
+    Class pcFeature = objc_getClass("PCAppFeature");
+    if (pcFeature) {
+        Method m = class_getClassMethod(pcFeature, @selector(isSPVEnabled));
+        if (m)
+            method_setImplementation(m, (IMP)returnNO_silent);
+    }
+
+    // The standard launch path triggers a CloudContent first-launch flow that
+    // requires CloudKit entitlements (lost after re-signing). Mark it as already
+    // completed to prevent the CloudKit crash.
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    [defaults setBool:YES forKey:@"CloudContentFirstLaunchCompleted"];
+    [defaults setBool:YES forKey:@"FFCloudContentDisabled"];
+
+    SpliceKit_log(@"  Subscription validation configured");
 }
 
 #pragma mark - Constructor
@@ -665,6 +1386,7 @@ static void SpliceKit_init(void) {
 
     // These patches need to land before FCP's own init code runs
     SpliceKit_disableCloudContent();
+    SpliceKit_handleSubscriptionValidation();
     SpliceKit_fixShutdownHang();
 
     // Everything else waits for the app to finish launching

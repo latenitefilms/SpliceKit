@@ -48,6 +48,7 @@ NSArray *SpliceKit_allLoadedClasses(void);
 // (dispatch_sync deadlocks in that situation because the main queue stalls).
 void SpliceKit_executeOnMainThread(dispatch_block_t block);
 void SpliceKit_executeOnMainThreadAsync(dispatch_block_t block);
+BOOL SpliceKit_isMainThreadInRPCDispatch(void);
 
 #pragma mark - Swizzling
 
@@ -104,11 +105,55 @@ BOOL SpliceKit_isViewerPinchZoomEnabled(void);
 // Adds a right-click "Favorite" option in the effect browser.
 void SpliceKit_installEffectFavoritesSwizzle(void);
 
+// Swizzles pasteAnchored: and paste: to handle FCPXML on the pasteboard.
+// When FCPXML is detected, imports it into a temp project, converts to native
+// clipboard format, and then lets the original paste proceed. Includes caching,
+// screen freeze to hide the project switch, and playhead restoration.
+void SpliceKit_installFCPXMLPasteSwizzle(void);
+
+// Shared FCPXML-to-native conversion function. Checks if the pasteboard has
+// FCPXML, converts it to native proFFPasteboardUTI format (using cache if
+// available), and returns YES if native data is now on the pasteboard.
+// Can be called directly by the caption system instead of duplicating the pipeline.
+// Must be called on the main thread.
+BOOL SpliceKit_convertFCPXMLToNativeClipboard(void);
+
 // When you switch to video-only edit mode, FCP re-enables audio every time
 // you switch back. This keeps audio disabled so it stays how you left it.
 void SpliceKit_installVideoOnlyKeepsAudioDisabled(void);
 void SpliceKit_setVideoOnlyKeepsAudioDisabledEnabled(BOOL enabled);
 BOOL SpliceKit_isVideoOnlyKeepsAudioDisabledEnabled(void);
+
+// Stops FCP from auto-opening the Import Media window every time a card, camera,
+// or iOS device mounts. The observers stay wired up, but the handler methods
+// bail out early when this is enabled.
+void SpliceKit_installSuppressAutoImport(void);
+void SpliceKit_setSuppressAutoImportEnabled(BOOL enabled);
+BOOL SpliceKit_isSuppressAutoImportEnabled(void);
+
+// Playback speed configuration — configurable J/L speed ladders
+// L ladder: speeds for each successive L press (default: 1, 2, 4, 8, 16, 32)
+// J ladder: speeds for each successive J press, stored positive, applied negative
+NSArray<NSNumber *> *SpliceKit_getLLadder(void);
+void SpliceKit_setLLadder(NSArray<NSNumber *> *speeds);
+NSArray<NSNumber *> *SpliceKit_getJLadder(void);
+void SpliceKit_setJLadder(NSArray<NSNumber *> *speeds);
+void SpliceKit_setPlaybackRate(float rate);
+void SpliceKit_installPlaybackSpeedSwizzle(void);
+
+// Overrides the default Spatial Conform Type for newly added timeline clips.
+// FCP normally defaults to "Fit" (letterbox/pillarbox). This lets users choose
+// "Fill" (scale to fill, cropping edges) or "None" (native resolution) instead.
+// Value is a string: "fit", "fill", or "none".
+void SpliceKit_installDefaultSpatialConformType(void);
+void SpliceKit_setDefaultSpatialConformType(NSString *value);
+NSString *SpliceKit_getDefaultSpatialConformType(void);
+
+#pragma mark - Lua Scripting
+
+// Initialize the embedded Lua 5.4 VM and start the file watcher.
+// Called once from SpliceKit_appDidLaunch().
+void SpliceKitLua_initialize(void);
 
 #pragma mark - Cached Class References
 //

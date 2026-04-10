@@ -1,5 +1,10 @@
+// PatcherModel.swift -- Core model for the SpliceKit GUI patcher.
+// Drives the wizard-style UI: welcome -> patching -> complete.
+// Handles FCP edition detection, patch orchestration, and launch.
+
 import SwiftUI
 import AppKit
+import UniformTypeIdentifiers
 
 // MARK: - Types
 
@@ -22,6 +27,7 @@ enum PatchStep: String, CaseIterable {
     case done = "Done"
 }
 
+/// The three panels of the wizard-style patcher UI.
 enum WizardPanel: Int {
     case welcome
     case patching
@@ -53,23 +59,33 @@ class PatcherModel: ObservableObject {
     static let standardApp = "/Applications/Final Cut Pro.app"
     static let creatorStudioApp = "/Applications/Final Cut Pro Creator Studio.app"
 
-    @Published var sourceApp: String
-    let destDir: String
+    @Published var sourceApp: String   // path to the stock FCP.app
+    let destDir: String                // ~/Applications/SpliceKit/
     var moddedApp: String { destDir + "/" + (sourceApp as NSString).lastPathComponent }
-    let repoDir: String
+    let repoDir: String                // where SpliceKit sources live
 
+    /// Which FCP editions are installed (standard, Creator Studio, or auto-discovered)
     var availableEditions: [(label: String, path: String)] {
         var editions: [(String, String)] = []
+        let knownPaths: Set<String> = [Self.standardApp, Self.creatorStudioApp]
         if FileManager.default.fileExists(atPath: Self.standardApp) {
             editions.append(("Final Cut Pro", Self.standardApp))
         }
         if FileManager.default.fileExists(atPath: Self.creatorStudioApp) {
             editions.append(("Final Cut Pro Creator Studio", Self.creatorStudioApp))
         }
+        // Include user-browsed or auto-discovered path if not already listed
+        if !knownPaths.contains(sourceApp) && FileManager.default.fileExists(atPath: sourceApp + "/Contents/Info.plist") {
+            let name = (sourceApp as NSString).lastPathComponent.replacingOccurrences(of: ".app", with: "")
+            editions.append((name, sourceApp))
+        }
         return editions
     }
 
     var hasBothEditions: Bool { availableEditions.count > 1 }
+
+    /// True when sourceApp points to an existing FCP bundle (standard path or user-browsed).
+    var fcpFound: Bool { FileManager.default.fileExists(atPath: sourceApp + "/Contents/Info.plist") }
 
     func switchEdition(to path: String) {
         sourceApp = path
@@ -77,7 +93,59 @@ class PatcherModel: ObservableObject {
         checkStatus()
     }
 
+    /// Open a file browser so the user can locate Final Cut Pro manually.
+    func browseForFCP() {
+        let panel = NSOpenPanel()
+        panel.title = "Locate Final Cut Pro"
+        panel.message = "Select your Final Cut Pro application"
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = [.applicationBundle]
+        panel.directoryURL = URL(fileURLWithPath: "/Applications")
+
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+
+        // Validate it's actually Final Cut Pro
+        let plistPath = url.appendingPathComponent("Contents/Info.plist").path
+        let bundleID = shell("/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' '\(plistPath)' 2>/dev/null")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let bundleName = shell("/usr/libexec/PlistBuddy -c 'Print :CFBundleName' '\(plistPath)' 2>/dev/null")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard bundleID == "com.apple.FinalCut" || bundleName.contains("Final Cut") else {
+            errorMessage = "The selected app does not appear to be Final Cut Pro."
+            return
+        }
+
+        errorMessage = nil
+        sourceApp = url.path
+        fcpVersion = ""
+        checkStatus()
+    }
+
+    /// Use Spotlight to find Final Cut Pro anywhere on the system.
+    private static func findFCPViaSpotlight() -> String? {
+        let p = Process()
+        let pipe = Pipe()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/mdfind")
+        p.arguments = ["kMDItemCFBundleIdentifier == 'com.apple.FinalCut'"]
+        p.standardOutput = pipe
+        p.standardError = FileHandle.nullDevice
+        try? p.run()
+        p.waitUntilExit()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        let paths = (String(data: data, encoding: .utf8) ?? "")
+            .split(separator: "\n")
+            .map(String.init)
+        // Prefer paths in /Applications, skip any in ~/Applications/SpliceKit (our modded copy)
+        let spliceKitDir = NSHomeDirectory() + "/Applications/SpliceKit"
+        return paths.first { $0.hasPrefix("/Applications/") }
+            ?? paths.first { !$0.hasPrefix(spliceKitDir) }
+    }
+
     init() {
+        // Auto-detect FCP edition: prefer standard, fall back to Creator Studio
         let fm = FileManager.default
         if fm.fileExists(atPath: Self.standardApp) {
             sourceApp = Self.standardApp
@@ -120,14 +188,21 @@ class PatcherModel: ObservableObject {
         }
         repoDir = found
 
+        // Defer shell calls -- waitUntilExit pumps the run loop, which crashes
+        // if called during SwiftUI view graph initialization.
         DispatchQueue.main.async { [self] in
+            // Search for FCP via Spotlight if not at standard paths
+            if !fcpFound, let found = Self.findFCPViaSpotlight() {
+                sourceApp = found
+            }
             checkStatus()
             if status == .patched {
-                currentPanel = .complete
+                currentPanel = .complete  // skip to "done" panel
             }
         }
     }
 
+    /// Check whether the modded FCP exists, has SpliceKit injected, and if the bridge is up.
     func checkStatus() {
         let binary = moddedApp + "/Contents/MacOS/Final Cut Pro"
         if FileManager.default.fileExists(atPath: binary) {
@@ -137,7 +212,8 @@ class PatcherModel: ObservableObject {
                 let ps = shell("lsof -i :9876 2>/dev/null | grep LISTEN")
                 bridgeConnected = !ps.isEmpty
                 let ver = shell("/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' '\(moddedApp)/Contents/Info.plist' 2>/dev/null")
-                fcpVersion = ver.trimmingCharacters(in: .whitespacesAndNewlines)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                if !ver.contains("Doesn't Exist") { fcpVersion = ver }
             } else {
                 status = .notPatched
             }
@@ -145,9 +221,13 @@ class PatcherModel: ObservableObject {
             status = .notPatched
         }
 
-        if fcpVersion.isEmpty {
+        if fcpVersion.isEmpty && FileManager.default.fileExists(atPath: sourceApp + "/Contents/Info.plist") {
             let ver = shell("/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' '\(sourceApp)/Contents/Info.plist' 2>/dev/null")
-            fcpVersion = ver.trimmingCharacters(in: .whitespacesAndNewlines)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            // PlistBuddy prints "File Doesn't Exist, Will Create:" when plist is missing
+            if !ver.isEmpty && !ver.contains("Doesn't Exist") {
+                fcpVersion = ver
+            }
         }
     }
 
@@ -273,7 +353,7 @@ class PatcherModel: ObservableObject {
         }
         await completeStepAsync(.checkPrereqs)
 
-        // Step 2: Copy app
+        // Step 2: Copy FCP bundle, preserve MAS receipt, strip quarantine xattrs
         await setStepAsync(.copyApp)
         if !FileManager.default.fileExists(atPath: moddedApp) {
             await logAsync("Copying FCP (~6GB, please wait)...")
@@ -289,7 +369,7 @@ class PatcherModel: ObservableObject {
         }
         await completeStepAsync(.copyApp)
 
-        // Step 3: Build dylib
+        // Step 3: Build dylib and companion tools (prefers pre-built from app bundle)
         await setStepAsync(.buildDylib)
         let buildDir = NSTemporaryDirectory() + "SpliceKit_build"
         shell("mkdir -p '\(buildDir)'")
@@ -300,7 +380,7 @@ class PatcherModel: ObservableObject {
             shell("cp '\(bundledDylib)' '\(buildDir)/SpliceKit'")
         } else {
             await logAsync("Compiling SpliceKit dylib...")
-            let sources = ["SpliceKit.m", "SpliceKitRuntime.m", "SpliceKitSwizzle.m", "SpliceKitServer.m", "SpliceKitTranscriptPanel.m", "SpliceKitCommandPalette.m"]
+            let sources = ["SpliceKit.m", "SpliceKitRuntime.m", "SpliceKitSwizzle.m", "SpliceKitServer.m", "SpliceKitLogPanel.m", "SpliceKitTranscriptPanel.m", "SpliceKitCaptionPanel.m", "SpliceKitCommandPalette.m", "SpliceKitDebugUI.m"]
                 .map { "'\(repoDir)/Sources/\($0)'" }.joined(separator: " ")
             let buildResult = shell("""
                 clang -arch arm64 -arch x86_64 -mmacosx-version-min=14.0 \
@@ -374,7 +454,7 @@ class PatcherModel: ObservableObject {
 
         await completeStepAsync(.buildDylib)
 
-        // Step 4: Install framework
+        // Step 4: Create macOS framework bundle (Versions/A + symlinks)
         await setStepAsync(.installFramework)
         let fwDir = moddedApp + "/Contents/Frameworks/SpliceKit.framework"
         shell("""
@@ -410,7 +490,7 @@ class PatcherModel: ObservableObject {
         await logAsync("Framework installed")
         await completeStepAsync(.installFramework)
 
-        // Step 5: Inject LC_LOAD_DYLIB
+        // Step 5: Patch the Mach-O binary so dyld loads SpliceKit on launch
         await setStepAsync(.injectDylib)
         let binary = moddedApp + "/Contents/MacOS/Final Cut Pro"
         let alreadyInjected = shell("otool -L '\(binary)' 2>/dev/null | grep '@rpath/SpliceKit'")
@@ -433,7 +513,8 @@ class PatcherModel: ObservableObject {
         }
         await completeStepAsync(.injectDylib)
 
-        // Step 6: Re-sign
+        // Step 6: Ad-hoc re-sign; only sign SpliceKit.framework + app wrapper.
+        // Apple frameworks keep their original signatures to avoid integrity check failures.
         await setStepAsync(.signApp)
         let entitlements = buildDir + "/entitlements.plist"
         let entPlist = """
@@ -465,7 +546,7 @@ class PatcherModel: ObservableObject {
         await logAsync("Reset permissions for new signature")
         await completeStepAsync(.signApp)
 
-        // Step 7: Defaults
+        // Step 7: Skip FCP's first-launch cloud content download dialog
         await setStepAsync(.configureDefaults)
         shell("defaults write com.apple.FinalCut CloudContentFirstLaunchCompleted -bool true 2>/dev/null")
         shell("defaults write com.apple.FinalCut FFCloudContentDisabled -bool true 2>/dev/null")
@@ -486,6 +567,7 @@ class PatcherModel: ObservableObject {
 
     // MARK: - Helpers
 
+    /// Run a shell command synchronously; nonisolated for use in background tasks.
     @discardableResult
     nonisolated func shell(_ command: String) -> String {
         let process = Process()

@@ -1,28 +1,40 @@
 #!/usr/bin/env python3
 """
-SpliceKit Python Client
-Connects to the SpliceKit Unix domain socket and provides
-direct access to Final Cut Pro's internal APIs.
+splicekit_client.py -- Python client library for SpliceKit.
+
+Connects to the SpliceKit JSON-RPC server (TCP 127.0.0.1:9876) running
+inside Final Cut Pro and provides convenience methods for ObjC runtime
+introspection. Also includes an interactive REPL for exploration.
+
+Usage:
+    python3 splicekit_client.py                          # interactive REPL
+    python3 splicekit_client.py --interactive             # same
+    python3 splicekit_client.py "system.version"          # one-shot call
+    python3 splicekit_client.py "system.getClasses" '{"filter":"FF"}'
 """
 
 import socket
 import json
 import sys
-import readline  # enables arrow keys in interactive mode
+import readline  # enables arrow keys / history in the interactive REPL
 
 SPLICEKIT_HOST = "127.0.0.1"
 SPLICEKIT_PORT = 9876
 
 
 class SpliceKit:
-    """Client for the SpliceKit JSON-RPC server running inside Final Cut Pro."""
+    """Client for the SpliceKit JSON-RPC server running inside Final Cut Pro.
+
+    Maintains a persistent TCP connection with a read buffer for
+    newline-delimited JSON-RPC responses (which can be large).
+    """
 
     def __init__(self, host=SPLICEKIT_HOST, port=SPLICEKIT_PORT):
         self.host = host
         self.port = port
         self.sock = None
         self._id_counter = 0
-        self._buffer = b""
+        self._buffer = b""  # leftover bytes from previous recv
         self.connect()
 
     def connect(self):
@@ -38,7 +50,12 @@ class SpliceKit:
             self.sock = None
 
     def call(self, method, **params):
-        """Send a JSON-RPC request and return the result."""
+        """Send a JSON-RPC request and return the result.
+
+        Reads until a newline delimiter (JSON-RPC framing), buffering
+        any leftover bytes for the next call. Uses 1MB recv chunks
+        since runtime metadata responses can be very large.
+        """
         self._id_counter += 1
         request = {
             "jsonrpc": "2.0",
@@ -48,9 +65,9 @@ class SpliceKit:
         }
         self.sock.sendall(json.dumps(request).encode() + b"\n")
 
-        # Read response line
+        # Read until we have a complete newline-delimited response
         while b"\n" not in self._buffer:
-            chunk = self.sock.recv(1048576)
+            chunk = self.sock.recv(1048576)  # 1MB -- responses can be large
             if not chunk:
                 raise ConnectionError("Server closed connection")
             self._buffer += chunk
@@ -62,7 +79,7 @@ class SpliceKit:
             raise Exception(f"RPC Error: {response['error']}")
         return response.get("result")
 
-    # ---- Convenience methods ----
+    # ---- Convenience methods for common introspection tasks ----
 
     def version(self):
         """Get SpliceKit and FCP version info."""
@@ -101,7 +118,11 @@ class SpliceKit:
 
 
 def interactive_mode():
-    """Run an interactive REPL for SpliceKit."""
+    """Run an interactive REPL for exploring FCP's ObjC runtime.
+
+    Supports shortcut commands (classes, methods, props, etc.) as well as
+    raw JSON-RPC calls. Tab completion and history via readline.
+    """
     try:
         fcp = SpliceKit()
     except (FileNotFoundError, ConnectionRefusedError, OSError) as e:
@@ -188,9 +209,9 @@ def interactive_mode():
                 result = fcp.call_method(parts[1], parts[2], class_method=True)
                 print(json.dumps(result, indent=2))
             elif cmd == "raw":
+                # Send arbitrary JSON-RPC -- useful for testing new endpoints
                 raw = " ".join(parts[1:])
                 req = json.loads(raw)
-                # Direct send
                 fcp._id_counter += 1
                 req["id"] = fcp._id_counter
                 req["jsonrpc"] = "2.0"
@@ -217,7 +238,7 @@ if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "--interactive":
         interactive_mode()
     elif len(sys.argv) > 1:
-        # One-shot mode: splicekit_client.py "system.version"
+        # One-shot mode: pass method name and optional JSON params as args
         fcp = SpliceKit()
         result = fcp.call(sys.argv[1], **json.loads(sys.argv[2]) if len(sys.argv) > 2 else {})
         print(json.dumps(result, indent=2, default=str))

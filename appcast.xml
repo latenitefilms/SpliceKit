@@ -6,6 +6,22 @@
     <description>SpliceKit Patcher release updates</description>
     <language>en</language>
     <item>
+      <title>SpliceKit v3.1.7</title>
+      <sparkle:version>3.1.7</sparkle:version>
+      <sparkle:shortVersionString>3.1.7</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+      <pubDate>Sat, 11 Apr 2026 23:44:57 +0000</pubDate>
+      <description><![CDATA[
+        <h2>What's New in 3.1.7</h2>
+        <p>Sections bar for timeline song structure, add default transition to all clips command, fuzzy search stop-word handling</p>
+      ]]></description>
+      <enclosure
+        url="https://github.com/elliotttate/SpliceKit/releases/download/v3.1.7/SpliceKit-v3.1.7.dmg"
+        sparkle:edSignature="XAn9g3Wfp3Xv9fD2ceKAJ2/xCM7RrJP0DqYvod8v6a6m3+fXQu6aHYMjJc3fw/favB4/c7Qs0OQLtf/YWeJhBA=="
+        length="13927273"
+        type="application/octet-stream" />
+    </item>
+    <item>
       <title>SpliceKit v3.1.6</title>
       <sparkle:version>3.1.6</sparkle:version>
       <sparkle:shortVersionString>3.1.6</sparkle:shortVersionString>

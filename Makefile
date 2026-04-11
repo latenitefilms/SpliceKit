@@ -2,7 +2,8 @@ CC = clang
 ARCHS = -arch arm64 -arch x86_64
 MIN_VERSION = -mmacosx-version-min=14.0
 FRAMEWORKS = -framework Foundation -framework AppKit -framework AVFoundation -framework CoreServices -framework Metal
-OBJC_FLAGS = -fobjc-arc -fmodules
+MODULE_CACHE_DIR = $(BUILD_DIR)/ModuleCache
+OBJC_FLAGS = -fobjc-arc -fmodules -fmodules-cache-path=$(abspath $(MODULE_CACHE_DIR))
 OBJCXX_FLAGS = $(OBJC_FLAGS) -std=c++17
 DEBUG_FLAGS = -g
 LINKER_FLAGS = -undefined dynamic_lookup -dynamiclib
@@ -85,7 +86,7 @@ BRAW_RAWPROC_MIN_VERSION = -mmacosx-version-min=15.0
 BRAW_RAWPROC_CFLAGS = $(ARCHS) $(BRAW_RAWPROC_MIN_VERSION) $(OBJCXX_FLAGS) $(DEBUG_FLAGS) -fvisibility=hidden -fapplication-extension -I $(BRAW_SOURCE_DIR) -I $(BRAW_PRIVATE_DIR)
 BRAW_RAWPROC_LDFLAGS = $(CPP_LIBS) -Wl,-rpath,@executable_path/../Frameworks
 
-.PHONY: all clean deploy launch tools audio-bus-probe install-audio-bus-probe uninstall-audio-bus-probe symbols braw-prototype braw-raw-processor
+.PHONY: all clean deploy launch tools url-import-tools audio-bus-probe install-audio-bus-probe uninstall-audio-bus-probe symbols braw-prototype braw-raw-processor
 
 all: $(OUTPUT)
 
@@ -117,6 +118,23 @@ uninstall-audio-bus-probe:
 	@rm -rf "$(AUDIO_BUS_PROBE_INSTALL_DIR)/SpliceKitAudioBusProbe.component"
 	@killall -9 AudioComponentRegistrar >/dev/null 2>&1 || true
 	@echo "Uninstalled: $(AUDIO_BUS_PROBE_INSTALL_DIR)/SpliceKitAudioBusProbe.component"
+
+url-import-tools:
+	@mkdir -p "$(TOOLS_DIR)"
+	@YTDLP_PATH="$$(command -v yt-dlp || true)"; \
+	if [ -n "$$YTDLP_PATH" ]; then \
+		ln -sf "$$YTDLP_PATH" "$(TOOLS_DIR)/yt-dlp"; \
+		echo "Linked yt-dlp -> $$YTDLP_PATH"; \
+	else \
+		echo "yt-dlp not found in PATH. Install with: brew install yt-dlp"; \
+	fi
+	@FFMPEG_PATH="$$(command -v ffmpeg || true)"; \
+	if [ -n "$$FFMPEG_PATH" ]; then \
+		ln -sf "$$FFMPEG_PATH" "$(TOOLS_DIR)/ffmpeg"; \
+		echo "Linked ffmpeg -> $$FFMPEG_PATH"; \
+	else \
+		echo "ffmpeg not found in PATH. Install with: brew install ffmpeg"; \
+	fi
 
 $(BUILD_DIR):
 	@mkdir -p $(BUILD_DIR)
@@ -260,6 +278,7 @@ deploy: $(OUTPUT) $(SILENCE_DETECTOR) $(STRUCTURE_ANALYZER) $(MIXER_APP) braw-pr
 	@/usr/libexec/PlistBuddy -c "Add :NSSpeechRecognitionUsageDescription string 'SpliceKit uses speech recognition to transcribe timeline audio for text-based editing.'" "$(MODDED_APP)/Contents/Info.plist" 2>/dev/null || true
 	@# Deploy tools
 	@mkdir -p "$(TOOLS_DIR)"
+	@$(MAKE) url-import-tools
 	@cp $(SILENCE_DETECTOR) "$(TOOLS_DIR)/silence-detector" 2>/dev/null || true
 	@cp $(STRUCTURE_ANALYZER) "$(TOOLS_DIR)/structure-analyzer" 2>/dev/null || true
 	@cp $(MIXER_APP) "$(TOOLS_DIR)/SpliceKitMixer" 2>/dev/null || true

@@ -1058,17 +1058,25 @@ typedef NS_ENUM(NSInteger, SBDragMode) {
     id sequence = ((id (*)(id, SEL))objc_msgSend)(tm, @selector(sequence));
     if (!sequence) return nil;
 
-    // Get the sequence's unique identifier
-    SEL uidSel = NSSelectorFromString(@"uid");
+    // Get the sequence's unique identifier — try multiple selectors
+    // to find a truly unique ID that won't collide across projects.
     NSString *seqUID = nil;
-    if ([sequence respondsToSelector:uidSel]) {
-        seqUID = ((id (*)(id, SEL))objc_msgSend)(sequence, uidSel);
+    for (NSString *selName in @[@"uid", @"uniqueIdentifier", @"identifier", @"uuid"]) {
+        SEL sel = NSSelectorFromString(selName);
+        if ([sequence respondsToSelector:sel]) {
+            id val = ((id (*)(id, SEL))objc_msgSend)(sequence, sel);
+            if ([val isKindOfClass:[NSString class]] && [(NSString *)val length] > 0) {
+                seqUID = val;
+                break;
+            }
+        }
     }
+    // Fallback: use displayName + a hash of the library path for uniqueness
     if (!seqUID) {
         SEL dnSel = NSSelectorFromString(@"displayName");
-        if ([sequence respondsToSelector:dnSel]) {
-            seqUID = ((id (*)(id, SEL))objc_msgSend)(sequence, dnSel);
-        }
+        NSString *name = [sequence respondsToSelector:dnSel]
+            ? ((id (*)(id, SEL))objc_msgSend)(sequence, dnSel) : @"unknown";
+        seqUID = [NSString stringWithFormat:@"%@-%lx", name, (unsigned long)[sequence hash]];
     }
     if (!seqUID) return nil;
 

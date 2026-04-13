@@ -12,6 +12,8 @@ class FakeFastMCP:
         self.name = name
         self.instructions = instructions
         self.tools = []
+        self.resources = []
+        self.prompts = []
 
     def tool(self, annotations=None):
         def decorator(func):
@@ -24,6 +26,18 @@ class FakeFastMCP:
             )
             return func
 
+        return decorator
+
+    def resource(self, uri, **kwargs):
+        def decorator(func):
+            self.resources.append({"uri": uri, "func": func, **kwargs})
+            return func
+        return decorator
+
+    def prompt(self, **kwargs):
+        def decorator(func):
+            self.prompts.append({"func": func, **kwargs})
+            return func
         return decorator
 
 

@@ -14,9 +14,13 @@
 #import "SpliceKitCommandPalette.h"
 #import "SpliceKitDebugUI.h"
 #import <AppKit/AppKit.h>
+#import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #import <time.h>
 
 extern NSDictionary *SpliceKit_handleTimelineAction(NSDictionary *params);
+extern NSDictionary *SpliceKit_handleFCPXMLExport(NSDictionary *params);
+extern NSDictionary *SpliceKit_handleFCPXMLImport(NSDictionary *params);
+extern NSDictionary *SpliceKit_handleProjectOpen(NSDictionary *params);
 
 #pragma mark - Logging
 //
@@ -220,6 +224,8 @@ static void SpliceKit_checkCompatibility(void) {
 - (void)toggleSecondaryEffectsBrowser:(id)sender;
 - (void)toggleSecondaryTransitionsBrowser:(id)sender;
 - (void)toggleMuteAudio:(id)sender;
+- (void)exportOTIO:(id)sender;
+- (void)importOTIO:(id)sender;
 @property (nonatomic, weak) NSButton *toolbarButton;
 @property (nonatomic, weak) NSButton *paletteToolbarButton;
 @property (nonatomic, strong) NSMenu *luaScriptsMenu;
@@ -302,6 +308,1035 @@ static void SpliceKit_checkCompatibility(void) {
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         SpliceKit_handleTimelineAction(@{@"action": @"toggleMuteAudio"});
     });
+}
+
+#pragma mark - OpenTimelineIO Native Conversion
+
+// ---- OTIO → FCPXML helpers ----
+
+static NSString *otio_esc(NSString *str) {
+    if (!str) return @"";
+    NSMutableString *s = [str mutableCopy];
+    [s replaceOccurrencesOfString:@"&" withString:@"&amp;" options:0 range:NSMakeRange(0, s.length)];
+    [s replaceOccurrencesOfString:@"<" withString:@"&lt;" options:0 range:NSMakeRange(0, s.length)];
+    [s replaceOccurrencesOfString:@">" withString:@"&gt;" options:0 range:NSMakeRange(0, s.length)];
+    [s replaceOccurrencesOfString:@"\"" withString:@"&quot;" options:0 range:NSMakeRange(0, s.length)];
+    return s;
+}
+
+static long long otio_gcd(long long a, long long b) {
+    a = llabs(a); b = llabs(b);
+    while (b) { long long t = b; b = a % b; a = t; }
+    return a ?: 1;
+}
+
+/// Convert OTIO RationalTime dict {value, rate} to FCPXML time string (e.g. "385385/24000s").
+/// Uses canonical SMPTE timebases to keep frame-exact alignment.
+static NSString *otio_time(NSDictionary *rt) {
+    if (!rt) return @"0s";
+    double val = [rt[@"value"] doubleValue];
+    double rate = [rt[@"rate"] doubleValue];
+    if (rate <= 0 || val == 0) return @"0s";
+
+    // Map known SMPTE rates to canonical numerator multiplier and denominator.
+    // OTIO stores frame counts at the clip rate. FCPXML needs rational seconds
+    // aligned to the sequence timebase so every time lands on a frame boundary.
+    // For 23.976fps: value * 1001 / 24000 = exact seconds
+    //
+    // IMPORTANT: Do NOT GCD-simplify for known rates. FCP requires the canonical
+    // denominator (e.g. 24000) — simplified fractions like 1001/800 (= 30030/24000)
+    // cause "unexpected value" errors even though they're mathematically equal.
+    long long frameVal = (long long)round(val);
+    long long num, den;
+    BOOL canonical = NO;
+
+    if (fabs(rate - 24000.0/1001.0) < 0.01) {       // 23.976
+        num = frameVal * 1001; den = 24000; canonical = YES;
+    } else if (fabs(rate - 24.0) < 0.01) {
+        num = frameVal * 100;  den = 2400;  canonical = YES;
+    } else if (fabs(rate - 25.0) < 0.01) {
+        num = frameVal * 100;  den = 2500;  canonical = YES;
+    } else if (fabs(rate - 30000.0/1001.0) < 0.01) { // 29.97
+        num = frameVal * 1001; den = 30000; canonical = YES;
+    } else if (fabs(rate - 30.0) < 0.01) {
+        num = frameVal * 100;  den = 3000;  canonical = YES;
+    } else if (fabs(rate - 50.0) < 0.01) {
+        num = frameVal * 100;  den = 5000;  canonical = YES;
+    } else if (fabs(rate - 60000.0/1001.0) < 0.01) { // 59.94
+        num = frameVal * 1001; den = 60000; canonical = YES;
+    } else if (fabs(rate - 60.0) < 0.01) {
+        num = frameVal * 100;  den = 6000;  canonical = YES;
+    } else {
+        // Unknown rate — GCD-simplify
+        num = (long long)round(val * 1000.0);
+        den = (long long)round(rate * 1000.0);
+    }
+
+    if (!canonical) {
+        long long g = otio_gcd(num, den);
+        num /= g; den /= g;
+    }
+    if (num == 0) return @"0s";
+    if (den == 1) return [NSString stringWithFormat:@"%llds", num];
+    return [NSString stringWithFormat:@"%lld/%llds", num, den];
+}
+
+/// Convert OTIO RationalTime to seconds.
+static double otio_sec(NSDictionary *rt) {
+    if (!rt) return 0;
+    double val = [rt[@"value"] doubleValue];
+    double rate = [rt[@"rate"] doubleValue];
+    return (rate > 0) ? val / rate : 0;
+}
+
+/// Get the media reference from an OTIO Clip dict.
+static NSDictionary *otio_mediaRef(NSDictionary *clip) {
+    NSDictionary *refs = clip[@"media_references"];
+    NSString *key = clip[@"active_media_reference_key"] ?: @"DEFAULT_MEDIA";
+    NSDictionary *ref = refs[key];
+    if (!ref) ref = clip[@"media_reference"];
+    return ref;
+}
+
+/// Check if a media reference is a usable external file.
+static BOOL otio_isExternal(NSDictionary *ref) {
+    NSString *schema = ref[@"OTIO_SCHEMA"] ?: @"";
+    return [schema hasPrefix:@"ExternalReference."] && ref[@"target_url"] != nil;
+}
+
+/// Compute clip source start relative to asset start=0.
+/// Returns the in-point in seconds for the start= attribute.
+static double otio_sourceStart(NSDictionary *clip) {
+    NSDictionary *sr = clip[@"source_range"];
+    NSDictionary *ref = otio_mediaRef(clip);
+    double srStart = otio_sec(sr[@"start_time"]);
+    if (ref && ref[@"available_range"]) {
+        double arStart = otio_sec(ref[@"available_range"][@"start_time"]);
+        return srStart - arStart;
+    }
+    // No available_range → use 0 (safer than absolute Premiere timecodes)
+    if (!otio_isExternal(ref)) return 0;
+    return srStart;
+}
+
+// ---- Main converter ----
+
+/// Extract text from Premiere-style GeneratorReference clips.
+/// Premiere stores title text as base64-encoded AE binary blobs.
+static NSString *otio_extractPremiereText(NSDictionary *clip) {
+    NSArray *effects = clip[@"effects"] ?: @[];
+    for (NSDictionary *effect in effects) {
+        NSDictionary *ppro = effect[@"metadata"][@"PremierePro_OTIO"] ?: @{};
+        if (![ppro[@"MatchName"] isEqualToString:@"AE.ADBE Text"]) continue;
+        for (NSDictionary *param in ppro[@"Parameters"] ?: @[]) {
+            if (![param[@"DisplayName"] isEqualToString:@"Source Text"]) continue;
+            id val = param[@"StartValue"];
+            if ([val isKindOfClass:[NSDictionary class]]) val = val[@"Value"];
+            if (![val isKindOfClass:[NSString class]]) continue;
+            NSData *decoded = [[NSData alloc] initWithBase64EncodedString:(NSString *)val options:0];
+            if (!decoded || decoded.length == 0) continue;
+            // Scan for ASCII text fragments — the longest meaningful one is the title text
+            const uint8_t *bytes = decoded.bytes;
+            NSUInteger len = decoded.length;
+            NSMutableArray *fragments = [NSMutableArray array];
+            NSUInteger i = 0;
+            while (i < len) {
+                if (bytes[i] >= 0x20 && bytes[i] < 0x7f) {
+                    NSUInteger start = i;
+                    while (i < len && bytes[i] >= 0x20 && bytes[i] < 0x7f) i++;
+                    NSString *seg = [[NSString alloc] initWithBytes:bytes + start
+                                                             length:i - start
+                                                           encoding:NSASCIIStringEncoding];
+                    if (seg && seg.length >= 2) {
+                        // Filter out known font names and binary metadata
+                        NSArray *skipPrefixes = @[@"Adobe", @"Myriad", @"Mini", @"Kozuka",
+                                                  @"Source", @"Times", @"Arial", @"Helvet"];
+                        BOOL skip = NO;
+                        for (NSString *prefix in skipPrefixes) {
+                            if ([seg hasPrefix:prefix]) { skip = YES; break; }
+                        }
+                        if (!skip) [fragments addObject:seg];
+                    }
+                } else {
+                    i++;
+                }
+            }
+            // Return the last meaningful fragment (Premiere puts text near the end)
+            return fragments.lastObject;
+        }
+    }
+    return nil;
+}
+
+/// Build a <title> FCPXML element string from an OTIO GeneratorReference clip.
+/// titleEffectRef is the resource ID for the Basic Title effect (e.g. "r4").
+static NSString *otio_buildTitleElement(NSDictionary *child, NSDictionary *ref,
+                                        NSString *offsetStr, NSString *durationStr,
+                                        int *tsCounter, NSString *titleEffectRef) {
+    NSDictionary *genMeta = ref[@"metadata"][@"fcpx"] ?: @{};
+    NSString *clipName = otio_esc(child[@"name"] ?: @"Title");
+
+    // Get text content: FCPXML metadata > Premiere extraction > clip name
+    NSString *text = genMeta[@"text"];
+    if (!text || text.length == 0) {
+        text = otio_extractPremiereText(child);
+    }
+    if (!text || text.length == 0) {
+        text = child[@"name"] ?: @"Title";
+    }
+
+    NSMutableString *xml = [NSMutableString string];
+
+    // Build text-style-def and text body
+    NSArray *textSegments = genMeta[@"text_segments"];
+    NSArray *styleDefs = genMeta[@"text_style_defs"];
+
+    NSString *tsId = [NSString stringWithFormat:@"ts%d", (*tsCounter)++];
+
+    // Use round-tripped ref or fall back to Basic Title effect
+    NSString *effectRef = genMeta[@"ref"] ?: titleEffectRef;
+    [xml appendFormat:@"<title name=\"%@\" ref=\"%@\" offset=\"%@\" duration=\"%@\" start=\"3600s\"",
+        clipName, effectRef, offsetStr, durationStr];
+
+    // Add role if present
+    NSString *role = genMeta[@"role"];
+    if (role) [xml appendFormat:@" role=\"%@\"", otio_esc(role)];
+    [xml appendString:@">\n"];
+
+    // Text content
+    if (textSegments && [textSegments isKindOfClass:[NSArray class]] && textSegments.count > 0) {
+        [xml appendString:@"                            <text>"];
+        for (NSDictionary *seg in textSegments) {
+            NSString *segRef = seg[@"ref"] ?: @"";
+            NSString *segText = seg[@"text"] ?: @"";
+            [xml appendFormat:@"<text-style ref=\"%@\">%@</text-style>",
+                otio_esc(segRef), otio_esc(segText)];
+        }
+        [xml appendString:@"</text>\n"];
+    } else {
+        [xml appendFormat:@"                            <text><text-style ref=\"%@\">%@</text-style></text>\n",
+            tsId, otio_esc(text)];
+    }
+
+    // Text style definitions
+    if (styleDefs && [styleDefs isKindOfClass:[NSArray class]] && styleDefs.count > 0) {
+        for (NSDictionary *sd in styleDefs) {
+            NSString *sdId = sd[@"id"] ?: tsId;
+            NSDictionary *attrs = sd[@"attrs"] ?: @{};
+            NSMutableString *attrStr = [NSMutableString string];
+            for (NSString *key in attrs) {
+                [attrStr appendFormat:@" %@=\"%@\"", key, otio_esc(attrs[key])];
+            }
+            [xml appendFormat:@"                            <text-style-def id=\"%@\">"
+                @"<text-style%@/></text-style-def>\n", otio_esc(sdId), attrStr];
+        }
+    } else {
+        // Default style — matches FCP's own Basic Title output
+        [xml appendFormat:@"                            <text-style-def id=\"%@\">"
+            @"<text-style font=\"Helvetica\" fontSize=\"63\" fontFace=\"Regular\" fontColor=\"1 1 1 1\" alignment=\"center\"/>"
+            @"</text-style-def>\n", tsId];
+    }
+
+    // Restore adjust-transform if present
+    NSDictionary *adjTransform = genMeta[@"adjust_transform"];
+    if (adjTransform && [adjTransform isKindOfClass:[NSDictionary class]]) {
+        NSMutableString *attrStr = [NSMutableString string];
+        for (NSString *key in adjTransform) {
+            [attrStr appendFormat:@" %@=\"%@\"", key, otio_esc(adjTransform[key])];
+        }
+        [xml appendFormat:@"                            <adjust-transform%@/>\n", attrStr];
+    }
+
+    [xml appendString:@"                        </title>"];
+    return xml;
+}
+
+/// Parse a .otio JSON file and convert to FCPXML 1.14 string.
+/// Handles multi-track, transitions, titles, markers, source trimming, connected clips.
+NSString *SpliceKit_otioToFCPXML(NSString *otioPath) {
+    NSData *data = [NSData dataWithContentsOfFile:otioPath];
+    if (!data) { SpliceKit_log(@"[OTIO] Could not read: %@", otioPath); return nil; }
+
+    NSError *jsonErr = nil;
+    NSDictionary *root = [NSJSONSerialization JSONObjectWithData:data options:0 error:&jsonErr];
+    if (!root || jsonErr) { SpliceKit_log(@"[OTIO] JSON error: %@", jsonErr); return nil; }
+    if (![root[@"OTIO_SCHEMA"] hasPrefix:@"Timeline."]) { SpliceKit_log(@"[OTIO] Not a Timeline"); return nil; }
+
+    NSString *projectName = root[@"name"] ?: @"Imported";
+    NSArray *tracks = root[@"tracks"][@"children"] ?: @[];
+
+    // Resolution from metadata (Premiere stores it in PremierePro_OTIO)
+    NSDictionary *stackMeta = root[@"tracks"][@"metadata"] ?: @{};
+    NSDictionary *pMeta = stackMeta[@"PremierePro_OTIO"] ?: @{};
+    int width = [pMeta[@"VideoResolution"][@"width"] intValue] ?: 1920;
+    int height = [pMeta[@"VideoResolution"][@"height"] intValue] ?: 1080;
+
+    // Separate video/audio tracks
+    NSMutableArray *videoTracks = [NSMutableArray array];
+    NSMutableArray *audioTracks = [NSMutableArray array];
+    for (NSDictionary *t in tracks) {
+        if ([t[@"kind"] isEqualToString:@"Audio"]) [audioTracks addObject:t];
+        else [videoTracks addObject:t];
+    }
+
+    // Detect fps from first video clip
+    double fps = 24.0;
+    for (NSDictionary *t in videoTracks) {
+        for (NSDictionary *c in t[@"children"] ?: @[]) {
+            double r = [c[@"source_range"][@"duration"][@"rate"] doubleValue];
+            if (r > 1) { fps = r; goto found; }
+        }
+    }
+    found:;
+
+    // FCP format name + frame duration
+    NSString *fmtName, *frameDur;
+    struct { double lo, hi; const char *name; const char *dur; } fmts[] = {
+        {23.9, 24.0, "2398", "1001/24000s"}, {24.0, 24.1, "24", "100/2400s"},
+        {24.9, 25.1, "25", "100/2500s"}, {29.9, 30.0, "2997", "1001/30000s"},
+        {30.0, 30.1, "30", "100/3000s"}, {49.9, 50.1, "50", "100/5000s"},
+        {59.9, 60.0, "5994", "1001/60000s"}, {60.0, 60.1, "60", "100/6000s"},
+    };
+    fmtName = [NSString stringWithFormat:@"FFVideoFormat%dp%d", height, (int)round(fps)];
+    frameDur = [NSString stringWithFormat:@"100/%ds", (int)round(fps * 100)];
+    for (int i = 0; i < 8; i++) {
+        if (fps >= fmts[i].lo && fps < fmts[i].hi) {
+            fmtName = [NSString stringWithFormat:@"FFVideoFormat%dp%s", height, fmts[i].name];
+            frameDur = @(fmts[i].dur);
+            break;
+        }
+    }
+
+    // ---- Effect resources ----
+    // Standard FCP effect IDs (stable across all installations).
+    // r2 = Cross Dissolve, r3 = Audio Crossfade, r4 = Basic Title
+    NSString *crossDissolveEffectId = @"r2";
+    NSString *audioCrossfadeEffectId = @"r3";
+    NSString *basicTitleEffectId = @"r4";
+
+    // ---- Collect unique assets ----
+    NSMutableDictionary *assets = [NSMutableDictionary dictionary]; // targetUrl → assetId
+    NSMutableString *assetXml = [NSMutableString string];
+    NSMutableDictionary *effectRefs = [NSMutableDictionary dictionary]; // effectRef → effectId
+    NSMutableString *effectXml = [NSMutableString string];
+    int resCounter = 5; // r1=format, r2=cross dissolve, r3=audio crossfade, r4=basic title
+
+    for (NSDictionary *t in tracks) {
+        for (NSDictionary *c in t[@"children"] ?: @[]) {
+            if (![c[@"OTIO_SCHEMA"] hasPrefix:@"Clip."]) continue;
+            NSDictionary *ref = otio_mediaRef(c);
+            if (!otio_isExternal(ref)) continue;
+            NSString *url = ref[@"target_url"];
+            if (assets[url]) continue;
+
+            NSString *aid = [NSString stringWithFormat:@"r%d", resCounter++];
+            assets[url] = aid;
+
+            // Duration from available_range or source_range
+            NSDictionary *durRT = ref[@"available_range"] ? ref[@"available_range"][@"duration"] : c[@"source_range"][@"duration"];
+            NSString *durStr = otio_time(durRT);
+
+            // hasVideo/hasAudio: check track kind
+            NSString *kind = t[@"kind"] ?: @"Video";
+            BOOL isVideo = [kind isEqualToString:@"Video"];
+
+            // Preserve asset metadata from FCPXML round-trip (uid, audioChannels, etc.)
+            NSDictionary *refMeta = ref[@"metadata"][@"fcpx"] ?: @{};
+            NSMutableString *assetAttrs = [NSMutableString stringWithFormat:
+                @"        <asset name=\"%@\" format=\"r1\" id=\"%@\" duration=\"%@\" start=\"0s\" hasVideo=\"%d\" hasAudio=\"1\"",
+                otio_esc(c[@"name"] ?: @"Clip"), aid, durStr, isVideo ? 1 : 0];
+            // Optional metadata attributes
+            for (NSString *metaKey in @[@"uid", @"audioSources", @"audioChannels",
+                                        @"audioRate", @"videoSources"]) {
+                id val = refMeta[metaKey];
+                if (val) [assetAttrs appendFormat:@" %@=\"%@\"", metaKey, val];
+            }
+            [assetAttrs appendString:@">\n"];
+            [assetXml appendString:assetAttrs];
+            // Add sig attribute to media-rep if uid is available (helps FCP match media by hash)
+            NSString *uidVal = refMeta[@"uid"];
+            if (uidVal && uidVal.length > 0) {
+                [assetXml appendFormat:
+                    @"            <media-rep kind=\"original-media\" sig=\"%@\" src=\"%@\"/>\n"
+                    @"        </asset>\n", uidVal, url];
+            } else {
+                [assetXml appendFormat:
+                    @"            <media-rep kind=\"original-media\" src=\"%@\"/>\n"
+                    @"        </asset>\n", url];
+            }
+
+            // Collect effect resources from clip effects
+            for (NSDictionary *eff in c[@"effects"] ?: @[]) {
+                NSDictionary *fcpxMeta = eff[@"metadata"][@"fcpx"] ?: @{};
+                NSString *eRef = fcpxMeta[@"ref"];
+                NSString *eName = eff[@"effect_name"] ?: eff[@"name"] ?: @"";
+                // Skip adjust-* (not effect resources) and empty refs
+                if (!eRef || eRef.length == 0) continue;
+                if ([eName hasPrefix:@"adjust-"]) continue;
+                if (effectRefs[eRef]) continue;
+                NSString *eid = [NSString stringWithFormat:@"r%d", resCounter++];
+                effectRefs[eRef] = eid;
+                NSString *uid = fcpxMeta[@"uid"] ?: @"";
+                if (uid.length > 0) {
+                    [effectXml appendFormat:
+                        @"        <effect id=\"%@\" name=\"%@\" uid=\"%@\"/>\n",
+                        eid, otio_esc(eName), otio_esc(uid)];
+                } else {
+                    [effectXml appendFormat:
+                        @"        <effect id=\"%@\" name=\"%@\"/>\n",
+                        eid, otio_esc(eName)];
+                }
+            }
+        }
+    }
+
+    // ---- Build spine items array from primary video track ----
+    // Accumulate frame counts (not seconds) to preserve frame-exact alignment.
+    NSDictionary *primaryTrack = videoTracks.firstObject;
+    NSMutableArray *spineItems = [NSMutableArray array];
+
+    // Helper: build an offset RationalTime dict from accumulated frames
+    // Uses the primary track's rate for all offsets so they align to the sequence timebase.
+    double (^frameVal)(NSDictionary *) = ^double(NSDictionary *rt) {
+        return rt ? [rt[@"value"] doubleValue] : 0;
+    };
+    double (^frameRate)(NSDictionary *) = ^double(NSDictionary *rt) {
+        double r = rt ? [rt[@"rate"] doubleValue] : 0;
+        return r > 0 ? r : fps;
+    };
+
+    double runFrames = 0; // accumulated offset in frames at primary track rate
+
+    // Pre-scan: for each clip, determine how many frames are eaten by
+    // adjacent transitions (in_offset from following transition, out_offset from preceding).
+    NSArray *primaryChildren = primaryTrack[@"children"] ?: @[];
+    NSInteger pCount = primaryChildren.count;
+
+    for (NSInteger ci = 0; ci < pCount; ci++) {
+        NSDictionary *child = primaryChildren[ci];
+        NSString *schema = child[@"OTIO_SCHEMA"] ?: @"";
+        NSDictionary *srDur = child[@"source_range"][@"duration"];
+        double durFrames = frameVal(srDur);
+        double rate = frameRate(srDur);
+        double durSec = (rate > 0) ? durFrames / rate : 0;
+
+        // All time strings use the clip's native RationalTime directly
+        // (no seconds→frames round-trip). For offsets, build from accumulated frames.
+        NSDictionary *offRT = @{@"value": @(runFrames), @"rate": @(rate)};
+
+        NSMutableDictionary *item = [NSMutableDictionary dictionary];
+        item[@"timelineStartSec"] = @(runFrames / rate);
+        item[@"timelineDurSec"] = @(durSec);
+        item[@"rate"] = @(rate);
+        item[@"childXml"] = [NSMutableString string];
+
+        if ([schema hasPrefix:@"Transition."]) {
+            NSDictionary *inRT = child[@"in_offset"];
+            NSDictionary *outRT = child[@"out_offset"];
+            double inFrames = frameVal(inRT);
+            double outFrames = frameVal(outRT);
+            double totalFrames = inFrames + outFrames;
+            double tRate = frameRate(inRT);
+            NSDictionary *durRT = @{@"value": @(totalFrames), @"rate": @(tRate)};
+            NSDictionary *transOffRT = @{@"value": @(runFrames - inFrames), @"rate": @(tRate)};
+
+            item[@"type"] = @"transition";
+            if (inFrames == 0 && outFrames > 0) {
+                // Fade-in from black (no effect reference needed)
+                item[@"openTag"] = [NSString stringWithFormat:
+                    @"<transition offset=\"%@\" duration=\"%@\">\n"
+                    @"                        <filter-video ref=\"%@\" enabled=\"0\"/>\n"
+                    @"                    </transition>",
+                    otio_time(transOffRT), otio_time(durRT), crossDissolveEffectId];
+            } else if (inFrames > 0 && outFrames == 0) {
+                // Fade-out to black
+                item[@"openTag"] = [NSString stringWithFormat:
+                    @"<transition offset=\"%@\" duration=\"%@\">\n"
+                    @"                        <filter-video ref=\"%@\" enabled=\"0\"/>\n"
+                    @"                    </transition>",
+                    otio_time(transOffRT), otio_time(durRT), crossDissolveEffectId];
+            } else {
+                // Cross dissolve — needs effect references
+                item[@"openTag"] = [NSString stringWithFormat:
+                    @"<transition name=\"Cross Dissolve\" offset=\"%@\" duration=\"%@\">\n"
+                    @"                        <filter-video ref=\"%@\" name=\"Cross Dissolve\"/>\n"
+                    @"                        <filter-audio ref=\"%@\" name=\"Audio Crossfade\"/>\n"
+                    @"                    </transition>",
+                    otio_time(transOffRT), otio_time(durRT),
+                    crossDissolveEffectId, audioCrossfadeEffectId];
+            }
+            // Transitions overlap — do NOT advance runFrames
+        } else if ([schema hasPrefix:@"Gap."]) {
+            item[@"type"] = @"gap";
+            item[@"sourceStartSec"] = @(3600.0);
+            item[@"openTag"] = [NSString stringWithFormat:
+                @"<gap name=\"Gap\" offset=\"%@\" duration=\"%@\" start=\"3600s\">",
+                otio_time(offRT), otio_time(srDur)];
+            runFrames += durFrames;
+        } else if ([schema hasPrefix:@"Clip."]) {
+            NSDictionary *ref = otio_mediaRef(child);
+            NSString *refSchema = ref[@"OTIO_SCHEMA"] ?: @"";
+            if ([refSchema hasPrefix:@"GeneratorReference."]) {
+                // Title/generator clip — build <title> element
+                static int tsCounter = 1;
+                NSString *titleXml = otio_buildTitleElement(child, ref,
+                    otio_time(offRT), otio_time(srDur), &tsCounter, basicTitleEffectId);
+                item[@"type"] = @"title";
+                item[@"sourceStartSec"] = @(3600.0);
+                item[@"openTag"] = titleXml;
+                runFrames += durFrames;
+                goto clipDone;
+            } else if (!otio_isExternal(ref)) {
+                item[@"type"] = @"gap";
+                item[@"sourceStartSec"] = @(3600.0);
+                item[@"openTag"] = [NSString stringWithFormat:
+                    @"<gap name=\"%@\" offset=\"%@\" duration=\"%@\" start=\"3600s\">",
+                    otio_esc(child[@"name"] ?: @"Gap"), otio_time(offRT), otio_time(srDur)];
+            } else {
+                NSString *aid = assets[ref[@"target_url"]] ?: @"r2";
+                double srcStartSec = otio_sourceStart(child);
+                double srcStartFrames = round(srcStartSec * rate);
+                BOOL enabled = child[@"enabled"] == nil || [child[@"enabled"] boolValue];
+
+                // Check for adjacent transitions that eat into this clip's duration.
+                // A preceding transition's out_offset eats from this clip's start.
+                // A following transition's in_offset eats from this clip's end.
+                double eatFromStart = 0; // frames eaten from start by preceding transition
+                double eatFromEnd = 0;   // frames eaten from end by following transition
+                if (ci > 0) {
+                    NSDictionary *prev = primaryChildren[ci - 1];
+                    if ([prev[@"OTIO_SCHEMA"] hasPrefix:@"Transition."]) {
+                        double outOff = frameVal(prev[@"out_offset"]);
+                        if (outOff > 0 && frameVal(prev[@"in_offset"]) > 0) {
+                            eatFromStart = outOff; // cross-dissolve eats from our start
+                        }
+                    }
+                }
+                if (ci + 1 < pCount) {
+                    NSDictionary *next = primaryChildren[ci + 1];
+                    if ([next[@"OTIO_SCHEMA"] hasPrefix:@"Transition."]) {
+                        double inOff = frameVal(next[@"in_offset"]);
+                        if (inOff > 0 && frameVal(next[@"out_offset"]) > 0) {
+                            eatFromEnd = inOff; // cross-dissolve eats from our end
+                        }
+                    }
+                }
+
+                // Adjusted duration and source start for transition overlap
+                double adjDurFrames = durFrames - eatFromStart - eatFromEnd;
+                double adjSrcStartFrames = srcStartFrames + eatFromStart;
+                NSDictionary *adjDurRT = @{@"value": @(adjDurFrames), @"rate": @(rate)};
+                NSDictionary *adjSrcStartRT = @{@"value": @(adjSrcStartFrames), @"rate": @(rate)};
+
+                // Use <clip> with nested <video> (not <asset-clip>) for spine items.
+                // <asset-clip> has a restricted DTD that doesn't allow markers,
+                // filter-video, filter-audio, or connected clips as children.
+                NSMutableString *tag = [NSMutableString stringWithFormat:
+                    @"<clip name=\"%@\" offset=\"%@\" duration=\"%@\" format=\"r1\"",
+                    otio_esc(child[@"name"] ?: @"Clip"),
+                    otio_time(offRT), otio_time(adjDurRT)];
+                if (!enabled) [tag appendString:@" enabled=\"0\""];
+                [tag appendString:@">"];
+
+                item[@"type"] = @"clip";
+                item[@"sourceStartSec"] = @(srcStartSec);
+                item[@"assetUrl"] = ref[@"target_url"] ?: @"";
+                item[@"openTag"] = tag;
+
+                NSMutableString *cx = item[@"childXml"];
+
+                // DTD requires strict ordering inside <clip>:
+                //   1. adjust-* elements (conform, transform, blend, etc.)
+                //   2. adjust-volume, adjust-panner
+                //   3. <video> (with filter-video/filter-audio as children)
+                //   4. connected clips, titles (added later by secondary track loop)
+
+                // Phase 1: adjust-* elements (before video)
+                NSMutableString *filterXml = [NSMutableString string]; // filters go inside <video>
+                for (NSDictionary *eff in child[@"effects"] ?: @[]) {
+                    NSString *eName = eff[@"effect_name"] ?: eff[@"name"] ?: @"";
+                    NSDictionary *fcpxMeta = eff[@"metadata"][@"fcpx"] ?: @{};
+
+                    if ([eName hasPrefix:@"adjust-"]) {
+                        // Adjust elements go directly on <clip>
+                        NSMutableString *attrStr = [NSMutableString string];
+                        for (NSString *key in fcpxMeta) {
+                            if ([key isEqualToString:@"params"]) continue;
+                            id val = fcpxMeta[key];
+                            if ([val isKindOfClass:[NSString class]]) {
+                                [attrStr appendFormat:@" %@=\"%@\"", key, otio_esc(val)];
+                            }
+                        }
+                        [cx appendFormat:@"\n                        <%@%@", eName, attrStr];
+                        NSDictionary *params = fcpxMeta[@"params"];
+                        if (params && [params count] > 0) {
+                            [cx appendString:@">"];
+                            for (NSString *pName in params) {
+                                [cx appendFormat:@"\n                            <param name=\"%@\" value=\"%@\"/>",
+                                    otio_esc(pName), otio_esc([params[pName] description])];
+                            }
+                            [cx appendFormat:@"\n                        </%@>", eName];
+                        } else {
+                            [cx appendString:@"/>"];
+                        }
+                    } else if ([fcpxMeta[@"type"] isEqualToString:@"audio"]) {
+                        // filter-audio goes inside <video> — skip if no valid ref
+                        NSString *eRef = fcpxMeta[@"ref"] ?: @"";
+                        if (eRef.length == 0) continue;
+                        NSString *mappedRef = effectRefs[eRef] ?: eRef;
+                        [filterXml appendFormat:
+                            @"\n                            <filter-audio name=\"%@\" ref=\"%@\"/>",
+                            otio_esc(eName), mappedRef];
+                    } else if (eName.length > 0) {
+                        // filter-video goes inside <video> — skip if no valid ref
+                        NSString *eRef = fcpxMeta[@"ref"] ?: @"";
+                        if (eRef.length == 0) continue;
+                        NSString *mappedRef = effectRefs[eRef] ?: eRef;
+                        [filterXml appendFormat:
+                            @"\n                            <filter-video name=\"%@\" ref=\"%@\"",
+                            otio_esc(eName), mappedRef];
+                        NSDictionary *params = fcpxMeta[@"params"];
+                        if (params && [params count] > 0) {
+                            [filterXml appendString:@">"];
+                            for (NSString *pName in params) {
+                                [filterXml appendFormat:@"\n                                <param name=\"%@\" value=\"%@\"/>",
+                                    otio_esc(pName), otio_esc([params[pName] description])];
+                            }
+                            [filterXml appendString:@"\n                            </filter-video>"];
+                        } else {
+                            [filterXml appendString:@"/>"];
+                        }
+                    }
+                }
+
+                // Phase 2: <video> child with filters nested inside
+                if (filterXml.length > 0) {
+                    [cx appendFormat:
+                        @"\n                        <video offset=\"%@\" ref=\"%@\" duration=\"%@\">%@"
+                        @"\n                        </video>",
+                        otio_time(adjSrcStartRT), aid, otio_time(adjDurRT), filterXml];
+                } else {
+                    [cx appendFormat:
+                        @"\n                        <video offset=\"%@\" ref=\"%@\" duration=\"%@\"/>",
+                        otio_time(adjSrcStartRT), aid, otio_time(adjDurRT)];
+                }
+
+                // Phase 3: Markers (after video, before connected clips)
+                for (NSDictionary *m in child[@"markers"] ?: @[]) {
+                    NSDictionary *fcpxMeta = m[@"metadata"][@"fcpx"] ?: @{};
+                    NSString *markerType = fcpxMeta[@"marker_type"] ?: @"marker";
+                    NSString *startStr = otio_time(m[@"marked_range"][@"start_time"]);
+                    NSString *durStr = otio_time(m[@"marked_range"][@"duration"]);
+                    NSString *name = otio_esc(m[@"name"] ?: @"Marker");
+
+                    if ([markerType isEqualToString:@"chapter-marker"]) {
+                        NSString *posterOff = fcpxMeta[@"posterOffset"] ?: @"0s";
+                        [cx appendFormat:
+                            @"\n                        <chapter-marker start=\"%@\" duration=\"%@\" value=\"%@\" posterOffset=\"%@\"/>",
+                            startStr, durStr, name, posterOff];
+                    } else {
+                        NSMutableString *attrs = [NSMutableString stringWithFormat:
+                            @"start=\"%@\" duration=\"%@\" value=\"%@\"", startStr, durStr, name];
+                        NSString *color = m[@"color"];
+                        if ([color isEqualToString:@"RED"]) {
+                            [attrs appendString:@" completed=\"0\""];
+                        } else if ([color isEqualToString:@"GREEN"]) {
+                            [attrs appendString:@" completed=\"1\""];
+                        }
+                        [cx appendFormat:@"\n                        <%@ %@/>", markerType, attrs];
+                    }
+                }
+                // Phase 4: Connected clips/titles are added later by the secondary track loop
+
+                // Advance by adjusted duration (transitions eat into clip edges)
+                runFrames += adjDurFrames;
+                goto clipDone;
+            }
+            runFrames += durFrames; // non-external clips (gaps)
+            clipDone:;
+        } else {
+            // Unknown schema — treat as gap
+            runFrames += durFrames;
+        }
+        [spineItems addObject:item];
+    }
+
+    // ---- Attach connected clips from secondary video tracks (lane 1, 2, ...) ----
+    for (NSInteger ti = 1; ti < videoTracks.count; ti++) {
+        NSDictionary *secTrack = videoTracks[ti];
+        int lane = (int)ti;
+        double secOff = 0; // in seconds
+
+        for (NSDictionary *child in secTrack[@"children"] ?: @[]) {
+            NSString *schema = child[@"OTIO_SCHEMA"] ?: @"";
+            double durSec = otio_sec(child[@"source_range"][@"duration"]);
+            double clipRate = [child[@"source_range"][@"duration"][@"rate"] doubleValue] ?: fps;
+
+            if ([schema hasPrefix:@"Clip."]) {
+                NSDictionary *ref = otio_mediaRef(child);
+                NSString *refSchema = ref[@"OTIO_SCHEMA"] ?: @"";
+
+                if ([refSchema hasPrefix:@"GeneratorReference."]) {
+                    // Connected title clip — build <title> with lane attribute
+                    for (NSMutableDictionary *si in spineItems) {
+                        double siStart = [si[@"timelineStartSec"] doubleValue];
+                        double siEnd = siStart + [si[@"timelineDurSec"] doubleValue];
+                        if (secOff >= siStart - 0.001 && secOff < siEnd + 0.001) {
+                            double relOffSec = [si[@"sourceStartSec"] doubleValue] + (secOff - siStart);
+                            double relOffFrames = round(relOffSec * clipRate);
+                            NSDictionary *offRT = @{@"value": @(relOffFrames), @"rate": @(clipRate)};
+                            NSDictionary *durRT = child[@"source_range"][@"duration"];
+
+                            static int connTsCounter = 100;
+                            NSString *titleXml = otio_buildTitleElement(child, ref,
+                                otio_time(offRT), otio_time(durRT), &connTsCounter, basicTitleEffectId);
+                            // Inject lane attribute into the title opening tag
+                            NSString *connTitle = [titleXml stringByReplacingOccurrencesOfString:@" start=\"3600s\""
+                                withString:[NSString stringWithFormat:@" lane=\"%d\" start=\"3600s\"", lane]];
+                            NSMutableString *cx = si[@"childXml"];
+                            [cx appendFormat:@"\n                        %@", connTitle];
+                            break;
+                        }
+                    }
+                } else if (otio_isExternal(ref)) {
+                    NSString *aid = assets[ref[@"target_url"]] ?: @"r2";
+                    double srcStart = otio_sourceStart(child);
+
+                    for (NSMutableDictionary *si in spineItems) {
+                        double siStart = [si[@"timelineStartSec"] doubleValue];
+                        double siEnd = siStart + [si[@"timelineDurSec"] doubleValue];
+                        if (secOff >= siStart - 0.001 && secOff < siEnd + 0.001) {
+                            double relOffSec = [si[@"sourceStartSec"] doubleValue] + (secOff - siStart);
+                            double relOffFrames = round(relOffSec * clipRate);
+                            NSDictionary *offRT = @{@"value": @(relOffFrames), @"rate": @(clipRate)};
+                            NSDictionary *srcRT = @{@"value": @(round(srcStart * clipRate)), @"rate": @(clipRate)};
+
+                            NSMutableString *cx = si[@"childXml"];
+                            [cx appendFormat:
+                                @"\n                        <asset-clip name=\"%@\" ref=\"%@\" lane=\"%d\""
+                                @" offset=\"%@\" duration=\"%@\" format=\"r1\"",
+                                otio_esc(child[@"name"] ?: @"Clip"), aid, lane,
+                                otio_time(offRT), otio_time(child[@"source_range"][@"duration"])];
+                            if (srcStart > 0.001) {
+                                [cx appendFormat:@" start=\"%@\"", otio_time(srcRT)];
+                            }
+                            [cx appendString:@"/>"];
+                            break;
+                        }
+                    }
+                }
+            }
+            if (![schema hasPrefix:@"Transition."]) secOff += durSec;
+        }
+    }
+
+    // ---- Attach connected audio clips (lane -1, -2, ...) ----
+    // Match audio to spine items by asset reference (same source media)
+    // rather than by timeline position — transitions cause position drift
+    // between video and audio tracks.
+    for (NSInteger ai = 0; ai < audioTracks.count; ai++) {
+        NSDictionary *aTrack = audioTracks[ai];
+        int lane = -(int)(ai + 1);
+
+        for (NSDictionary *child in aTrack[@"children"] ?: @[]) {
+            NSString *schema = child[@"OTIO_SCHEMA"] ?: @"";
+            if (![schema hasPrefix:@"Clip."]) continue;
+
+            NSDictionary *ref = otio_mediaRef(child);
+            if (!otio_isExternal(ref)) continue;
+
+            NSString *audioUrl = ref[@"target_url"];
+            NSString *aid = assets[audioUrl] ?: @"r2";
+            double clipRate = [child[@"source_range"][@"duration"][@"rate"] doubleValue] ?: fps;
+            double audioSrcStart = otio_sourceStart(child);
+
+            // Find the spine item that uses the SAME asset (matched by URL)
+            for (NSMutableDictionary *si in spineItems) {
+                NSString *siAssetUrl = si[@"assetUrl"];
+                if (!siAssetUrl || ![siAssetUrl isEqualToString:audioUrl]) continue;
+
+                // Audio offset = same as the parent clip's source start
+                double srcStartFrames = round([si[@"sourceStartSec"] doubleValue] * clipRate);
+                NSDictionary *offRT = @{@"value": @(srcStartFrames), @"rate": @(clipRate)};
+
+                NSMutableString *cx = si[@"childXml"];
+                [cx appendFormat:
+                    @"\n                        <audio ref=\"%@\" lane=\"%d\""
+                    @" offset=\"%@\" duration=\"%@\" role=\"dialogue\"/>",
+                    aid, lane, otio_time(offRT),
+                    otio_time(child[@"source_range"][@"duration"])];
+                break;
+            }
+        }
+    }
+
+    // ---- Assemble FCPXML ----
+    // runFrames is total frames accumulated from the primary track
+    double totalRate = fps;
+    // Find the rate from the primary track's first clip for consistency
+    for (NSDictionary *child in primaryTrack[@"children"] ?: @[]) {
+        double r = [child[@"source_range"][@"duration"][@"rate"] doubleValue];
+        if (r > 0) { totalRate = r; break; }
+    }
+    NSDictionary *seqDurRT = @{@"value": @(runFrames), @"rate": @(totalRate)};
+    NSMutableString *xml = [NSMutableString string];
+    [xml appendString:@"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE fcpxml>\n"];
+    [xml appendFormat:@"<fcpxml version=\"1.14\">\n    <resources>\n"];
+    [xml appendFormat:@"        <format id=\"r1\" frameDuration=\"%@\" width=\"%d\" height=\"%d\" name=\"%@\"/>\n",
+        frameDur, width, height, fmtName];
+    [xml appendFormat:@"        <effect id=\"%@\" name=\"Cross Dissolve\" uid=\"FxPlug:4731E73A-8DAC-4113-9A30-AE85B1761265\"/>\n", crossDissolveEffectId];
+    [xml appendFormat:@"        <effect id=\"%@\" name=\"Audio Crossfade\" uid=\"FFAudioTransition\"/>\n", audioCrossfadeEffectId];
+    [xml appendFormat:@"        <effect id=\"%@\" name=\"Basic Title\" uid=\".../Titles.localized/Bumper:Opener.localized/Basic Title.localized/Basic Title.moti\"/>\n", basicTitleEffectId];
+    [xml appendString:effectXml]; // clip effect resources
+    [xml appendString:assetXml];
+    [xml appendString:@"    </resources>\n"];
+    [xml appendFormat:@"    <event name=\"%@\">\n", otio_esc(projectName)];
+
+    // Asset-clip browser items (so clips appear in FCP's event browser)
+    for (NSString *url in assets) {
+        NSString *aid = assets[url];
+        // Find the clip to get its name and duration
+        for (NSDictionary *t in tracks) {
+            for (NSDictionary *c in t[@"children"] ?: @[]) {
+                NSDictionary *cRef = otio_mediaRef(c);
+                if (cRef && [cRef[@"target_url"] isEqualToString:url]) {
+                    NSDictionary *durRT = cRef[@"available_range"] ?
+                        cRef[@"available_range"][@"duration"] : c[@"source_range"][@"duration"];
+                    [xml appendFormat:
+                        @"        <asset-clip name=\"%@\" ref=\"%@\" format=\"r1\" duration=\"%@\"/>\n",
+                        otio_esc(c[@"name"] ?: @"Clip"), aid, otio_time(durRT)];
+                    goto nextAsset;
+                }
+            }
+        }
+        nextAsset:;
+    }
+
+    [xml appendFormat:@"        <project name=\"%@\">\n", otio_esc(projectName)];
+    [xml appendFormat:@"            <sequence format=\"r1\" duration=\"%@\" tcStart=\"0s\" tcFormat=\"NDF\">\n",
+        otio_time(seqDurRT)];
+    [xml appendString:@"                <spine>\n"];
+
+    for (NSDictionary *si in spineItems) {
+        NSString *type = si[@"type"];
+        NSString *openTag = si[@"openTag"];
+        NSString *childXml = si[@"childXml"];
+
+        if ([type isEqualToString:@"transition"] || [type isEqualToString:@"title"]) {
+            // Transitions and titles are self-contained elements (already have closing tags)
+            [xml appendFormat:@"                    %@\n", openTag];
+        } else {
+            BOOL hasChildren = childXml.length > 0;
+            if (hasChildren) {
+                [xml appendFormat:@"                    %@%@\n", openTag, childXml];
+                // Close tag: determine element name from opening tag
+                NSString *closeTag = [openTag hasPrefix:@"<asset-clip"] ? @"</asset-clip>" :
+                                     [openTag hasPrefix:@"<gap"] ? @"</gap>" : @"</clip>";
+                [xml appendFormat:@"                    %@\n", closeTag];
+            } else {
+                // Self-close
+                NSString *selfClose = [openTag stringByReplacingOccurrencesOfString:@">" withString:@"/>"
+                    options:NSBackwardsSearch range:NSMakeRange(openTag.length - 1, 1)];
+                [xml appendFormat:@"                    %@\n", selfClose];
+            }
+        }
+    }
+
+    [xml appendString:@"                </spine>\n"];
+    [xml appendString:@"            </sequence>\n"];
+    [xml appendString:@"        </project>\n"];
+    [xml appendString:@"    </event>\n"];
+    [xml appendString:@"</fcpxml>\n"];
+
+    SpliceKit_log(@"[OTIO] Converted %@ → FCPXML (%lu bytes, %lu spine items, %lu assets)",
+        otioPath.lastPathComponent, (unsigned long)xml.length,
+        (unsigned long)spineItems.count, (unsigned long)assets.count);
+    return xml;
+}
+
+#pragma mark - OpenTimelineIO Import / Export
+
+- (void)exportOTIO:(id)sender {
+    // Step 1: Export FCPXML from FCP to a temp file
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSString *tmpFcpxml = [NSTemporaryDirectory() stringByAppendingPathComponent:@"splicekit_otio_menu_export.fcpxml"];
+        NSDictionary *exportResult = SpliceKit_handleFCPXMLExport(@{@"path": tmpFcpxml});
+        if (exportResult[@"error"]) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                NSAlert *alert = [[NSAlert alloc] init];
+                alert.messageText = @"Export Failed";
+                alert.informativeText = [NSString stringWithFormat:@"Could not export timeline: %@", exportResult[@"error"]];
+                alert.alertStyle = NSAlertStyleWarning;
+                [alert addButtonWithTitle:@"OK"];
+                [alert runModal];
+            });
+            return;
+        }
+
+        // Step 2: Show save panel on main thread
+        dispatch_async(dispatch_get_main_queue(), ^{
+            NSSavePanel *panel = [NSSavePanel savePanel];
+            panel.title = @"Export Timeline (OpenTimelineIO)";
+            panel.nameFieldStringValue = @"Timeline.otio";
+            panel.allowedContentTypes = @[
+                [UTType typeWithFilenameExtension:@"otio"],
+                [UTType typeWithFilenameExtension:@"edl"],
+                [UTType typeWithFilenameExtension:@"aaf"],
+            ];
+            panel.allowsOtherFileTypes = YES;
+
+            if ([panel runModal] != NSModalResponseOK || !panel.URL) {
+                [[NSFileManager defaultManager] removeItemAtPath:tmpFcpxml error:nil];
+                return;
+            }
+
+            NSString *outPath = panel.URL.path;
+            NSString *ext = outPath.pathExtension.lowercaseString;
+
+            // Step 3: Convert FCPXML → target format using Python/OTIO
+            dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+                NSString *pyScript = [NSString stringWithFormat:
+                    @"import opentimelineio as otio\n"
+                    @"result = otio.adapters.read_from_string(open('%@').read(), 'fcpx_xml')\n"
+                    @"tl = result\n"
+                    @"if hasattr(result, '__iter__') and not isinstance(result, otio.schema.Timeline):\n"
+                    @"    for item in result:\n"
+                    @"        if isinstance(item, otio.schema.Timeline):\n"
+                    @"            tl = item\n"
+                    @"            break\n"
+                    @"otio.adapters.write_to_file(tl, '%@')\n"
+                    @"print('OK')\n",
+                    tmpFcpxml, outPath];
+
+                NSTask *task = [[NSTask alloc] init];
+                task.executableURL = [NSURL fileURLWithPath:@"/usr/bin/env"];
+                task.arguments = @[@"python3", @"-c", pyScript];
+                NSPipe *outPipe = [NSPipe pipe];
+                NSPipe *errPipe = [NSPipe pipe];
+                task.standardOutput = outPipe;
+                task.standardError = errPipe;
+
+                NSError *err = nil;
+                [task launchAndReturnError:&err];
+                if (err) {
+                    SpliceKit_log(@"[OTIO] Export launch error: %@", err);
+                    [[NSFileManager defaultManager] removeItemAtPath:tmpFcpxml error:nil];
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        NSAlert *alert = [[NSAlert alloc] init];
+                        alert.messageText = @"Export Failed";
+                        alert.informativeText = [NSString stringWithFormat:@"Could not launch Python: %@", err.localizedDescription];
+                        [alert addButtonWithTitle:@"OK"];
+                        [alert runModal];
+                    });
+                    return;
+                }
+                [task waitUntilExit];
+
+                NSString *stdoutStr = [[NSString alloc] initWithData:[outPipe.fileHandleForReading readDataToEndOfFile] encoding:NSUTF8StringEncoding];
+                NSString *stderrStr = [[NSString alloc] initWithData:[errPipe.fileHandleForReading readDataToEndOfFile] encoding:NSUTF8StringEncoding];
+
+                [[NSFileManager defaultManager] removeItemAtPath:tmpFcpxml error:nil];
+
+                if (task.terminationStatus != 0 || ![stdoutStr containsString:@"OK"]) {
+                    SpliceKit_log(@"[OTIO] Export error: %@", stderrStr);
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        NSAlert *alert = [[NSAlert alloc] init];
+                        alert.messageText = @"Export Failed";
+                        alert.informativeText = stderrStr.length > 0 ? stderrStr : @"Unknown error during OTIO conversion";
+                        alert.alertStyle = NSAlertStyleWarning;
+                        [alert addButtonWithTitle:@"OK"];
+                        [alert runModal];
+                    });
+                } else {
+                    SpliceKit_log(@"[OTIO] Exported to %@ (%@)", outPath, ext.uppercaseString);
+                }
+            });
+        });
+    });
+}
+
+- (void)importOTIO:(id)sender {
+    NSOpenPanel *panel = [NSOpenPanel openPanel];
+    panel.title = @"Import Timeline (OpenTimelineIO)";
+    panel.allowedContentTypes = @[
+        [UTType typeWithFilenameExtension:@"otio"],
+        [UTType typeWithFilenameExtension:@"fcpxml"],
+    ];
+    panel.allowsOtherFileTypes = YES;
+    panel.allowsMultipleSelection = NO;
+
+    if ([panel runModal] != NSModalResponseOK || !panel.URL) return;
+
+    NSString *inPath = panel.URL.path;
+    NSString *ext = inPath.pathExtension.lowercaseString;
+
+    // .fcpxml files → open via NSWorkspace (same as FCP's own Import XML)
+    if ([ext isEqualToString:@"fcpxml"]) {
+        NSURL *fileURL = [NSURL fileURLWithPath:inPath];
+        [[NSWorkspace sharedWorkspace] openURLs:@[fileURL]
+                       withApplicationAtURL:[[NSBundle mainBundle] bundleURL]
+                              configuration:[NSWorkspaceOpenConfiguration configuration]
+                          completionHandler:^(NSRunningApplication *app, NSError *openErr) {
+            if (openErr) {
+                SpliceKit_log(@"[OTIO] Import error: %@", openErr.localizedDescription);
+            } else {
+                SpliceKit_log(@"[OTIO] Imported FCPXML from %@", inPath);
+            }
+        }];
+        return;
+    }
+
+    // .otio files → native ObjC conversion to FCPXML, then open via NSWorkspace
+    if ([ext isEqualToString:@"otio"]) {
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+            NSString *fcpxmlStr = SpliceKit_otioToFCPXML(inPath);
+            if (!fcpxmlStr) {
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    NSAlert *alert = [[NSAlert alloc] init];
+                    alert.messageText = @"Import Failed";
+                    alert.informativeText = @"Could not convert .otio to FCPXML. Check the log for details.";
+                    alert.alertStyle = NSAlertStyleWarning;
+                    [alert addButtonWithTitle:@"OK"];
+                    [alert runModal];
+                });
+                return;
+            }
+
+            // Write to temp .fcpxml file and open via NSWorkspace
+            NSString *tmpPath = [NSTemporaryDirectory() stringByAppendingPathComponent:@"splicekit_otio_import.fcpxml"];
+            NSError *writeErr = nil;
+            [fcpxmlStr writeToFile:tmpPath atomically:YES encoding:NSUTF8StringEncoding error:&writeErr];
+            if (writeErr) {
+                SpliceKit_log(@"[OTIO] Write error: %@", writeErr.localizedDescription);
+                return;
+            }
+
+            SpliceKit_log(@"[OTIO] Converted %@ → %@ (%lu bytes)", inPath.lastPathComponent, tmpPath.lastPathComponent, (unsigned long)fcpxmlStr.length);
+
+            NSURL *fcpxmlURL = [NSURL fileURLWithPath:tmpPath];
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [[NSWorkspace sharedWorkspace] openURLs:@[fcpxmlURL]
+                               withApplicationAtURL:[[NSBundle mainBundle] bundleURL]
+                                      configuration:[NSWorkspaceOpenConfiguration configuration]
+                                  completionHandler:^(NSRunningApplication *app, NSError *openErr) {
+                    if (openErr) {
+                        SpliceKit_log(@"[OTIO] Import error: %@", openErr.localizedDescription);
+                    } else {
+                        SpliceKit_log(@"[OTIO] Imported .otio from %@", inPath);
+                    }
+                    // Clean up after FCP reads it
+                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_SEC),
+                        dispatch_get_global_queue(QOS_CLASS_BACKGROUND, 0), ^{
+                        [[NSFileManager defaultManager] removeItemAtPath:tmpPath error:nil];
+                    });
+                }];
+            });
+        });
+        return;
+    }
+
+    // Unsupported format
+    SpliceKit_log(@"[OTIO] Unsupported format: .%@", ext);
 }
 
 - (BOOL)validateMenuItem:(NSMenuItem *)menuItem {
@@ -966,6 +2001,66 @@ static void SpliceKit_installMenu(void) {
         [mainMenu insertItem:bridgeMenuItem atIndex:helpIndex];
     } else {
         [mainMenu addItem:bridgeMenuItem];
+    }
+
+    // --- Add OTIO Import/Export items to FCP's File menu ---
+    // FCP's File menu structure:
+    //   File > Import (submenu) > Media..., XML..., Captions...
+    //   File > Export XML...
+    // We add "OpenTimelineIO..." into the Import submenu (after XML...)
+    // and "Export to OpenTimelineIO..." after "Export XML..."
+    NSMenu *fileMenu = nil;
+    for (NSMenuItem *item in mainMenu.itemArray) {
+        if ([item.title isEqualToString:@"File"] && item.submenu) {
+            fileMenu = item.submenu;
+            break;
+        }
+    }
+    if (fileMenu) {
+        NSMenuItem *importOTIOItem = [[NSMenuItem alloc]
+            initWithTitle:@"OpenTimelineIO..."
+                   action:@selector(importOTIO:)
+            keyEquivalent:@""];
+        importOTIOItem.target = [SpliceKitMenuController shared];
+
+        NSMenuItem *exportOTIOItem = [[NSMenuItem alloc]
+            initWithTitle:@"Export OpenTimelineIO..."
+                   action:@selector(exportOTIO:)
+            keyEquivalent:@""];
+        exportOTIOItem.target = [SpliceKitMenuController shared];
+
+        // Find the "Import" submenu and add our item after "XML..."
+        for (NSInteger i = 0; i < fileMenu.numberOfItems; i++) {
+            NSMenuItem *item = [fileMenu itemAtIndex:i];
+            if ([item.title isEqualToString:@"Import"] && item.submenu) {
+                NSMenu *importSubmenu = item.submenu;
+                // Find "XML..." to insert after it
+                NSInteger xmlIndex = -1;
+                for (NSInteger j = 0; j < importSubmenu.numberOfItems; j++) {
+                    if ([[importSubmenu itemAtIndex:j].title containsString:@"XML"]) {
+                        xmlIndex = j;
+                        break;
+                    }
+                }
+                if (xmlIndex >= 0) {
+                    [importSubmenu insertItem:importOTIOItem atIndex:xmlIndex + 1];
+                } else {
+                    [importSubmenu addItem:importOTIOItem];
+                }
+                break;
+            }
+        }
+
+        // Find "Export XML..." and add our export after it
+        for (NSInteger i = 0; i < fileMenu.numberOfItems; i++) {
+            NSString *title = [fileMenu itemAtIndex:i].title;
+            if ([title containsString:@"Export XML"]) {
+                [fileMenu insertItem:exportOTIOItem atIndex:i + 1];
+                break;
+            }
+        }
+
+        SpliceKit_log(@"OTIO import/export added to File menu");
     }
 
     SpliceKit_log(@"SpliceKit menu installed (Ctrl+Option+T Transcript, Ctrl+Option+C Captions, Cmd+Shift+P Palette, Ctrl+Option+L Lua REPL)");

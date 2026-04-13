@@ -1517,6 +1517,37 @@ NSDictionary *SpliceKit_handleTimelineEndEdit(NSDictionary *params) {
 NSDictionary *SpliceKit_handlePasteboardImportXML(NSDictionary *params);
 static NSDictionary *SpliceKit_handleInspectorSet(NSDictionary *params);
 static void SpliceKit_collectTitleText(id folder, NSMutableArray *results, int depth);
+extern NSString *SpliceKit_otioToFCPXML(NSString *otioPath);
+
+// Convert .otio file → FCPXML via the native ObjC converter.
+// This produces better FCPXML than the Python adapter (correct transitions,
+// titles, connected clips, exact frame-rate math).
+static NSDictionary *SpliceKit_handleOTIOToFCPXML(NSDictionary *params) {
+    NSString *path = params[@"path"];
+    if (!path) return @{@"error": @"path parameter required (path to .otio file)"};
+
+    // If raw JSON provided instead of file, write to temp file
+    NSString *otioJson = params[@"otio_json"];
+    NSString *tmpPath = nil;
+    if (otioJson) {
+        tmpPath = [NSTemporaryDirectory() stringByAppendingPathComponent:@"splicekit_otio_bridge.otio"];
+        NSData *data = [otioJson dataUsingEncoding:NSUTF8StringEncoding];
+        [data writeToFile:tmpPath atomically:YES];
+        path = tmpPath;
+    }
+
+    NSString *fcpxml = SpliceKit_otioToFCPXML(path);
+
+    // Clean up temp file
+    if (tmpPath) {
+        [[NSFileManager defaultManager] removeItemAtPath:tmpPath error:nil];
+    }
+
+    if (!fcpxml) {
+        return @{@"error": @"Failed to convert .otio to FCPXML"};
+    }
+    return @{@"status": @"ok", @"fcpxml": fcpxml};
+}
 
 NSDictionary *SpliceKit_handleFCPXMLImport(NSDictionary *params) {
     NSString *xml = params[@"xml"];
@@ -12902,7 +12933,7 @@ static NSDictionary *SpliceKit_handleLibraryCreate(NSDictionary *params) {
 
 #pragma mark - Open Project by Name
 
-static NSDictionary *SpliceKit_handleProjectOpen(NSDictionary *params) {
+NSDictionary *SpliceKit_handleProjectOpen(NSDictionary *params) {
     NSString *nameFilter = params[@"name"];
     NSString *eventFilter = params[@"event"];
     if (!nameFilter) return @{@"error": @"name parameter required"};
@@ -13478,7 +13509,7 @@ static NSDictionary *SpliceKit_handleCaptureTimeline(NSDictionary *params) {
 
 #pragma mark - Export FCPXML Programmatically
 
-static NSDictionary *SpliceKit_handleFCPXMLExport(NSDictionary *params) {
+NSDictionary *SpliceKit_handleFCPXMLExport(NSDictionary *params) {
     NSString *outputPath = params[@"path"] ?: @"/tmp/splicekit_export.fcpxml";
 
     __block NSDictionary *result = nil;
@@ -19392,6 +19423,8 @@ NSDictionary *SpliceKit_handleRequest(NSDictionary *request) {
         result = SpliceKit_handleFCPXMLImport(params);
     } else if ([method isEqualToString:@"fcpxml.pasteImport"]) {
         result = SpliceKit_handlePasteboardImportXML(params);
+    } else if ([method isEqualToString:@"otio.toFCPXML"]) {
+        result = SpliceKit_handleOTIOToFCPXML(params);
     }
     // effects.* namespace
     else if ([method isEqualToString:@"effects.list"]) {

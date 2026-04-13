@@ -10,6 +10,22 @@
       <sparkle:version>3.1.8</sparkle:version>
       <sparkle:shortVersionString>3.1.8</sparkle:shortVersionString>
       <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+      <pubDate>Mon, 13 Apr 2026 17:24:16 +0000</pubDate>
+      <description><![CDATA[
+        <h2>What's New in 3.1.8</h2>
+        <p>OpenTimelineIO import/export, fix transcript persistence across projects, fix addTodoMarker, fix silence detection, fix timeline duration, compound clip nested items, batch editing tools, expanded command palette</p>
+      ]]></description>
+      <enclosure
+        url="https://github.com/elliotttate/SpliceKit/releases/download/v3.1.8/SpliceKit-v3.1.8.dmg"
+        sparkle:edSignature="vbASIS1XT2cV0kR82DRE2WLoqQlAvYALugZkFP6hS8/LBMK1aSPWAJG8s+anA+dWwBYd9sVaZHgwzVkKifkgDg=="
+        length="14096861"
+        type="application/octet-stream" />
+    </item>
+    <item>
+      <title>SpliceKit v3.1.8</title>
+      <sparkle:version>3.1.8</sparkle:version>
+      <sparkle:shortVersionString>3.1.8</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
       <pubDate>Mon, 13 Apr 2026 17:23:01 +0000</pubDate>
       <description><![CDATA[
         <h2>What's New in 3.1.8</h2>

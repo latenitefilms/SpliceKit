@@ -10,6 +10,22 @@
       <sparkle:version>3.1.10</sparkle:version>
       <sparkle:shortVersionString>3.1.10</sparkle:shortVersionString>
       <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+      <pubDate>Mon, 13 Apr 2026 18:37:42 +0000</pubDate>
+      <description><![CDATA[
+        <h2>What's New in 3.1.10</h2>
+        <p>Fix CloudKit crash on FCP 12.2+ — brute-force class enumeration at both constructor and WillFinishLaunching to catch lazily-registered Swift classes, disable spring-loaded blade</p>
+      ]]></description>
+      <enclosure
+        url="https://github.com/elliotttate/SpliceKit/releases/download/v3.1.10/SpliceKit-v3.1.10.dmg"
+        sparkle:edSignature="8DGafzXv+7ExwgyyRMeAcZFUP64YV+Ihc49PsJPZl09qcmMrmLhkFON/dds8mm5HUa/xRCMdyIoyHPQwu01IDQ=="
+        length="14099531"
+        type="application/octet-stream" />
+    </item>
+    <item>
+      <title>SpliceKit v3.1.10</title>
+      <sparkle:version>3.1.10</sparkle:version>
+      <sparkle:shortVersionString>3.1.10</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
       <pubDate>Mon, 13 Apr 2026 18:31:05 +0000</pubDate>
       <description><![CDATA[
         <h2>What's New in 3.1.10</h2>

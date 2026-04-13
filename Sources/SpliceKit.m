@@ -2418,6 +2418,61 @@ static void SpliceKit_fixShutdownHang(void) {
     }
 }
 
+// Brute-force CloudContent neutralizer: enumerates all registered ObjC classes and
+// swizzles any class whose name contains "CloudContent" or "CloudContentCatalog" etc.
+// This avoids guessing Swift mangled names which vary by FCP version.
+// Called at constructor time AND at WillFinishLaunching (Swift lazy class registration
+// means classes may not be available until frameworks finish loading).
+static void SpliceKit_swizzleCloudContentClasses(const char *phase) {
+    int numClasses = objc_getClassList(NULL, 0);
+    if (numClasses <= 0) return;
+
+    Class *classes = (Class *)malloc(sizeof(Class) * numClasses);
+    objc_getClassList(classes, numClasses);
+
+    for (int i = 0; i < numClasses; i++) {
+        const char *name = class_getName(classes[i]);
+        if (!name) continue;
+
+        // CloudContentFirstLaunchHelper (or any future rename containing this)
+        if (strstr(name, "CloudContentFirstLaunchHelper")) {
+            SEL sel1 = NSSelectorFromString(@"setupAndPresentFirstLaunchIfNeeded");
+            Method m1 = class_getInstanceMethod(classes[i], sel1);
+            if (m1) {
+                method_setImplementation(m1, (IMP)noopMethod);
+                SpliceKit_log(@"  [%s] Swizzled %s -setupAndPresentFirstLaunchIfNeeded", phase, name);
+            }
+            SEL sel2 = NSSelectorFromString(@"setupAndPresentFirstLaunchIfNeededWithCompletionHandler:");
+            Method m2 = class_getInstanceMethod(classes[i], sel2);
+            if (m2) {
+                method_setImplementation(m2, (IMP)noopMethodWithArg);
+                SpliceKit_log(@"  [%s] Swizzled %s -setupAndPresentFirstLaunchIfNeeded(completion:)", phase, name);
+            }
+        }
+
+        // CloudContentCatalog — the actual crashing method
+        if (strstr(name, "CloudContentCatalog")) {
+            SEL sel = NSSelectorFromString(@"updateCatalogAndRegistry");
+            Method m = class_getInstanceMethod(classes[i], sel);
+            if (m) {
+                method_setImplementation(m, (IMP)noopMethod);
+                SpliceKit_log(@"  [%s] Swizzled %s -updateCatalogAndRegistry", phase, name);
+            }
+        }
+
+        // CloudContentFeatureFlag — prevent the entire code path
+        if (strstr(name, "CloudContentFeatureFlag")) {
+            Method m = class_getClassMethod(classes[i], @selector(isEnabled));
+            if (m) {
+                method_setImplementation(m, (IMP)returnNO);
+                SpliceKit_log(@"  [%s] Swizzled %s +isEnabled -> NO", phase, name);
+            }
+        }
+    }
+
+    free(classes);
+}
+
 // CloudContent/ImagePlayground crashes at launch because:
 //   PEAppController.presentMainWindowOnAppLaunch: checks CloudContentFeatureFlag.isEnabled,
 //   which triggers CloudContentCatalog.shared -> CCFirstLaunchHelper -> CloudKit.
@@ -2472,38 +2527,11 @@ static void SpliceKit_disableCloudContent(void) {
         }
     }
 
-    // FCP 12.2+ renamed the helper to CloudContentFirstLaunchHelper (Swift class)
-    Class ccHelper2 = objc_getClass("_TtC13Final_Cut_Pro29CloudContentFirstLaunchHelper");
-    if (!ccHelper2) ccHelper2 = objc_getClass("Final_Cut_Pro.CloudContentFirstLaunchHelper");
-    if (ccHelper2) {
-        // Parameterless variant (FCP 12.2+)
-        SEL sel = NSSelectorFromString(@"setupAndPresentFirstLaunchIfNeeded");
-        Method m = class_getInstanceMethod(ccHelper2, sel);
-        if (m) {
-            method_setImplementation(m, (IMP)noopMethod);
-            SpliceKit_log(@"  Handled CloudContentFirstLaunchHelper.setupAndPresentFirstLaunchIfNeeded (FCP 12.2+)");
-        }
-        // Also try the completion-handler variant in case it still exists
-        SEL sel2 = NSSelectorFromString(@"setupAndPresentFirstLaunchIfNeededWithCompletionHandler:");
-        Method m2 = class_getInstanceMethod(ccHelper2, sel2);
-        if (m2) {
-            method_setImplementation(m2, (IMP)noopMethodWithArg);
-            SpliceKit_log(@"  Handled CloudContentFirstLaunchHelper completion-handler variant");
-        }
-    }
-
-    // Safety net: noop CloudContentCatalog.updateCatalogAndRegistry() directly,
-    // which is the actual crashing call if the helpers above don't cover it.
-    Class ccCatalog = objc_getClass("_TtC13Final_Cut_Pro19CloudContentCatalog");
-    if (!ccCatalog) ccCatalog = objc_getClass("Final_Cut_Pro.CloudContentCatalog");
-    if (ccCatalog) {
-        SEL sel = NSSelectorFromString(@"updateCatalogAndRegistry");
-        Method m = class_getInstanceMethod(ccCatalog, sel);
-        if (m) {
-            method_setImplementation(m, (IMP)noopMethod);
-            SpliceKit_log(@"  Handled CloudContentCatalog.updateCatalogAndRegistry (safety net)");
-        }
-    }
+    // Brute-force scan: enumerate ALL registered ObjC classes and swizzle anything
+    // with CloudContent in the name. This avoids guessing Swift mangled names, which
+    // vary by FCP version and compiler. At constructor time Swift classes may not be
+    // registered yet (lazy loading), so we also retry this in WillFinishLaunching.
+    SpliceKit_swizzleCloudContentClasses("constructor");
 
     SpliceKit_log(@"CloudContent/ImagePlayground disabled.");
 }
@@ -2826,6 +2854,16 @@ static void SpliceKit_init(void) {
     SpliceKit_disableCloudContent();
     SpliceKit_handleSubscriptionValidation();
     SpliceKit_fixShutdownHang();
+
+    // Retry CloudContent swizzles at WillFinishLaunching — Swift classes that were
+    // lazily registered at constructor time should be available now. This fires BEFORE
+    // DidFinishLaunching where the CloudContent first-launch flow runs.
+    [[NSNotificationCenter defaultCenter]
+        addObserverForName:NSApplicationWillFinishLaunchingNotification
+        object:nil queue:nil usingBlock:^(NSNotification *note) {
+            SpliceKit_log(@"WillFinishLaunching — retrying CloudContent swizzles...");
+            SpliceKit_swizzleCloudContentClasses("willLaunch");
+        }];
 
     // Everything else waits for the app to finish launching
     [[NSNotificationCenter defaultCenter]

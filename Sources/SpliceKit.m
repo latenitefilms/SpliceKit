@@ -27,6 +27,7 @@ extern NSDictionary *SpliceKit_handleTimelineAction(NSDictionary *params);
 extern NSDictionary *SpliceKit_handleFCPXMLExport(NSDictionary *params);
 extern NSDictionary *SpliceKit_handleFCPXMLImport(NSDictionary *params);
 extern NSDictionary *SpliceKit_handleProjectOpen(NSDictionary *params);
+extern void SpliceKit_installMixerSkimHooks(void);
 
 #pragma mark - Logging
 //
@@ -2816,6 +2817,10 @@ static void SpliceKit_appDidLaunch(void) {
 
     // Install effect browser favorites context menu (always on)
     SpliceKit_installEffectFavoritesSwizzle();
+
+    // Latch skim state off the methods FCP actually calls so the mixer can
+    // meter live skims even when isToolSkimming stays false.
+    SpliceKit_installMixerSkimHooks();
 
     // Restore persisted social caption text after relaunch once a real sequence is
     // active. Automatic repair is intentionally limited to the Motion effect text

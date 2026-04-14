@@ -16,6 +16,6 @@ struct MixerApp: App {
         }
         .windowStyle(.titleBar)
         .windowResizability(.contentMinSize)
-        .defaultSize(width: 700, height: 440)
+        .defaultSize(width: 1036, height: 742)
     }
 }

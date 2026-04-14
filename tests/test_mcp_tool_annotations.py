@@ -221,6 +221,7 @@ class MCPToolAnnotationTests(unittest.TestCase):
         self.assertIn("ok", self.module.timeline_navigation_action("enableBeatDetection"))
         self.assertIn("ok", self.module.timeline_navigation_action("nextKeyframe"))
         self.assertIn("ok", self.module.timeline_edit_action("addKeyframe"))
+        self.assertIn("ok", self.module.timeline_destructive_action("removeAllKeyframesFromClip"))
         self.assertIn("ok", self.module.timeline_edit_action("transcodeMedia"))
 
     def test_history_actions_are_rejected_by_non_destructive_split(self):

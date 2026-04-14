@@ -473,6 +473,7 @@ static NSString * const kSeparatorRowID = @"FCPSeparatorRow";
     // --- Keyframes ---
     add(@"Add Keyframe", @"addKeyframe", @"timeline", SpliceKitCommandCategoryKeyframes, @"Keyframes", nil, @"Add keyframe at playhead", @[@"animation"]);
     add(@"Delete Keyframes", @"deleteKeyframes", @"timeline", SpliceKitCommandCategoryKeyframes, @"Keyframes", nil, @"Remove keyframes from selection", @[]);
+    add(@"Remove All Keyframes From Clip", @"removeAllKeyframesFromClip", @"timeline", SpliceKitCommandCategoryKeyframes, @"Keyframes", nil, @"Clear every keyframed channel on the selected clip", @[@"clear all keyframes", @"remove keyframe animation", @"reset animation"]);
     add(@"Next Keyframe", @"nextKeyframe", @"timeline", SpliceKitCommandCategoryKeyframes, @"Keyframes", nil, @"Go to next keyframe", @[]);
     add(@"Previous Keyframe", @"previousKeyframe", @"timeline", SpliceKitCommandCategoryKeyframes, @"Keyframes", nil, @"Go to previous keyframe", @[]);
 
@@ -3281,7 +3282,8 @@ static NSString *FCPFavoriteKey(NSString *type, NSString *action) {
             @"retimeCustomSpeed", @"retimeInstantReplayHalf", @"retimeInstantReplayQuarter",
             @"retimeReset", @"retimeOpticalFlow", @"retimeFrameBlending", @"retimeFloorFrame",
             // Keyframes
-            @"addKeyframe", @"deleteKeyframes", @"nextKeyframe", @"previousKeyframe",
+            @"addKeyframe", @"deleteKeyframes", @"removeAllKeyframesFromClip",
+            @"nextKeyframe", @"previousKeyframe",
             // Clip operations
             @"solo", @"disable", @"enableDisable", @"createCompoundClip",
             @"breakApartClipItems", @"addAdjustmentClip",
@@ -4727,7 +4729,7 @@ static NSString *SpliceKit_tailLogFile(NSString *path, NSUInteger maxBytes) {
         @"CAPTIONS: addCaption, splitCaption, resolveOverlaps, importCaptions\n"
         @"MULTICAM: createMulticamClip, switchAngle01, switchAngle02, switchAngle03, switchAngle04, cutAndSwitchAngle01, cutAndSwitchAngle02\n"
         @"RATING: favorite, reject, unrate\n"
-        @"KEYFRAMES: addKeyframe, deleteKeyframes, nextKeyframe, previousKeyframe\n"
+        @"KEYFRAMES: addKeyframe, deleteKeyframes, removeAllKeyframesFromClip, nextKeyframe, previousKeyframe\n"
         @"VIEW: zoomToFit, zoomIn, zoomOut, verticalZoomToFit, toggleSnapping, toggleSkimming, toggleClipSkimming, toggleInspector, toggleTimeline, toggleTimelineIndex, showAudioLanes, enterFullScreen, increaseClipHeight, decreaseClipHeight, showVideoAnimation, showAudioAnimation, showPrecisionEditor\n"
         @"PROJECT: duplicateProject, snapshotProject, projectProperties, newProject, newEvent, importMedia, find, findAndReplaceTitle, revealInFinder, renderAll, exportXML, analyzeAndFix, recordVoiceover, backgroundTasks, deleteGeneratedFiles, deleteRenderFiles, showPreferences\n"
         @"AUDITION: createAudition, finalizeAudition, nextAuditionPick, previousAuditionPick\n"

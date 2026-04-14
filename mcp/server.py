@@ -86,7 +86,7 @@ Titles: addBasicTitle, addBasicLowerThird
 Speed: retimeNormal, retimeFast2x, retimeFast4x, retimeFast8x, retimeFast20x,
        retimeSlow50, retimeSlow25, retimeSlow10, retimeReverse, retimeHold,
        freezeFrame, retimeBladeSpeed
-Keyframes: addKeyframe, deleteKeyframes, nextKeyframe, previousKeyframe
+Keyframes: addKeyframe, deleteKeyframes, removeAllKeyframesFromClip, nextKeyframe, previousKeyframe
 Other: solo, disable, createCompoundClip, autoReframe, exportXML, shareSelection
 
 ## IMPORTANT: Selection Before Actions
@@ -514,7 +514,8 @@ TIMELINE_DESTRUCTIVE_ACTIONS = {
     "retimeFast4x", "retimeFast8x", "retimeFast20x", "retimeSlow50",
     "retimeSlow25", "retimeSlow10", "retimeReverse", "retimeHold",
     "freezeFrame", "retimeBladeSpeed", "retimeSpeedRampToZero",
-    "retimeSpeedRampFromZero", "deleteKeyframes", "breakApartClipItems",
+    "retimeSpeedRampFromZero", "deleteKeyframes", "removeAllKeyframesFromClip",
+    "breakApartClipItems",
     "removeEffects", "overwriteToPrimaryStoryline", "collapseToConnectedStoryline",
     "splitCaption", "resolveOverlaps", "toggleSelectedEffectsOff",
     "toggleDuplicateDetection", "insertEditAudio", "insertEditVideo",
@@ -753,7 +754,8 @@ def timeline_action(action: str) -> str:
       Speed: retimeNormal, retimeFast2x/4x/8x/20x, retimeSlow50/25/10,
              retimeReverse, retimeHold, freezeFrame, retimeBladeSpeed,
              retimeSpeedRampToZero, retimeSpeedRampFromZero
-      Keyframes: addKeyframe, deleteKeyframes, nextKeyframe, previousKeyframe
+      Keyframes: addKeyframe, deleteKeyframes, removeAllKeyframesFromClip,
+                 nextKeyframe, previousKeyframe
       Rating: favorite, reject, unrate
       Range: setRangeStart, setRangeEnd, clearRange, setClipRange
       Clip Ops: solo, disable, createCompoundClip, autoReframe, detachAudio,

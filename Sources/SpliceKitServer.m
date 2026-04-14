@@ -51,6 +51,7 @@
 
 // Forward declaration — the actual implementation lives further down in the file
 void SpliceKit_installEffectDragSwizzlesNow(void);
+BOOL SpliceKit_removeChannelKeyframes(id channel);
 
 #define SPLICEKIT_TCP_PORT 9876
 
@@ -61,6 +62,9 @@ static NSDictionary *SpliceKit_sendAppAction(NSString *selectorName);
 static NSDictionary *SpliceKit_sendPlayerAction(NSString *selectorName);
 id SpliceKit_getActiveTimelineModule(void);
 static id SpliceKit_getEditorContainer(void);
+static id SpliceKit_getSelectedClipEffectStack(id timeline, id *outClip);
+static id SpliceKit_getClipAudioEffectStack(id clip);
+static NSDictionary *SpliceKit_removeAllKeyframesFromEffectStack(id effectStack, NSString *actionName);
 
 static void SpliceKit_searchLayerTreeForMeterPeak(CALayer *layer,
                                                   Class meterLayerClass,
@@ -2715,6 +2719,79 @@ NSDictionary *SpliceKit_handleTimelineAction(NSDictionary *params) {
             }
         });
         return allResult ?: @{@"error": @"Failed to add transitions to all clips"};
+    }
+
+    if ([action isEqualToString:@"removeAllKeyframesFromClip"]) {
+        __block NSDictionary *clearResult = nil;
+        SpliceKit_executeOnMainThread(^{
+            @try {
+                id timelineModule = SpliceKit_getActiveTimelineModule();
+                if (!timelineModule) {
+                    clearResult = @{@"error": @"No active timeline module"};
+                    return;
+                }
+
+                BOOL autoSelected = NO;
+                id clip = nil;
+                id effectStack = SpliceKit_getSelectedClipEffectStack(timelineModule, &clip);
+                if (!clip) {
+                    SEL selectAtPlayhead = NSSelectorFromString(@"selectClipAtPlayhead:");
+                    if ([timelineModule respondsToSelector:selectAtPlayhead]) {
+                        ((void (*)(id, SEL, id))objc_msgSend)(timelineModule, selectAtPlayhead, nil);
+                    } else {
+                        [[NSApplication sharedApplication] sendAction:selectAtPlayhead to:nil from:nil];
+                    }
+                    autoSelected = YES;
+                    [[NSRunLoop currentRunLoop] runUntilDate:
+                        [NSDate dateWithTimeIntervalSinceNow:0.05]];
+                    effectStack = SpliceKit_getSelectedClipEffectStack(timelineModule, &clip);
+                }
+
+                if (!clip) {
+                    clearResult = @{@"error": @"No clip selected and none found at playhead"};
+                    return;
+                }
+
+                id audioEffectStack = SpliceKit_getClipAudioEffectStack(clip);
+                NSDictionary *videoResult = SpliceKit_removeAllKeyframesFromEffectStack(
+                    effectStack, @"Remove All Keyframes");
+                NSDictionary *audioResult = nil;
+                if (audioEffectStack && audioEffectStack != effectStack) {
+                    audioResult = SpliceKit_removeAllKeyframesFromEffectStack(
+                        audioEffectStack, @"Remove All Keyframes");
+                }
+
+                NSUInteger channelsCleared = [videoResult[@"channelsCleared"] unsignedIntegerValue]
+                    + [audioResult[@"channelsCleared"] unsignedIntegerValue];
+                NSUInteger keyframesRemoved = [videoResult[@"keyframesRemoved"] unsignedIntegerValue]
+                    + [audioResult[@"keyframesRemoved"] unsignedIntegerValue];
+
+                NSMutableDictionary *payload = [@{
+                    @"action": @"removeAllKeyframesFromClip",
+                    @"status": @"ok",
+                    @"channelsCleared": @(channelsCleared),
+                    @"keyframesRemoved": @(keyframesRemoved),
+                    @"autoSelected": @(autoSelected),
+                    @"video": videoResult ?: @{},
+                } mutableCopy];
+
+                if (audioResult) payload[@"audio"] = audioResult;
+                @try {
+                    if ([clip respondsToSelector:@selector(displayName)]) {
+                        id name = ((id (*)(id, SEL))objc_msgSend)(clip, @selector(displayName));
+                        if (name) payload[@"clipName"] = [name description];
+                    }
+                } @catch (NSException *e) {}
+
+                if (channelsCleared == 0) {
+                    payload[@"note"] = @"No keyframed channels found on the selected clip";
+                }
+                clearResult = payload;
+            } @catch (NSException *e) {
+                clearResult = @{@"error": [NSString stringWithFormat:@"Exception: %@", e.reason]};
+            }
+        });
+        return clearResult ?: @{@"error": @"Failed to remove keyframes from clip"};
     }
 
     // === Toggle Mute Audio ===
@@ -12434,6 +12511,135 @@ static id SpliceKit_getSelectedClipEffectStack(id timeline, id *outClip) {
     return nil;
 }
 
+static id SpliceKit_getClipAudioEffectStack(id clip) {
+    if (!clip) return nil;
+    @try {
+        SEL aeSel = NSSelectorFromString(@"audioEffectsForIdentifier:");
+        if ([clip respondsToSelector:aeSel]) {
+            return ((id (*)(id, SEL, unsigned long long))objc_msgSend)(clip, aeSel, 0ULL);
+        }
+    } @catch (NSException *e) {}
+    return nil;
+}
+
+static void SpliceKit_collectKeyframedChannelsFromNode(id obj,
+                                                       NSMutableArray *channels,
+                                                       NSMutableSet<NSString *> *seen,
+                                                       NSInteger depth) {
+    if (!obj || depth > 10) return;
+
+    NSString *nodeKey = [NSString stringWithFormat:@"%p", (__bridge void *)obj];
+    if ([seen containsObject:nodeKey]) return;
+    [seen addObject:nodeKey];
+
+    @try {
+        SEL countSel = NSSelectorFromString(@"keyframeCount");
+        if ([obj respondsToSelector:countSel]) {
+            NSInteger keyframeCount = ((NSInteger (*)(id, SEL))objc_msgSend)(obj, countSel);
+            if (keyframeCount > 0) [channels addObject:obj];
+        }
+    } @catch (NSException *e) {}
+
+    NSArray<NSString *> *arraySelectors = @[@"channels", @"visibleEffects"];
+    for (NSString *selName in arraySelectors) {
+        @try {
+            SEL sel = NSSelectorFromString(selName);
+            if (![obj respondsToSelector:sel]) continue;
+            id value = ((id (*)(id, SEL))objc_msgSend)(obj, sel);
+            if (![value isKindOfClass:[NSArray class]]) continue;
+            for (id child in (NSArray *)value) {
+                SpliceKit_collectKeyframedChannelsFromNode(child, channels, seen, depth + 1);
+            }
+        } @catch (NSException *e) {}
+    }
+
+    NSArray<NSString *> *childSelectors = @[
+        @"intrinsicChannels",
+        @"intrinsicCompositeEffect",
+        @"xform3DEffect",
+        @"cropEffect",
+        @"audioLevelChannel",
+        @"positionChannel3D",
+        @"scaleChannel3D",
+        @"rotationChannel3D",
+        @"anchorChannel3D",
+        @"opacityChannel",
+        @"blendModeChannel",
+        @"xChannel",
+        @"yChannel",
+        @"zChannel",
+        @"leftChannel",
+        @"rightChannel",
+        @"topChannel",
+        @"bottomChannel"
+    ];
+    for (NSString *selName in childSelectors) {
+        @try {
+            SEL sel = NSSelectorFromString(selName);
+            if (![obj respondsToSelector:sel]) continue;
+            id child = ((id (*)(id, SEL))objc_msgSend)(obj, sel);
+            if (!child) continue;
+            if ([child isKindOfClass:[NSArray class]]) {
+                for (id item in (NSArray *)child) {
+                    SpliceKit_collectKeyframedChannelsFromNode(item, channels, seen, depth + 1);
+                }
+            } else {
+                SpliceKit_collectKeyframedChannelsFromNode(child, channels, seen, depth + 1);
+            }
+        } @catch (NSException *e) {}
+    }
+}
+
+static NSDictionary *SpliceKit_removeAllKeyframesFromEffectStack(id effectStack, NSString *actionName) {
+    if (!effectStack) {
+        return @{@"channelsCleared": @0, @"keyframesRemoved": @0};
+    }
+
+    NSMutableArray *channels = [NSMutableArray array];
+    NSMutableSet<NSString *> *seen = [NSMutableSet set];
+    SpliceKit_collectKeyframedChannelsFromNode(effectStack, channels, seen, 0);
+
+    if (channels.count == 0) {
+        return @{@"channelsCleared": @0, @"keyframesRemoved": @0};
+    }
+
+    @try {
+        SEL beginSel = NSSelectorFromString(@"actionBegin:animationHint:deferUpdates:");
+        if ([effectStack respondsToSelector:beginSel]) {
+            ((void (*)(id, SEL, id, id, BOOL))objc_msgSend)(
+                effectStack, beginSel, actionName ?: @"Remove All Keyframes", nil, YES);
+        }
+    } @catch (NSException *e) {}
+
+    NSUInteger channelsCleared = 0;
+    NSUInteger keyframesRemoved = 0;
+    for (id channel in channels) {
+        @try {
+            SEL countSel = NSSelectorFromString(@"keyframeCount");
+            NSInteger count = [channel respondsToSelector:countSel]
+                ? ((NSInteger (*)(id, SEL))objc_msgSend)(channel, countSel) : 0;
+            if (count <= 0) continue;
+            if (SpliceKit_removeChannelKeyframes(channel)) {
+                channelsCleared++;
+                keyframesRemoved += (NSUInteger)count;
+            }
+        } @catch (NSException *e) {}
+    }
+
+    @try {
+        SEL endSel = NSSelectorFromString(@"actionEnd:save:error:");
+        if ([effectStack respondsToSelector:endSel]) {
+            ((void (*)(id, SEL, id, BOOL, id))objc_msgSend)(
+                effectStack, endSel, actionName ?: @"Remove All Keyframes", YES, nil);
+        }
+    } @catch (NSException *e) {}
+
+    return @{
+        @"channelsCleared": @(channelsCleared),
+        @"keyframesRemoved": @(keyframesRemoved),
+    };
+}
+
 // Read a channel's value at a given time (seconds)
 static NSDictionary *SpliceKit_readChannel(id channel, double timeSeconds) {
     if (!channel) return nil;
@@ -12602,6 +12808,34 @@ BOOL SpliceKit_setChannelValueAtTime(id channel, double value, SpliceKit_CMTime 
 BOOL SpliceKit_setChannelValue(id channel, double value) {
     SpliceKit_CMTime t = {0, 0, 17, 0}; // kCMTimeIndefinite
     return SpliceKit_setChannelValueAtTime(channel, value, t);
+}
+
+// Static mixer drags need the same channel operation bracketing FCP uses for live edits,
+// otherwise playback can cache the old gain until transport is restarted.
+BOOL SpliceKit_mixerSetStaticChannelValue(id channel, double value) {
+    if (!channel) return NO;
+
+    BOOL beganOperation = NO;
+    @try {
+        SEL beginSel = NSSelectorFromString(@"operationBegin");
+        if ([channel respondsToSelector:beginSel]) {
+            ((void (*)(id, SEL))objc_msgSend)(channel, beginSel);
+            beganOperation = YES;
+        }
+    } @catch (NSException *e) {}
+
+    // Match FCP's own control flow: touch the current value before updating.
+    (void)SpliceKit_channelValue(channel);
+    BOOL ok = SpliceKit_setChannelValue(channel, value);
+
+    @try {
+        SEL endSel = NSSelectorFromString(@"operationEnd");
+        if (beganOperation && [channel respondsToSelector:endSel]) {
+            ((void (*)(id, SEL))objc_msgSend)(channel, endSel);
+        }
+    } @catch (NSException *e) {}
+
+    return ok;
 }
 
 // Helper: get sub-channel by name (xChannel, yChannel, zChannel)
@@ -13261,6 +13495,19 @@ BOOL SpliceKit_mixerWriteAutomationPoint(id clip, id channel, double value) {
     return ok;
 }
 
+static NSNumber *SpliceKit_mixerJSONDBNumber(double db, double floorDB);
+static NSNumber *SpliceKit_mixerJSONDBNumberFromLinear(double linear, double floorDB);
+static NSArray<NSDictionary *> *SpliceKit_mixerRecordDebugState(NSDictionary *state);
+void SpliceKit_installMixerSkimHooks(void);
+
+static BOOL sMixerSkimmingLatched = NO;
+static CFAbsoluteTime sMixerLastSkimBeginTime = 0;
+static CFAbsoluteTime sMixerLastSkimEndTime = 0;
+static CFAbsoluteTime sMixerLastSkimUpdateTime = 0;
+static IMP sOrigFFPlayerBeginSkimming = NULL;
+static IMP sOrigFFPlayerEndSkimming = NULL;
+static IMP sOrigTimelineHandlerDidUpdateSkimming = NULL;
+
 static void SpliceKit_readVolume(id clip, id effectStack, NSMutableDictionary *out) {
     if (!clip && !effectStack) return;
 
@@ -13281,7 +13528,7 @@ static void SpliceKit_readVolume(id clip, id effectStack, NSMutableDictionary *o
                             SpliceKit_CMTime localTime = SpliceKit_clipLocalTime(clip, sMixerPlayheadTime, sMixerContainer);
                             double linear = SpliceKit_channelValueAtTime(volChan, localTime);
                             out[@"volumeLinear"] = @(linear);
-                            out[@"volumeDB"] = (linear > 0) ? @(20.0 * log10(linear)) : @(-INFINITY);
+                            out[@"volumeDB"] = SpliceKit_mixerJSONDBNumberFromLinear(linear, -96.0);
                             return;
                         }
                     }
@@ -13300,13 +13547,114 @@ static void SpliceKit_readVolume(id clip, id effectStack, NSMutableDictionary *o
                     SpliceKit_CMTime localTime = SpliceKit_clipLocalTime(clip, sMixerPlayheadTime, sMixerContainer);
                     double linear = SpliceKit_channelValueAtTime(volChan, localTime);
                     out[@"volumeLinear"] = @(linear);
-                    out[@"volumeDB"] = (linear > 0) ? @(20.0 * log10(linear)) : @(-INFINITY);
+                    out[@"volumeDB"] = SpliceKit_mixerJSONDBNumberFromLinear(linear, -96.0);
                     out[@"volumeChannelHandle"] = SpliceKit_storeHandle(volChan);
                     return;
                 }
             }
         } @catch (NSException *e) {}
     }
+}
+
+static NSNumber *SpliceKit_mixerJSONDBNumber(double db, double floorDB) {
+    if (!isfinite(db) || db < floorDB) db = floorDB;
+    return @(db);
+}
+
+static NSNumber *SpliceKit_mixerJSONDBNumberFromLinear(double linear, double floorDB) {
+    if (!isfinite(linear) || linear <= 0.000001) return @(floorDB);
+    double db = 20.0 * log10(linear);
+    if (!isfinite(db) || db < floorDB) db = floorDB;
+    return @(db);
+}
+
+static void SpliceKit_swizzled_FFPlayer_beginSkimming(id self, SEL _cmd) {
+    sMixerSkimmingLatched = YES;
+    sMixerLastSkimBeginTime = CFAbsoluteTimeGetCurrent();
+    sMixerLastSkimUpdateTime = sMixerLastSkimBeginTime;
+    SpliceKit_log(@"[MixerSkim] beginSkimming");
+    if (sOrigFFPlayerBeginSkimming) {
+        ((void (*)(id, SEL))sOrigFFPlayerBeginSkimming)(self, _cmd);
+    }
+}
+
+static void SpliceKit_swizzled_FFPlayer_endSkimming(id self, SEL _cmd) {
+    sMixerSkimmingLatched = NO;
+    sMixerLastSkimEndTime = CFAbsoluteTimeGetCurrent();
+    SpliceKit_log(@"[MixerSkim] endSkimming");
+    if (sOrigFFPlayerEndSkimming) {
+        ((void (*)(id, SEL))sOrigFFPlayerEndSkimming)(self, _cmd);
+    }
+}
+
+static void SpliceKit_swizzled_Timeline_handlerDidUpdateSkimming(id self, SEL _cmd, id info) {
+    sMixerLastSkimUpdateTime = CFAbsoluteTimeGetCurrent();
+    if (sOrigTimelineHandlerDidUpdateSkimming) {
+        ((void (*)(id, SEL, id))sOrigTimelineHandlerDidUpdateSkimming)(self, _cmd, info);
+    }
+}
+
+void SpliceKit_installMixerSkimHooks(void) {
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        Class playerCls = NSClassFromString(@"FFPlayer");
+        if (playerCls) {
+            Method beginMethod = class_getInstanceMethod(playerCls, @selector(beginSkimming));
+            if (beginMethod && !sOrigFFPlayerBeginSkimming) {
+                sOrigFFPlayerBeginSkimming = SpliceKit_swizzleMethod(
+                    playerCls, @selector(beginSkimming), (IMP)SpliceKit_swizzled_FFPlayer_beginSkimming);
+            }
+            Method endMethod = class_getInstanceMethod(playerCls, @selector(endSkimming));
+            if (endMethod && !sOrigFFPlayerEndSkimming) {
+                sOrigFFPlayerEndSkimming = SpliceKit_swizzleMethod(
+                    playerCls, @selector(endSkimming), (IMP)SpliceKit_swizzled_FFPlayer_endSkimming);
+            }
+        }
+
+        Class timelineCls = NSClassFromString(@"FFAnchoredTimelineModule");
+        SEL updateSel = NSSelectorFromString(@"handlerDidUpdateSkimming:");
+        if (timelineCls && class_getInstanceMethod(timelineCls, updateSel) && !sOrigTimelineHandlerDidUpdateSkimming) {
+            sOrigTimelineHandlerDidUpdateSkimming = SpliceKit_swizzleMethod(
+                timelineCls, updateSel, (IMP)SpliceKit_swizzled_Timeline_handlerDidUpdateSkimming);
+        }
+
+        SpliceKit_log(@"[MixerSkim] Hooks installed: begin=%@ end=%@ update=%@",
+                      sOrigFFPlayerBeginSkimming ? @"yes" : @"no",
+                      sOrigFFPlayerEndSkimming ? @"yes" : @"no",
+                      sOrigTimelineHandlerDidUpdateSkimming ? @"yes" : @"no");
+    });
+}
+
+static NSArray<NSDictionary *> *SpliceKit_mixerRecordDebugState(NSDictionary *state) {
+    static NSMutableArray<NSDictionary *> *history = nil;
+    static NSString *lastSignature = nil;
+
+    if (!history) history = [NSMutableArray array];
+    if (![state isKindOfClass:[NSDictionary class]]) return [history copy];
+
+    double roundedTime = floor([state[@"activeTimeSeconds"] doubleValue] * 4.0) / 4.0;
+    NSString *signature = [NSString stringWithFormat:@"%@|%@|%@|%@|%@|%@|%@|%.2f",
+                           state[@"toolSkimming"] ?: @NO,
+                           state[@"transportPlaying"] ?: @NO,
+                           state[@"meteringLive"] ?: @NO,
+                           state[@"usedPlayerMetering"] ?: @NO,
+                           state[@"usedLayerFallback"] ?: @NO,
+                           state[@"skimmedRole"] ?: @"",
+                           state[@"skimmedName"] ?: @"",
+                           roundedTime];
+    if ([lastSignature isEqualToString:signature]) {
+        return [history copy];
+    }
+
+    lastSignature = [signature copy];
+    NSMutableDictionary *entry = [state mutableCopy];
+    entry[@"wallTime"] = @([[NSDate date] timeIntervalSince1970]);
+    entry[@"roundedActiveTimeSeconds"] = @(roundedTime);
+    [history addObject:entry];
+    while (history.count > 20) {
+        [history removeObjectAtIndex:0];
+    }
+    return [history copy];
 }
 
 // Helper: read audio role info from a clip — returns name and color.
@@ -13457,6 +13805,54 @@ NSDictionary *SpliceKit_handleMixerGetState(NSDictionary *params) {
                 transportRate = ((double (*)(id, SEL))objc_msgSend)(timelinePlayer, rateSel);
             }
 
+            BOOL toolSkimming = NO;
+            BOOL rawToolSkimming = NO;
+            id skimmedItem = nil;
+            NSString *skimmedRole = nil;
+            NSString *skimmedName = nil;
+            double activeTimeSec = playheadSec;
+            if (!transportPlaying) {
+                CFTimeInterval now = CFAbsoluteTimeGetCurrent();
+                SEL isToolSkimmingSel = NSSelectorFromString(@"isToolSkimming");
+                if ([timeline respondsToSelector:isToolSkimmingSel]) {
+                    rawToolSkimming = ((BOOL (*)(id, SEL))objc_msgSend)(timeline, isToolSkimmingSel);
+                }
+                BOOL recentlyUpdatedSkimming = (sMixerLastSkimUpdateTime > 0) && ((now - sMixerLastSkimUpdateTime) < 0.35);
+                toolSkimming = rawToolSkimming || sMixerSkimmingLatched || recentlyUpdatedSkimming;
+                if (toolSkimming) {
+                    SEL skimmingTimeSel = NSSelectorFromString(@"skimmingTime");
+                    if ([timeline respondsToSelector:skimmingTimeSel]) {
+                        SpliceKit_CMTime skimTime = ((SpliceKit_CMTime (*)(id, SEL))STRET_MSG)(timeline, skimmingTimeSel);
+                        if (skimTime.timescale > 0) {
+                            activeTimeSec = (double)skimTime.value / skimTime.timescale;
+                        }
+                    }
+                    SEL skimmingItemSel = NSSelectorFromString(@"skimmingItem");
+                    if ([timeline respondsToSelector:skimmingItemSel]) {
+                        skimmedItem = ((id (*)(id, SEL))objc_msgSend)(timeline, skimmingItemSel);
+                    }
+                    if (!skimmedItem) {
+                        SEL skimmingItemComponentSel = NSSelectorFromString(@"skimmingItemComponent");
+                        if ([timeline respondsToSelector:skimmingItemComponentSel]) {
+                            skimmedItem = ((id (*)(id, SEL))objc_msgSend)(timeline, skimmingItemComponentSel);
+                        }
+                    }
+                    if (skimmedItem) {
+                        skimmedRole = SpliceKit_readClipRole(skimmedItem);
+                        if ([skimmedItem respondsToSelector:@selector(displayName)]) {
+                            id skimNameObj = ((id (*)(id, SEL))objc_msgSend)(skimmedItem, @selector(displayName));
+                            if ([skimNameObj isKindOfClass:[NSString class]]) {
+                                skimmedName = skimNameObj;
+                            }
+                        }
+                    }
+                }
+            }
+            else if (sMixerSkimmingLatched) {
+                sMixerSkimmingLatched = NO;
+                sMixerLastSkimEndTime = CFAbsoluteTimeGetCurrent();
+            }
+
             // Get spine items
             id spineItems = nil;
             if ([primaryObj respondsToSelector:@selector(containedItems)]) {
@@ -13573,7 +13969,7 @@ NSDictionary *SpliceKit_handleMixerGetState(NSDictionary *params) {
                     if (![clip[@"role"] isEqualToString:role]) continue;
                     double s = [clip[@"start"] doubleValue];
                     double e = [clip[@"end"] doubleValue];
-                    if (playheadSec >= s - 0.001 && playheadSec <= e + 0.001) {
+                    if (activeTimeSec >= s - 0.001 && activeTimeSec <= e + 0.001) {
                         bestClip = clip[@"item"];
                         bestStart = s;
                         bestEnd = e;
@@ -13636,6 +14032,37 @@ NSDictionary *SpliceKit_handleMixerGetState(NSDictionary *params) {
                 faderIdx++;
             }
 
+            if (toolSkimming && skimmedItem && skimmedRole.length == 0) {
+                for (NSDictionary *clip in allClips) {
+                    if (clip[@"item"] == skimmedItem) {
+                        skimmedRole = clip[@"role"];
+                        if (skimmedName.length == 0 && [clip[@"item"] respondsToSelector:@selector(displayName)]) {
+                            id skimNameObj = ((id (*)(id, SEL))objc_msgSend)(clip[@"item"], @selector(displayName));
+                            if ([skimNameObj isKindOfClass:[NSString class]]) {
+                                skimmedName = skimNameObj;
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
+
+            if (!transportPlaying && toolSkimming && skimmedRole.length > 0) {
+                for (NSMutableDictionary *fader in indexed) {
+                    BOOL roleMatches = [fader[@"role"] isEqualToString:skimmedRole];
+                    fader[@"playing"] = @(roleMatches);
+                    if (roleMatches && skimmedName.length > 0) {
+                        fader[@"name"] = skimmedName;
+                    }
+                }
+            }
+
+            BOOL meteringLive = NO;
+            BOOL usedPlayerMetering = NO;
+            BOOL usedLayerFallback = NO;
+            double layerFallbackPeak = 0.0;
+            BOOL playerMeteringEnabled = NO;
+
             // Audio metering: call FFPlayer.meterAudioLevelsForRole: directly.
             // The C++ FFAudioPlayer has a metering enable byte at offset 291 that gates
             // all level reporting. We flip it to 1 so metering works without the Audio
@@ -13645,35 +14072,27 @@ NSDictionary *SpliceKit_handleMixerGetState(NSDictionary *params) {
                 if ([timeline respondsToSelector:@selector(player)])
                     player = ((id (*)(id, SEL))objc_msgSend)(timeline, @selector(player));
 
-                if (player) {
+                if (player && (transportPlaying || toolSkimming)) {
+                    playerMeteringEnabled = YES;
                     // Enable metering on the C++ FFAudioPlayer (byte at offset 291)
                     Ivar apIvar = class_getInstanceVariable([player class], "_audioPlayer");
                     void *audioPlayer = NULL;
-                    uint8_t enableBefore = 0;
-                    uint64_t hooksMapPtr = 0;
                     if (apIvar) {
                         audioPlayer = *(void **)((char *)(__bridge void *)player + ivar_getOffset(apIvar));
                         if (audioPlayer) {
-                            enableBefore = *(uint8_t *)((char *)audioPlayer + 291);
-                            hooksMapPtr = *(uint64_t *)((char *)audioPlayer + 216);
                             *(uint8_t *)((char *)audioPlayer + 291) = 1;
                         }
                     }
 
-                    // Call meterAudioLevelsForRole: for each playing fader's role
                     SEL meterSel = NSSelectorFromString(@"meterAudioLevelsForRole:channels:peakValues:loudnessValues:");
                     typedef struct { float a, b, c, d; } LoudnessValues;
 
                     if ([player respondsToSelector:meterSel]) {
                         for (NSMutableDictionary *fader in indexed) {
-                            if (![fader[@"playing"] boolValue]) continue;
-
-                            // Get the clip's audioRoleIdentifier — this is the string FCP uses
                             id clipHandle = fader[@"clipHandle"];
                             id clip = clipHandle ? SpliceKit_resolveHandle(clipHandle) : nil;
                             if (!clip) continue;
 
-                            // Try multiple role identifier formats
                             NSMutableArray *candidates = [NSMutableArray array];
                             @try {
                                 SEL ariSel = NSSelectorFromString(@"audioRoleIdentifier");
@@ -13682,13 +14101,11 @@ NSDictionary *SpliceKit_handleMixerGetState(NSDictionary *params) {
                                     if (ari) [candidates addObject:ari];
                                 }
                             } @catch (NSException *e) {}
-                            // Also try the display role name
+
                             NSString *roleName = fader[@"role"];
                             if (roleName) [candidates addObject:roleName];
 
                             float maxPeak = 0;
-                            NSString *matchedUID = nil;
-                            unsigned int matchedCh = 0;
                             for (id roleUID in candidates) {
                                 if (maxPeak > 0) break;
                                 float peakValues[32] = {0};
@@ -13696,8 +14113,6 @@ NSDictionary *SpliceKit_handleMixerGetState(NSDictionary *params) {
                                 @try {
                                     unsigned int filled = ((unsigned int (*)(id, SEL, id, unsigned int, float *, LoudnessValues *))objc_msgSend)(
                                         player, meterSel, roleUID, 32, peakValues, &loudness);
-                                    matchedCh = filled;
-                                    matchedUID = roleUID;
                                     for (unsigned int ch = 0; ch < filled && ch < 32; ch++) {
                                         if (peakValues[ch] > maxPeak) maxPeak = peakValues[ch];
                                     }
@@ -13709,7 +14124,12 @@ NSDictionary *SpliceKit_handleMixerGetState(NSDictionary *params) {
                                 double ratio = (dB + 96.0) / 102.0;
                                 if (ratio < 0) ratio = 0;
                                 if (ratio > 1) ratio = 1;
+                                fader[@"meterLinear"] = @(maxPeak);
+                                fader[@"meterDB"] = @(dB);
                                 fader[@"meterPeak"] = @(ratio);
+                                fader[@"meterClipping"] = @((maxPeak >= 0.995f) || (dB >= -0.1));
+                                meteringLive = YES;
+                                usedPlayerMetering = YES;
                             }
                         }
                     }
@@ -13721,8 +14141,14 @@ NSDictionary *SpliceKit_handleMixerGetState(NSDictionary *params) {
             // as well as the full Audio Meters panel if open.
             @try {
                 BOOL anyMeter = NO;
-                for (NSDictionary *f in indexed) { if (f[@"meterPeak"]) { anyMeter = YES; break; } }
-                if (!anyMeter) {
+                for (NSDictionary *f in indexed) {
+                    if ([f[@"meterPeak"] doubleValue] > 0.0001) {
+                        anyMeter = YES;
+                        break;
+                    }
+                }
+                BOOL shouldUseLayerFallback = transportPlaying || toolSkimming;
+                if (!anyMeter && shouldUseLayerFallback) {
                     Class mlc = NSClassFromString(@"PEMeterLayer");
                     Ivar mrIvar = mlc ? class_getInstanceVariable(mlc, "_maskRatio") : NULL;
                     if (mlc && mrIvar) {
@@ -13735,23 +14161,79 @@ NSDictionary *SpliceKit_handleMixerGetState(NSDictionary *params) {
                             if (rootLayer) {
                                 SpliceKit_searchLayerTreeForMeterPeak(rootLayer, mlc, off, &maxPeak);
                             }
-                            if (maxPeak > 0.001) break; // Found active meters
+                            if (maxPeak > 0.001) break;
                         }
 
                         if (maxPeak > 0.001) {
-                            double totalVol = 0;
-                            for (NSMutableDictionary *f in indexed)
-                                if ([f[@"playing"] boolValue]) totalVol += [f[@"volumeLinear"] doubleValue];
-                            for (NSMutableDictionary *f in indexed) {
-                                if ([f[@"playing"] boolValue]) {
-                                    double share = (totalVol > 0) ? [f[@"volumeLinear"] doubleValue] / totalVol : 1.0;
-                                    f[@"meterPeak"] = @(maxPeak * fmin(share * 1.5, 1.0));
+                            usedLayerFallback = YES;
+                            layerFallbackPeak = maxPeak;
+                            if (!transportPlaying && toolSkimming) {
+                                BOOL matchedSpecificSkimTarget = NO;
+                                for (NSMutableDictionary *f in indexed) {
+                                    BOOL roleMatches = NO;
+                                    if (skimmedRole.length > 0) {
+                                        roleMatches = [f[@"role"] isEqualToString:skimmedRole];
+                                    } else if (skimmedName.length > 0) {
+                                        roleMatches = [f[@"name"] isEqualToString:skimmedName];
+                                    }
+                                    if (roleMatches) matchedSpecificSkimTarget = YES;
+                                    if (roleMatches) {
+                                        f[@"meterPeak"] = @(maxPeak);
+                                        f[@"meterLinear"] = @(maxPeak);
+                                        f[@"meterDB"] = @((20.0 * log10(fmax(maxPeak, 0.000001))));
+                                        f[@"meterClipping"] = @(maxPeak >= 0.98);
+                                    } else {
+                                        f[@"meterPeak"] = @(0.0);
+                                        f[@"meterLinear"] = @(0.0);
+                                        f[@"meterDB"] = @(-96.0);
+                                        f[@"meterClipping"] = @NO;
+                                    }
+                                }
+                                if (!matchedSpecificSkimTarget) {
+                                    double totalVol = 0;
+                                    for (NSMutableDictionary *f in indexed) {
+                                        if ([f[@"playing"] boolValue]) totalVol += [f[@"volumeLinear"] doubleValue];
+                                    }
+                                    for (NSMutableDictionary *f in indexed) {
+                                        if ([f[@"playing"] boolValue]) {
+                                            double share = (totalVol > 0) ? [f[@"volumeLinear"] doubleValue] / totalVol : 1.0;
+                                            double ratio = maxPeak * fmin(share * 1.5, 1.0);
+                                            f[@"meterPeak"] = @(ratio);
+                                            f[@"meterLinear"] = @(maxPeak);
+                                            f[@"meterDB"] = @(ratio * 102.0 - 96.0);
+                                            f[@"meterClipping"] = @(maxPeak >= 0.98);
+                                        }
+                                    }
+                                }
+                            } else {
+                                double totalVol = 0;
+                                for (NSMutableDictionary *f in indexed)
+                                    if ([f[@"playing"] boolValue]) totalVol += [f[@"volumeLinear"] doubleValue];
+                                for (NSMutableDictionary *f in indexed) {
+                                    if ([f[@"playing"] boolValue]) {
+                                        double share = (totalVol > 0) ? [f[@"volumeLinear"] doubleValue] / totalVol : 1.0;
+                                        double ratio = maxPeak * fmin(share * 1.5, 1.0);
+                                        f[@"meterPeak"] = @(ratio);
+                                        f[@"meterLinear"] = @(maxPeak);
+                                        f[@"meterDB"] = @(ratio * 102.0 - 96.0);
+                                        f[@"meterClipping"] = @(maxPeak >= 0.98);
+                                    }
                                 }
                             }
+                            meteringLive = YES;
                         }
                     }
                 }
             } @catch (NSException *e) {}
+
+            if (!meteringLive) {
+                for (NSMutableDictionary *fader in indexed) {
+                    fader[@"meterLinear"] = @(0.0);
+                    fader[@"meterDB"] = @(-96.0);
+                    fader[@"meterPeak"] = @(0.0);
+                    fader[@"meterClipping"] = @NO;
+                }
+            }
 
             NSMutableDictionary *masterFader = nil;
             @try {
@@ -13766,10 +14248,14 @@ NSDictionary *SpliceKit_handleMixerGetState(NSDictionary *params) {
                     if (!isfinite(masterDB) || masterDB < -96.0) masterDB = -96.0;
 
                     double masterPeak = 0.0;
+                    BOOL masterClipping = NO;
                     for (NSDictionary *fader in indexed) {
                         double peak = [fader[@"meterPeak"] doubleValue];
                         if (peak > masterPeak) masterPeak = peak;
+                        if ([fader[@"meterClipping"] boolValue]) masterClipping = YES;
                     }
+
+                    double masterMeterDB = masterPeak * 102.0 - 96.0;
 
                     masterFader = [@{
                         @"handle": SpliceKit_storeHandle(audioDest) ?: @"",
@@ -13779,8 +14265,11 @@ NSDictionary *SpliceKit_handleMixerGetState(NSDictionary *params) {
                         @"volumeDB": @(masterDB),
                         @"minDB": @(-96.0),
                         @"maxDB": @(0.0),
+                        @"meterLinear": @(masterPeak),
+                        @"meterDB": @(masterMeterDB),
                         @"meterPeak": @(masterPeak),
-                        @"playing": @(transportPlaying)
+                        @"meterClipping": @(masterClipping),
+                        @"playing": @(transportPlaying || meteringLive)
                     } mutableCopy];
                 }
             } @catch (NSException *e) {}
@@ -13789,6 +14278,7 @@ NSDictionary *SpliceKit_handleMixerGetState(NSDictionary *params) {
                 @"playheadSeconds": @(playheadSec),
                 @"playheadTime": SpliceKit_serializeCMTime(playhead),
                 @"isPlaying": @(transportPlaying),
+                @"isMeteringLive": @(meteringLive),
                 @"playbackRate": @(transportRate),
                 @"frameRate": @(frameRate),
                 @"faders": indexed,
@@ -13796,6 +14286,28 @@ NSDictionary *SpliceKit_handleMixerGetState(NSDictionary *params) {
                 @"totalRoles": @(roleOrder.count),
                 @"roles": [roleOrder array]
             } mutableCopy];
+            NSMutableDictionary *debugPayload = [@{
+                @"buildStamp": [NSString stringWithFormat:@"%s %s", __DATE__, __TIME__],
+                @"toolSkimming": @(toolSkimming),
+                @"rawToolSkimming": @(rawToolSkimming),
+                @"latchedSkimming": @(sMixerSkimmingLatched),
+                @"skimmedRole": skimmedRole ?: @"",
+                @"skimmedName": skimmedName ?: @"",
+                @"skimmedItemClass": skimmedItem ? NSStringFromClass([skimmedItem class]) : @"",
+                @"activeTimeSeconds": @(activeTimeSec),
+                @"transportPlaying": @(transportPlaying),
+                @"playbackRate": @(transportRate),
+                @"meteringLive": @(meteringLive),
+                @"playerMeteringEnabled": @(playerMeteringEnabled),
+                @"usedPlayerMetering": @(usedPlayerMetering),
+                @"usedLayerFallback": @(usedLayerFallback),
+                @"layerFallbackPeak": @(layerFallbackPeak),
+                @"secondsSinceSkimBegin": @(sMixerLastSkimBeginTime > 0 ? CFAbsoluteTimeGetCurrent() - sMixerLastSkimBeginTime : -1),
+                @"secondsSinceSkimEnd": @(sMixerLastSkimEndTime > 0 ? CFAbsoluteTimeGetCurrent() - sMixerLastSkimEndTime : -1),
+                @"secondsSinceSkimUpdate": @(sMixerLastSkimUpdateTime > 0 ? CFAbsoluteTimeGetCurrent() - sMixerLastSkimUpdateTime : -1),
+            } mutableCopy];
+            debugPayload[@"recentStates"] = SpliceKit_mixerRecordDebugState(debugPayload);
+            payload[@"debug"] = debugPayload;
             if (masterFader) payload[@"masterFader"] = masterFader;
             result = payload;
         } @catch (NSException *e) {
@@ -13838,22 +14350,13 @@ static NSDictionary *SpliceKit_handleMixerSetVolume(NSDictionary *params) {
 
             SpliceKit_removeChannelKeyframes(channel);
 
-            BOOL ok = SpliceKit_setChannelValue(channel, linear);
+            BOOL ok = SpliceKit_mixerSetStaticChannelValue(channel, linear);
             if (ok) {
-                // Force timeline/audio engine refresh so volume takes effect during playback
-                id timeline = SpliceKit_getActiveTimelineModule();
-                if (timeline) {
-                    id seq = nil;
-                    if ([timeline respondsToSelector:@selector(sequence)])
-                        seq = ((id (*)(id, SEL))objc_msgSend)(timeline, @selector(sequence));
-                    if (seq) SpliceKit_refreshTimeline(seq);
-                }
-
                 double readback = SpliceKit_channelValue(channel);
                 result = @{
                     @"ok": @YES,
                     @"volumeLinear": @(readback),
-                    @"volumeDB": (readback > 0) ? @(20.0 * log10(readback)) : @(-INFINITY)
+                    @"volumeDB": SpliceKit_mixerJSONDBNumberFromLinear(readback, -96.0)
                 };
             } else {
                 result = @{@"error": @"Failed to set channel value"};
@@ -14029,13 +14532,13 @@ static NSDictionary *SpliceKit_handleMixerSetAllVolumes(NSDictionary *params) {
                 if (linear > 3.98) linear = 3.98;
 
                 SpliceKit_removeChannelKeyframes(channel);
-                BOOL ok = SpliceKit_setChannelValue(channel, linear);
+                BOOL ok = SpliceKit_mixerSetStaticChannelValue(channel, linear);
                 double readback = ok ? SpliceKit_channelValue(channel) : 0;
                 [results addObject:@{
                     @"handle": handle,
                     @"ok": @(ok),
                     @"volumeLinear": @(readback),
-                    @"volumeDB": (readback > 0) ? @(20.0 * log10(readback)) : @(-INFINITY)
+                    @"volumeDB": SpliceKit_mixerJSONDBNumberFromLinear(readback, -96.0)
                 }];
             }
             result = @{@"ok": @YES, @"results": results};

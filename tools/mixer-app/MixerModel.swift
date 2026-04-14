@@ -3,7 +3,7 @@ import SwiftUI
 
 /// State for a single mixer fader.
 struct FaderState: Identifiable {
-    let id: Int               // 0-9
+    let id: Int // 0-9
     var clipHandle: String?
     var effectStackHandle: String?
     var volumeChannelHandle: String?
@@ -12,30 +12,31 @@ struct FaderState: Identifiable {
     var volumeDB: Double = -Double.infinity
     var volumeLinear: Double = 0
     var role: String?
-    var isActive: Bool = false // has a clip assigned
-    var isDragging: Bool = false // fader is being dragged
+    var roleColorHex: String?
+    var meterPeak: Double = 0
+    var isActive: Bool = false
+    var isPlaying: Bool = false
+    var isDragging: Bool = false
+    var minDB: Double = -96
+    var maxDB: Double = 12
 
     static func inactive(index: Int) -> FaderState {
         FaderState(id: index)
     }
 }
 
-enum MixerMode: String, CaseIterable {
-    case positional = "Positional"
-    case roles = "Roles"
-}
-
 /// Main model driving the mixer UI. Polls SpliceKit for clip state at the playhead.
 @MainActor
 class MixerModel: ObservableObject {
     @Published var faders: [FaderState] = (0..<10).map { FaderState.inactive(index: $0) }
-    @Published var mode: MixerMode = .positional
     @Published var isConnected = false
     @Published var lastError: String?
+    @Published var playheadSeconds = 0.0
+    @Published var frameRate = 0.0
+    @Published var isTransportPlaying = false
 
     let bridge = SpliceKitBridge()
     private var pollTimer: Timer?
-    private var lastPlayheadSeconds: Double = -1
 
     func start() {
         bridge.connect()
@@ -68,7 +69,6 @@ class MixerModel: ObservableObject {
             if isConnected {
                 isConnected = false
             }
-            // Try to reconnect
             bridge.connect()
             return
         }
@@ -76,6 +76,12 @@ class MixerModel: ObservableObject {
 
         do {
             let result = try await bridge.call("mixer.getState")
+            if let error = result["error"] as? String {
+                lastError = error
+                clearFaders()
+                return
+            }
+
             lastError = nil
             updateFaders(from: result)
         } catch {
@@ -86,57 +92,66 @@ class MixerModel: ObservableObject {
     private func updateFaders(from result: [String: Any]) {
         guard let faderData = result["faders"] as? [[String: Any]] else { return }
 
-        let playhead = result["playheadSeconds"] as? Double ?? 0
-        lastPlayheadSeconds = playhead
+        playheadSeconds = result["playheadSeconds"] as? Double ?? 0
+        frameRate = result["frameRate"] as? Double ?? 0
+        isTransportPlaying = result["isPlaying"] as? Bool ?? false
 
         var newFaders = (0..<10).map { FaderState.inactive(index: $0) }
 
         for dict in faderData {
             guard let index = dict["index"] as? Int, index < 10 else { continue }
 
-            // Don't update faders that are being dragged
             if faders[index].isDragging { continue }
 
-            var f = FaderState(id: index)
-            f.clipHandle = dict["clipHandle"] as? String
-            f.effectStackHandle = dict["effectStackHandle"] as? String
-            f.volumeChannelHandle = dict["volumeChannelHandle"] as? String
-            f.clipName = dict["name"] as? String ?? ""
-            f.lane = dict["lane"] as? Int ?? 0
-            f.role = dict["role"] as? String
-            f.isActive = true
+            var fader = FaderState(id: index)
+            fader.clipHandle = dict["clipHandle"] as? String
+            fader.effectStackHandle = dict["effectStackHandle"] as? String
+            fader.volumeChannelHandle = dict["volumeChannelHandle"] as? String
+            fader.clipName = dict["name"] as? String ?? ""
+            fader.lane = dict["lane"] as? Int ?? 0
+            fader.role = dict["role"] as? String
+            fader.roleColorHex = dict["roleColor"] as? String
+            fader.meterPeak = dict["meterPeak"] as? Double ?? 0
+            fader.isActive = true
+            fader.isPlaying = dict["playing"] as? Bool ?? false
+            fader.minDB = dict["minDB"] as? Double ?? -96
+            fader.maxDB = dict["maxDB"] as? Double ?? 12
 
             if let db = dict["volumeDB"] as? Double {
-                f.volumeDB = db
+                fader.volumeDB = db
             }
-            if let lin = dict["volumeLinear"] as? Double {
-                f.volumeLinear = lin
+            if let linear = dict["volumeLinear"] as? Double {
+                fader.volumeLinear = linear
             }
 
-            newFaders[index] = f
+            newFaders[index] = fader
         }
 
-        // Preserve dragging state
-        for i in 0..<10 {
-            if faders[i].isDragging {
-                newFaders[i] = faders[i]
-            }
+        for index in 0..<10 where faders[index].isDragging {
+            newFaders[index] = faders[index]
         }
 
         faders = newFaders
+    }
+
+    private func clearFaders() {
+        faders = (0..<10).map { FaderState.inactive(index: $0) }
+        playheadSeconds = 0
+        frameRate = 0
+        isTransportPlaying = false
     }
 
     // MARK: - Volume Control
 
     func beginVolumeChange(faderIndex: Int) async {
         guard faders[faderIndex].isActive,
-              let esHandle = faders[faderIndex].effectStackHandle else { return }
+              let effectStackHandle = faders[faderIndex].effectStackHandle else { return }
 
         faders[faderIndex].isDragging = true
 
         do {
             _ = try await bridge.call("mixer.volumeBegin", params: [
-                "effectStackHandle": esHandle
+                "effectStackHandle": effectStackHandle
             ])
         } catch {
             lastError = error.localizedDescription
@@ -147,7 +162,6 @@ class MixerModel: ObservableObject {
         guard faders[faderIndex].isActive,
               let handle = faders[faderIndex].volumeChannelHandle else { return }
 
-        // Update local state immediately for responsive UI
         faders[faderIndex].volumeDB = db
         faders[faderIndex].volumeLinear = db <= -144 ? 0 : pow(10.0, db / 20.0)
 
@@ -162,13 +176,13 @@ class MixerModel: ObservableObject {
     }
 
     func endVolumeChange(faderIndex: Int) async {
-        guard let esHandle = faders[faderIndex].effectStackHandle else { return }
+        guard let effectStackHandle = faders[faderIndex].effectStackHandle else { return }
 
         faders[faderIndex].isDragging = false
 
         do {
             _ = try await bridge.call("mixer.volumeEnd", params: [
-                "effectStackHandle": esHandle
+                "effectStackHandle": effectStackHandle
             ])
         } catch {
             lastError = error.localizedDescription

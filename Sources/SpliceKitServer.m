@@ -12358,7 +12358,7 @@ static void SpliceKit_collectChannels(id obj, NSMutableArray *channels, NSString
 //
 
 // Helper: read a double from a channel at time=0 (kCMTimeIndefinite for constant)
-static double SpliceKit_channelValue(id channel) {
+double SpliceKit_channelValue(id channel) {
     if (!channel) return 0;
     @try {
         // Use kCMTimeIndefinite: {0, 0, 17, 0} for constant (non-keyframed) value
@@ -12375,8 +12375,24 @@ static double SpliceKit_channelValue(id channel) {
     return 0;
 }
 
+// Read channel value at a specific time (for keyframed parameters)
+static double SpliceKit_channelValueAtTime(id channel, SpliceKit_CMTime time) {
+    if (!channel) return 0;
+    @try {
+        SEL sel = NSSelectorFromString(@"curveDoubleValueAtTime:");
+        if ([channel respondsToSelector:sel]) {
+            return ((double (*)(id, SEL, SpliceKit_CMTime))objc_msgSend)(channel, sel, time);
+        }
+        sel = NSSelectorFromString(@"doubleValueAtTime:");
+        if ([channel respondsToSelector:sel]) {
+            return ((double (*)(id, SEL, SpliceKit_CMTime))objc_msgSend)(channel, sel, time);
+        }
+    } @catch (NSException *e) {}
+    return 0;
+}
+
 // Helper: set a double on a channel
-static BOOL SpliceKit_setChannelValue(id channel, double value) {
+BOOL SpliceKit_setChannelValue(id channel, double value) {
     if (!channel) return NO;
     @try {
         SpliceKit_CMTime t = {0, 0, 17, 0}; // kCMTimeIndefinite
@@ -12962,6 +12978,23 @@ static id SpliceKit_getClipEffectStack(id clip) {
 // Helper: read volume (dB and linear) from a clip.
 // FCP stores audio effects in a separate effectStack accessed via audioEffectsForIdentifier:
 // (not the main effectStack which is for video effects).
+// Mixer state for volume reads — set before calling readVolume
+static SpliceKit_CMTime sMixerPlayheadTime = {0, 0, 17, 0}; // default: kCMTimeIndefinite
+static id sMixerContainer = nil; // primaryObject for containerToLocalTime conversion
+
+// Convert absolute timeline time to clip-local time for keyframe reads
+static SpliceKit_CMTime SpliceKit_clipLocalTime(id clip, SpliceKit_CMTime absTime, id container) {
+    if (!clip || !container) return absTime;
+    @try {
+        SEL sel = NSSelectorFromString(@"containerToLocalTime:container:");
+        if ([clip respondsToSelector:sel]) {
+            return ((SpliceKit_CMTime (*)(id, SEL, SpliceKit_CMTime, id))STRET_MSG)(
+                clip, sel, absTime, container);
+        }
+    } @catch (NSException *e) {}
+    return absTime;
+}
+
 static void SpliceKit_readVolume(id clip, id effectStack, NSMutableDictionary *out) {
     if (!clip && !effectStack) return;
 
@@ -12970,18 +13003,19 @@ static void SpliceKit_readVolume(id clip, id effectStack, NSMutableDictionary *o
         @try {
             SEL aeSel = NSSelectorFromString(@"audioEffectsForIdentifier:");
             if ([clip respondsToSelector:aeSel]) {
-                // identifier 0 = primary audio effect stack
                 id audioES = ((id (*)(id, SEL, unsigned long long))objc_msgSend)(clip, aeSel, 0ULL);
                 if (audioES) {
+                    out[@"audioEffectStackHandle"] = SpliceKit_storeHandle(audioES);
                     SEL volSel = NSSelectorFromString(@"audioLevelChannel");
                     if ([audioES respondsToSelector:volSel]) {
                         id volChan = ((id (*)(id, SEL))objc_msgSend)(audioES, volSel);
                         if (volChan) {
-                            double linear = SpliceKit_channelValue(volChan);
+                            out[@"volumeChannelHandle"] = SpliceKit_storeHandle(volChan);
+                            // Convert playhead time to clip-local time for keyframe reads
+                            SpliceKit_CMTime localTime = SpliceKit_clipLocalTime(clip, sMixerPlayheadTime, sMixerContainer);
+                            double linear = SpliceKit_channelValueAtTime(volChan, localTime);
                             out[@"volumeLinear"] = @(linear);
                             out[@"volumeDB"] = (linear > 0) ? @(20.0 * log10(linear)) : @(-INFINITY);
-                            out[@"volumeChannelHandle"] = SpliceKit_storeHandle(volChan);
-                            out[@"audioEffectStackHandle"] = SpliceKit_storeHandle(audioES);
                             return;
                         }
                     }
@@ -12997,7 +13031,8 @@ static void SpliceKit_readVolume(id clip, id effectStack, NSMutableDictionary *o
             if ([effectStack respondsToSelector:volSel]) {
                 id volChan = ((id (*)(id, SEL))objc_msgSend)(effectStack, volSel);
                 if (volChan) {
-                    double linear = SpliceKit_channelValue(volChan);
+                    SpliceKit_CMTime localTime = SpliceKit_clipLocalTime(clip, sMixerPlayheadTime, sMixerContainer);
+                    double linear = SpliceKit_channelValueAtTime(volChan, localTime);
                     out[@"volumeLinear"] = @(linear);
                     out[@"volumeDB"] = (linear > 0) ? @(20.0 * log10(linear)) : @(-INFINITY);
                     out[@"volumeChannelHandle"] = SpliceKit_storeHandle(volChan);
@@ -13008,47 +13043,89 @@ static void SpliceKit_readVolume(id clip, id effectStack, NSMutableDictionary *o
     }
 }
 
-// Helper: try to read audio role from a clip via KVC / selectors
+// Helper: read audio role info from a clip — returns name and color.
+// Uses audioRoleIdentifier → library lookup → displayName, and
+// FFColorForRole colorSchemeForRolesOfObject: → baseColor for the actual FCP role color.
 static NSString *SpliceKit_readClipRole(id clip) {
     if (!clip) return nil;
 
-    // Try various known selectors for role reading
-    NSArray *trySelectors = @[@"primaryAudioRole", @"audioRole", @"role"];
-    for (NSString *selName in trySelectors) {
-        @try {
-            SEL sel = NSSelectorFromString(selName);
-            if (sel == NULL) continue;
-            if ([clip respondsToSelector:sel]) {
-                id roleObj = ((id (*)(id, SEL))objc_msgSend)(clip, sel);
-                if ([roleObj isKindOfClass:[NSString class]]) return (NSString *)roleObj;
-                // If it's a role object, try to get its name
-                if (roleObj && [roleObj respondsToSelector:@selector(displayName)]) {
-                    id name = ((id (*)(id, SEL))objc_msgSend)(roleObj, @selector(displayName));
-                    if ([name isKindOfClass:[NSString class]]) return (NSString *)name;
-                }
-                if (roleObj && [roleObj respondsToSelector:@selector(localizedName)]) {
-                    id name = ((id (*)(id, SEL))objc_msgSend)(roleObj, @selector(localizedName));
-                    if ([name isKindOfClass:[NSString class]]) return (NSString *)name;
-                }
-            }
-        } @catch (NSException *e) { continue; }
-    }
-
-    // KVC fallback
     @try {
-        id val = [clip valueForKey:@"primaryAudioRole"];
-        if ([val isKindOfClass:[NSString class]]) return (NSString *)val;
-        if (val && [val respondsToSelector:@selector(displayName)]) {
-            id name = ((id (*)(id, SEL))objc_msgSend)(val, @selector(displayName));
-            if ([name isKindOfClass:[NSString class]]) return (NSString *)name;
+        SEL ariSel = NSSelectorFromString(@"audioRoleIdentifier");
+        if (![clip respondsToSelector:ariSel]) return nil;
+
+        id roleUID = ((id (*)(id, SEL))objc_msgSend)(clip, ariSel);
+        if (!roleUID || ![roleUID isKindOfClass:[NSString class]]) return nil;
+
+        id libs = ((id (*)(Class, SEL))objc_msgSend)(
+            objc_getClass("FFLibraryDocument"), NSSelectorFromString(@"copyActiveLibraries"));
+        if (!libs || ![libs isKindOfClass:[NSArray class]] || [(NSArray *)libs count] == 0) return nil;
+
+        for (id library in (NSArray *)libs) {
+            SEL findSel = NSSelectorFromString(@"findRoleWithUID:");
+            if (![library respondsToSelector:findSel]) continue;
+
+            id role = ((id (*)(id, SEL, id))objc_msgSend)(library, findSel, roleUID);
+            if (!role) continue;
+
+            if ([role respondsToSelector:@selector(displayName)]) {
+                id name = ((id (*)(id, SEL))objc_msgSend)(role, @selector(displayName));
+                if ([name isKindOfClass:[NSString class]] && [(NSString *)name length] > 0)
+                    return (NSString *)name;
+            }
+        }
+    } @catch (NSException *e) {}
+
+    // Fallback: known built-in UUIDs
+    @try {
+        SEL guessSel = NSSelectorFromString(@"guessAudioBuiltInMainRoleUID");
+        if ([clip respondsToSelector:guessSel]) {
+            id uid = ((id (*)(id, SEL))objc_msgSend)(clip, guessSel);
+            if ([uid isKindOfClass:[NSString class]]) {
+                if ([uid isEqualToString:@"AzxbPvadwQbKPP4kwdFxLVg"]) return @"Dialogue";
+                if ([uid isEqualToString:@"A4bkI8U6kRJmBTQDqKJcJrg"]) return @"Music";
+                if ([uid isEqualToString:@"ASw2gOhIuSd2wQ8jgLyN3Ew"]) return @"Effects";
+            }
         }
     } @catch (NSException *e) {}
 
     return nil;
 }
 
+// Helper: read the FCP role color for a clip as RGB hex string (e.g. "#3A7D44")
+static NSString *SpliceKit_readClipRoleColor(id clip) {
+    if (!clip) return nil;
+    @try {
+        Class colorForRole = objc_getClass("FFColorForRole");
+        if (!colorForRole) return nil;
+        SEL csSel = NSSelectorFromString(@"colorSchemeForRolesOfObject:");
+        if (![colorForRole respondsToSelector:csSel]) return nil;
+
+        id scheme = ((id (*)(Class, SEL, id))objc_msgSend)(colorForRole, csSel, clip);
+        if (!scheme) return nil;
+
+        // Use itemForegroundColor for bright text, fall back to baseColor
+        SEL fgSel = NSSelectorFromString(@"itemForegroundColor");
+        SEL baseSel = NSSelectorFromString(@"baseColor");
+        NSColor *color = nil;
+        if ([scheme respondsToSelector:fgSel])
+            color = ((id (*)(id, SEL))objc_msgSend)(scheme, fgSel);
+        if (!color && [scheme respondsToSelector:baseSel])
+            color = ((id (*)(id, SEL))objc_msgSend)(scheme, baseSel);
+        if (!color) return nil;
+
+        // Convert to sRGB and extract components
+        NSColor *rgb = [color colorUsingColorSpace:[NSColorSpace sRGBColorSpace]];
+        if (!rgb) return nil;
+        CGFloat r, g, b, a;
+        [rgb getRed:&r green:&g blue:&b alpha:&a];
+        return [NSString stringWithFormat:@"#%02X%02X%02X",
+            (int)(r * 255), (int)(g * 255), (int)(b * 255)];
+    } @catch (NSException *e) {}
+    return nil;
+}
+
 // mixer.getState — enumerate clips at playhead with volumes, lanes, roles
-static NSDictionary *SpliceKit_handleMixerGetState(NSDictionary *params) {
+NSDictionary *SpliceKit_handleMixerGetState(NSDictionary *params) {
     __block NSDictionary *result = nil;
     SpliceKit_executeOnMainThread(^{
         @try {
@@ -13074,7 +13151,10 @@ static NSDictionary *SpliceKit_handleMixerGetState(NSDictionary *params) {
             }
             double playheadSec = (playhead.timescale > 0) ? (double)playhead.value / playhead.timescale : 0;
 
-            // Get primaryObject (spine container)
+            // Set global playhead time for volume reads (picks up keyframed values)
+            sMixerPlayheadTime = playhead;
+
+            // Get primaryObject (spine container) — also used for time conversion
             id primaryObj = nil;
             if ([sequence respondsToSelector:@selector(primaryObject)]) {
                 primaryObj = ((id (*)(id, SEL))objc_msgSend)(sequence, @selector(primaryObject));
@@ -13083,6 +13163,7 @@ static NSDictionary *SpliceKit_handleMixerGetState(NSDictionary *params) {
                 result = @{@"error": @"No primary object on sequence"};
                 return;
             }
+            sMixerContainer = primaryObj; // For clip-local time conversion in readVolume
 
             // Get spine items
             id spineItems = nil;
@@ -13097,170 +13178,258 @@ static NSDictionary *SpliceKit_handleMixerGetState(NSDictionary *params) {
             SEL erSel = NSSelectorFromString(@"effectiveRangeOfObject:");
             BOOL canGetRange = [primaryObj respondsToSelector:erSel];
 
-            // Collect all clips overlapping the playhead (spine + connected)
-            NSMutableArray *faders = [NSMutableArray array];
+            // Role-based mixer: one fader per audio role used in the timeline.
+            // For each role, find the clip at the playhead with that role and show its volume.
+            // This gives a mixing-console view where roles are persistent faders.
+
+            // Step 1: Collect ALL clips (spine + connected) with their roles and time ranges
+            NSMutableArray *allClips = [NSMutableArray array]; // {item, role, startSec, endSec, lane}
 
             for (id item in (NSArray *)spineItems) {
-                // Check if this spine item overlaps the playhead
-                BOOL spineOverlaps = NO;
-                double spineStart = 0, spineEnd = 0;
+                NSString *cls = NSStringFromClass([item class]);
+                BOOL isSkip = [cls containsString:@"Gap"] || [cls containsString:@"Transition"];
+                if (!isSkip) {
+                    double startSec = 0, endSec = 0;
+                    if (canGetRange) {
+                        @try {
+                            SpliceKit_CMTimeRange range = ((SpliceKit_CMTimeRange (*)(id, SEL, id))STRET_MSG)(
+                                primaryObj, erSel, item);
+                            startSec = (range.start.timescale > 0) ? (double)range.start.value / range.start.timescale : 0;
+                            double dur = (range.duration.timescale > 0) ? (double)range.duration.value / range.duration.timescale : 0;
+                            endSec = startSec + dur;
+                        } @catch (NSException *e) {}
+                    }
+                    NSString *role = SpliceKit_readClipRole(item) ?: @"Dialogue";
+                    NSString *roleColor = SpliceKit_readClipRoleColor(item) ?: @"";
+                    [allClips addObject:@{@"item": item, @"role": role, @"roleColor": roleColor, @"start": @(startSec), @"end": @(endSec), @"lane": @(0)}];
+                }
+                // Connected clips
+                SEL anchoredSel = NSSelectorFromString(@"anchoredItems");
+                if (![item respondsToSelector:anchoredSel]) continue;
+                id anchored = ((id (*)(id, SEL))objc_msgSend)(item, anchoredSel);
+                NSArray *anchoredArr = nil;
+                if ([anchored isKindOfClass:[NSArray class]]) anchoredArr = (NSArray *)anchored;
+                else if ([anchored isKindOfClass:[NSSet class]]) anchoredArr = [(NSSet *)anchored allObjects];
+                if (!anchoredArr) continue;
 
-                if (canGetRange) {
-                    @try {
-                        SpliceKit_CMTimeRange range = ((SpliceKit_CMTimeRange (*)(id, SEL, id))STRET_MSG)(
-                            primaryObj, erSel, item);
-                        spineStart = (range.start.timescale > 0)
-                            ? (double)range.start.value / range.start.timescale : 0;
-                        double dur = (range.duration.timescale > 0)
-                            ? (double)range.duration.value / range.duration.timescale : 0;
-                        spineEnd = spineStart + dur;
-                        if (playheadSec >= spineStart - 0.001 && playheadSec <= spineEnd + 0.001) {
-                            spineOverlaps = YES;
-                        }
-                    } @catch (NSException *e) {}
+                for (id connected in anchoredArr) {
+                    NSString *ccls = NSStringFromClass([connected class]);
+                    if ([ccls containsString:@"Transition"]) continue;
+
+                    double cStart = 0, cEnd = 0;
+                    if (canGetRange) {
+                        @try {
+                            SpliceKit_CMTimeRange range = ((SpliceKit_CMTimeRange (*)(id, SEL, id))STRET_MSG)(
+                                primaryObj, erSel, connected);
+                            cStart = (range.start.timescale > 0) ? (double)range.start.value / range.start.timescale : 0;
+                            double dur = (range.duration.timescale > 0) ? (double)range.duration.value / range.duration.timescale : 0;
+                            cEnd = cStart + dur;
+                        } @catch (NSException *e) { continue; }
+                    }
+
+                    long long lane = 0;
+                    if ([connected respondsToSelector:@selector(anchoredLane)])
+                        lane = ((long long (*)(id, SEL))objc_msgSend)(connected, @selector(anchoredLane));
+
+                    NSString *crole = SpliceKit_readClipRole(connected) ?: @"Dialogue";
+                    NSString *croleColor = SpliceKit_readClipRoleColor(connected) ?: @"";
+                    [allClips addObject:@{@"item": connected, @"role": crole, @"roleColor": croleColor, @"start": @(cStart), @"end": @(cEnd), @"lane": @(lane)}];
+                }
+            }
+
+            // Step 2: Collect unique roles (ordered: Dialogue first, then Music, Effects, others)
+            NSMutableOrderedSet *roleOrder = [NSMutableOrderedSet orderedSet];
+            // Add standard roles first so they get consistent positions
+            for (NSDictionary *clip in allClips) {
+                NSString *r = clip[@"role"];
+                if ([r containsString:@"Dialogue"]) [roleOrder addObject:r];
+            }
+            for (NSDictionary *clip in allClips) {
+                NSString *r = clip[@"role"];
+                if ([r containsString:@"Music"]) [roleOrder addObject:r];
+            }
+            for (NSDictionary *clip in allClips) {
+                NSString *r = clip[@"role"];
+                if ([r containsString:@"Effects"]) [roleOrder addObject:r];
+            }
+            for (NSDictionary *clip in allClips) {
+                [roleOrder addObject:clip[@"role"]];
+            }
+
+            // Step 3: For each role, find the clip at the playhead and build fader data
+            NSMutableArray *faders = [NSMutableArray array];
+            NSMutableArray *indexed = [NSMutableArray array];
+            NSInteger faderIdx = 0;
+
+            for (NSString *role in roleOrder) {
+                if (faderIdx >= 10) break;
+
+                // Get the role color from the first clip with this role
+                NSString *roleColor = @"";
+                for (NSDictionary *clip in allClips) {
+                    if ([clip[@"role"] isEqualToString:role] && [clip[@"roleColor"] length] > 0) {
+                        roleColor = clip[@"roleColor"];
+                        break;
+                    }
                 }
 
-                // Add spine item (lane 0) if it overlaps and is not a gap/transition
-                if (spineOverlaps) {
-                    NSString *cls = NSStringFromClass([item class]);
-                    BOOL isGap = [cls containsString:@"Gap"];
-                    BOOL isTransition = [cls containsString:@"Transition"];
-                    if (!isGap && !isTransition) {
-                        NSMutableDictionary *fader = [NSMutableDictionary dictionary];
-                        fader[@"clipHandle"] = SpliceKit_storeHandle(item);
-                        fader[@"lane"] = @(0);
-                        fader[@"class"] = cls;
-                        fader[@"startSeconds"] = @(spineStart);
-                        fader[@"endSeconds"] = @(spineEnd);
+                // Find clip with this role at the playhead
+                id bestClip = nil;
+                double bestStart = 0, bestEnd = 0;
+                NSInteger bestLane = 0;
+                for (NSDictionary *clip in allClips) {
+                    if (![clip[@"role"] isEqualToString:role]) continue;
+                    double s = [clip[@"start"] doubleValue];
+                    double e = [clip[@"end"] doubleValue];
+                    if (playheadSec >= s - 0.001 && playheadSec <= e + 0.001) {
+                        bestClip = clip[@"item"];
+                        bestStart = s;
+                        bestEnd = e;
+                        bestLane = [clip[@"lane"] integerValue];
+                        break;
+                    }
+                }
 
-                        if ([item respondsToSelector:@selector(displayName)]) {
-                            id name = ((id (*)(id, SEL))objc_msgSend)(item, @selector(displayName));
+                NSMutableDictionary *fader = [NSMutableDictionary dictionary];
+                fader[@"index"] = @(faderIdx);
+                fader[@"role"] = role;
+                if (roleColor.length > 0) fader[@"roleColor"] = roleColor;
+
+                if (bestClip) {
+                    // Active: clip with this role is at the playhead
+                    fader[@"clipHandle"] = SpliceKit_storeHandle(bestClip);
+                    fader[@"lane"] = @(bestLane);
+                    fader[@"startSeconds"] = @(bestStart);
+                    fader[@"endSeconds"] = @(bestEnd);
+                    fader[@"class"] = NSStringFromClass([bestClip class]);
+                    fader[@"playing"] = @YES;
+
+                    if ([bestClip respondsToSelector:@selector(displayName)]) {
+                        id name = ((id (*)(id, SEL))objc_msgSend)(bestClip, @selector(displayName));
+                        fader[@"name"] = name ?: @"";
+                    }
+
+                    id es = SpliceKit_getClipEffectStack(bestClip);
+                    if (es) fader[@"effectStackHandle"] = SpliceKit_storeHandle(es);
+                    SpliceKit_readVolume(bestClip, es, fader);
+                } else {
+                    // Not playing: no clip at playhead, but show first clip with this role for info
+                    fader[@"playing"] = @NO;
+                    id firstClip = nil;
+                    for (NSDictionary *clip in allClips) {
+                        if ([clip[@"role"] isEqualToString:role]) {
+                            firstClip = clip[@"item"];
+                            fader[@"lane"] = clip[@"lane"];
+                            break;
+                        }
+                    }
+                    if (firstClip) {
+                        fader[@"clipHandle"] = SpliceKit_storeHandle(firstClip);
+                        if ([firstClip respondsToSelector:@selector(displayName)]) {
+                            id name = ((id (*)(id, SEL))objc_msgSend)(firstClip, @selector(displayName));
                             fader[@"name"] = name ?: @"";
                         }
-
-                        id es = SpliceKit_getClipEffectStack(item);
-                        if (es) {
-                            fader[@"effectStackHandle"] = SpliceKit_storeHandle(es);
-                        }
-                        SpliceKit_readVolume(item, es, fader);
-
-                        NSString *role = SpliceKit_readClipRole(item);
-                        if (role) fader[@"role"] = role;
-
-                        [faders addObject:fader];
+                        id es = SpliceKit_getClipEffectStack(firstClip);
+                        if (es) fader[@"effectStackHandle"] = SpliceKit_storeHandle(es);
+                        SpliceKit_readVolume(firstClip, es, fader);
+                    } else {
+                        fader[@"name"] = @"";
+                        fader[@"lane"] = @(0);
+                        fader[@"volumeDB"] = @(0);
+                        fader[@"volumeLinear"] = @(1);
                     }
                 }
 
-                // Check connected clips (anchoredItems) on this spine item
-                SEL anchoredSel = NSSelectorFromString(@"anchoredItems");
-                if ([item respondsToSelector:anchoredSel]) {
-                    id anchored = ((id (*)(id, SEL))objc_msgSend)(item, anchoredSel);
-                    // anchoredItems can be NSSet or NSArray
-                    NSArray *anchoredArr = nil;
-                    if ([anchored isKindOfClass:[NSArray class]]) {
-                        anchoredArr = (NSArray *)anchored;
-                    } else if ([anchored isKindOfClass:[NSSet class]]) {
-                        anchoredArr = [(NSSet *)anchored allObjects];
+                [indexed addObject:fader];
+                faderIdx++;
+            }
+
+            // Audio metering: read live peak levels from FCP's own PEMeterLayer instances.
+            // FCP's built-in audio meters use PEAudioLayeredMeterView → PEMeterLayer._maskRatio
+            // which stores a normalized 0..1 visual ratio updated at ~15Hz during playback.
+            // We find these layers in the view hierarchy and read directly.
+            double maxPeak = 0;
+            @try {
+                static __weak id sCachedMeterView = nil;
+                id meterView = sCachedMeterView;
+                Class meterViewClass = NSClassFromString(@"PEAudioLayeredMeterView");
+
+                // Find meter view if not cached (recursive subview search)
+                if (meterViewClass && (!meterView || ![meterView isKindOfClass:meterViewClass])) {
+                    meterView = nil;
+                    for (NSWindow *win in [NSApp windows]) {
+                        if (!win.contentView) continue;
+                        // Recursive block to find view by class
+                        __block id found = nil;
+                        void (^__block searchView)(NSView *) = ^(NSView *view) {
+                            if (found) return;
+                            if ([view isKindOfClass:meterViewClass]) { found = view; return; }
+                            for (NSView *sub in view.subviews) { searchView(sub); if (found) return; }
+                        };
+                        searchView(win.contentView);
+                        if (found) { meterView = found; break; }
+                    }
+                    sCachedMeterView = meterView;
+                }
+
+                if (meterView) {
+                    // Read _maskRatio from PEMeterLayer instances (the instantaneous level, not peak hold).
+                    // _maskRatio = current meter fill ratio (0..1), bounces with audio in real time.
+                    // _peak = peak hold indicator (stays high, decays slowly) — NOT what we want.
+                    NSArray *layers = nil;
+                    @try { layers = [meterView valueForKey:@"meterLayers"]; } @catch (NSException *e) {}
+                    if (!layers) {
+                        @try {
+                            id backingLayer = [(NSView *)meterView layer];
+                            SEL mlSel = NSSelectorFromString(@"meterLayers");
+                            if ([backingLayer respondsToSelector:mlSel])
+                                layers = ((id (*)(id, SEL))objc_msgSend)(backingLayer, mlSel);
+                        } @catch (NSException *e) {}
                     }
 
-                    if (anchoredArr) {
-                        for (id connected in anchoredArr) {
-                            // Get absolute time range for connected clip
-                            BOOL connOverlaps = NO;
-                            double connStart = 0, connEnd = 0;
-
-                            if (canGetRange) {
-                                @try {
-                                    SpliceKit_CMTimeRange range = ((SpliceKit_CMTimeRange (*)(id, SEL, id))STRET_MSG)(
-                                        primaryObj, erSel, connected);
-                                    connStart = (range.start.timescale > 0)
-                                        ? (double)range.start.value / range.start.timescale : 0;
-                                    double dur = (range.duration.timescale > 0)
-                                        ? (double)range.duration.value / range.duration.timescale : 0;
-                                    connEnd = connStart + dur;
-                                    if (playheadSec >= connStart - 0.001 && playheadSec <= connEnd + 0.001) {
-                                        connOverlaps = YES;
-                                    }
-                                } @catch (NSException *e) {}
+                    maxPeak = 0;
+                    if ([layers isKindOfClass:[NSArray class]] && [layers count] > 0) {
+                        // Read _maskRatio via runtime ivar access on PEMeterLayer instances.
+                        // _maskRatio = instantaneous meter fill (0..1), bounces with audio.
+                        // _peak = peak hold (stays high, decays slowly) — not used.
+                        Class meterLayerClass = NSClassFromString(@"PEMeterLayer");
+                        Ivar maskRatioIvar = meterLayerClass ? class_getInstanceVariable(meterLayerClass, "_maskRatio") : NULL;
+                        if (maskRatioIvar) {
+                            ptrdiff_t offset = ivar_getOffset(maskRatioIvar);
+                            for (id layer in layers) {
+                                if (![layer isKindOfClass:meterLayerClass]) continue;
+                                double ratio = *(double *)((char *)(__bridge void *)layer + offset);
+                                if (ratio > maxPeak) maxPeak = ratio;
                             }
+                        }
+                    }
 
-                            // Fallback: use anchoredOffset + duration
-                            if (!connOverlaps && !canGetRange) {
-                                @try {
-                                    SEL offSel = NSSelectorFromString(@"anchoredOffset");
-                                    if ([connected respondsToSelector:offSel]) {
-                                        SpliceKit_CMTime offset = ((SpliceKit_CMTime (*)(id, SEL))STRET_MSG)(connected, offSel);
-                                        SpliceKit_CMTime dur = ((SpliceKit_CMTime (*)(id, SEL))STRET_MSG)(connected, @selector(duration));
-                                        connStart = (offset.timescale > 0) ? (double)offset.value / offset.timescale : 0;
-                                        double durSec = (dur.timescale > 0) ? (double)dur.value / dur.timescale : 0;
-                                        connEnd = connStart + durSec;
-                                        if (playheadSec >= connStart - 0.001 && playheadSec <= connEnd + 0.001) {
-                                            connOverlaps = YES;
-                                        }
-                                    }
-                                } @catch (NSException *e) {}
+                    if (maxPeak > 0.001) {
+                        // Distribute overall meter level to playing faders, scaled by volume
+                        double totalVolume = 0;
+                        for (NSMutableDictionary *fader in indexed) {
+                            if ([fader[@"playing"] boolValue])
+                                totalVolume += [fader[@"volumeLinear"] doubleValue];
+                        }
+                        for (NSMutableDictionary *fader in indexed) {
+                            if ([fader[@"playing"] boolValue]) {
+                                double vol = [fader[@"volumeLinear"] doubleValue];
+                                // Scale peak by this fader's share of total volume
+                                double share = (totalVolume > 0) ? vol / totalVolume : 1.0;
+                                double faderPeak = maxPeak * fmin(share * 1.5, 1.0);
+                                fader[@"meterPeak"] = @(faderPeak); // 0..1 visual ratio
                             }
-
-                            if (!connOverlaps) continue;
-
-                            NSString *cls = NSStringFromClass([connected class]);
-                            BOOL isTransition = [cls containsString:@"Transition"];
-                            if (isTransition) continue;
-
-                            long long lane = 0;
-                            if ([connected respondsToSelector:@selector(anchoredLane)]) {
-                                lane = ((long long (*)(id, SEL))objc_msgSend)(connected, @selector(anchoredLane));
-                            }
-
-                            NSMutableDictionary *fader = [NSMutableDictionary dictionary];
-                            fader[@"clipHandle"] = SpliceKit_storeHandle(connected);
-                            fader[@"lane"] = @(lane);
-                            fader[@"class"] = cls;
-                            fader[@"startSeconds"] = @(connStart);
-                            fader[@"endSeconds"] = @(connEnd);
-
-                            if ([connected respondsToSelector:@selector(displayName)]) {
-                                id name = ((id (*)(id, SEL))objc_msgSend)(connected, @selector(displayName));
-                                fader[@"name"] = name ?: @"";
-                            }
-
-                            id es = SpliceKit_getClipEffectStack(connected);
-                            if (es) {
-                                fader[@"effectStackHandle"] = SpliceKit_storeHandle(es);
-                            }
-                            SpliceKit_readVolume(connected, es, fader);
-
-                            NSString *role = SpliceKit_readClipRole(connected);
-                            if (role) fader[@"role"] = role;
-
-                            [faders addObject:fader];
                         }
                     }
                 }
-            }
-
-            // Sort by lane descending (highest lane = fader 0), then by name
-            [faders sortUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b) {
-                long long laneA = [a[@"lane"] longLongValue];
-                long long laneB = [b[@"lane"] longLongValue];
-                if (laneA != laneB) return (laneB > laneA) ? NSOrderedAscending : NSOrderedDescending;
-                return [a[@"name"] compare:b[@"name"] ?: @""];
-            }];
-
-            // Assign fader indices (limit to 10)
-            NSInteger count = MIN((NSInteger)faders.count, 10);
-            NSMutableArray *indexed = [NSMutableArray array];
-            for (NSInteger i = 0; i < count; i++) {
-                NSMutableDictionary *f = [faders[i] mutableCopy];
-                f[@"index"] = @(i);
-                [indexed addObject:f];
-            }
+            } @catch (NSException *e) {}
 
             result = @{
                 @"playheadSeconds": @(playheadSec),
                 @"faders": indexed,
                 @"count": @(indexed.count),
-                @"totalClipsAtPlayhead": @(faders.count)
+                @"totalRoles": @(roleOrder.count),
+                @"roles": [roleOrder array]
             };
         } @catch (NSException *e) {
             result = @{@"error": [NSString stringWithFormat:@"Exception: %@", e.reason]};
@@ -20138,6 +20307,16 @@ NSDictionary *SpliceKit_handleRequest(NSDictionary *request) {
                 ((id (*)(id, SEL))objc_msgSend)((id)cls, @selector(sharedPanel)), @selector(hidePanel));
         });
         result = @{@"status": @"ok", @"message": @"Mixer panel closed"};
+    } else if ([method isEqualToString:@"mixer.debug"]) {
+        __block NSDictionary *debugResult = nil;
+        SpliceKit_executeOnMainThread(^{
+            Class cls = objc_getClass("SpliceKitMixerPanel");
+            if (cls) {
+                id panel = ((id (*)(id, SEL))objc_msgSend)((id)cls, @selector(sharedPanel));
+                debugResult = ((NSDictionary * (*)(id, SEL))objc_msgSend)(panel, NSSelectorFromString(@"debugState"));
+            }
+        });
+        result = debugResult ?: @{@"error": @"Panel not found"};
     }
     // share.* namespace
     else if ([method isEqualToString:@"share.export"]) {

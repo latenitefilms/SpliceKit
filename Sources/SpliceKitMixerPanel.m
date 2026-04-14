@@ -4,6 +4,7 @@
 //
 
 #import <AppKit/AppKit.h>
+#import <QuartzCore/QuartzCore.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
 #import "SpliceKit.h"
@@ -25,6 +26,54 @@ typedef struct { SKMixer_CMTime start; SKMixer_CMTime duration; } SKMixer_CMTime
   #define SK_STRET_MSG objc_msgSend_stret
 #endif
 
+#pragma mark - Meter Observer
+
+// Stores live audio levels per role UID, updated by FCP's metering timer
+// Non-static so it can be accessed from SpliceKitServer.m via extern
+NSMutableDictionary *sMeterLevels = nil; // roleUID -> @(peakLinear)
+
+static const char kMeterRoleUIDKey = 0; // associated object key
+
+@interface SpliceKitMeterObserver : NSObject
+@property (nonatomic, strong) NSString *roleUID;
+@end
+
+@implementation SpliceKitMeterObserver
+
+// Called by FCP's FFContext _updateMeters: timer for each registered role.
+// Signature: contextMeterUpdate:(uint)channels peakValues:(float*)peaks loudnessValues:(struct*)loudness
+// We use NSMethodSignature override to ensure the runtime finds this method.
+- (void)contextMeterUpdate:(NSUInteger)channels peakValues:(void *)peaks loudnessValues:(void *)loudness {
+    if (!peaks) return;
+    if (channels == 0) return;
+    float *peakArray = (float *)peaks;
+    float maxPeak = 0;
+    for (NSUInteger i = 0; i < channels && i < 32; i++) {
+        if (peakArray[i] > maxPeak) maxPeak = peakArray[i];
+    }
+    if (!sMeterLevels) sMeterLevels = [NSMutableDictionary dictionary];
+    if (self.roleUID) {
+        sMeterLevels[self.roleUID] = @(maxPeak);
+    }
+}
+
+// Handle any unrecognized selectors gracefully to prevent crashes
+- (NSMethodSignature *)methodSignatureForSelector:(SEL)sel {
+    NSMethodSignature *sig = [super methodSignatureForSelector:sel];
+    if (!sig) {
+        // Return a void signature for any unknown selector
+        sig = [NSMethodSignature signatureWithObjCTypes:"v@:"];
+    }
+    return sig;
+}
+
+- (void)forwardInvocation:(NSInvocation *)invocation {
+    // Log the selector FCP is trying to call
+    SpliceKit_log(@"[Mixer] MeterObserver forwarded: %@", NSStringFromSelector(invocation.selector));
+}
+
+@end
+
 #pragma mark - Fader State
 
 @interface SpliceKitFaderState : NSObject
@@ -37,7 +86,12 @@ typedef struct { SKMixer_CMTime start; SKMixer_CMTime duration; } SKMixer_CMTime
 @property (nonatomic, assign) double volumeDB;
 @property (nonatomic, assign) double volumeLinear;
 @property (nonatomic, strong) NSString *role;
+@property (nonatomic, strong) NSString *roleColorHex; // "#RRGGBB" from FCP
+@property (nonatomic, assign) double meterDB; // real-time audio level (dB)
+@property (nonatomic, assign) double meterLinear; // real-time audio level (0..1)
+@property (nonatomic, assign) double meterPeak; // visual peak ratio from FCP meters (0..1)
 @property (nonatomic, assign) BOOL isActive;
+@property (nonatomic, assign) BOOL isPlaying; // clip with this role is at playhead
 @property (nonatomic, assign) BOOL isDragging;
 @end
 
@@ -51,8 +105,11 @@ typedef struct { SKMixer_CMTime start; SKMixer_CMTime duration; } SKMixer_CMTime
 @property (nonatomic, strong) NSSlider *slider;
 @property (nonatomic, strong) NSTextField *dbLabel;
 @property (nonatomic, strong) NSTextField *nameLabel;
+@property (nonatomic, strong) NSTextField *roleLabel;
 @property (nonatomic, strong) NSTextField *laneLabel;
 @property (nonatomic, strong) NSTextField *indexLabel;
+@property (nonatomic, strong) NSView *meterBar;       // green level meter
+@property (nonatomic, strong) NSLayoutConstraint *meterHeight; // animated height
 @property (nonatomic, copy) void (^onDragStart)(void);
 @property (nonatomic, copy) void (^onDragChange)(double db);
 @property (nonatomic, copy) void (^onDragEnd)(void);
@@ -110,41 +167,67 @@ static double sliderPosToDB(double pos) {
         _slider.action = @selector(sliderChanged:);
         _slider.continuous = YES;
 
+        // Role label
+        _roleLabel = [self makeLabel:@"" size:9 bold:YES];
+        _roleLabel.textColor = [NSColor systemBlueColor];
+        _roleLabel.cell.truncatesLastVisibleLine = YES;
+        _roleLabel.cell.lineBreakMode = NSLineBreakByTruncatingTail;
+
         // Lane label
-        _laneLabel = [self makeLabel:@"" size:9 bold:NO];
+        _laneLabel = [self makeLabel:@"" size:8 bold:NO];
         _laneLabel.textColor = [NSColor tertiaryLabelColor];
 
         // Clip name
-        _nameLabel = [self makeLabel:@"--" size:9 bold:NO];
+        _nameLabel = [self makeLabel:@"--" size:8 bold:NO];
         _nameLabel.maximumNumberOfLines = 2;
         _nameLabel.cell.truncatesLastVisibleLine = YES;
         _nameLabel.cell.lineBreakMode = NSLineBreakByTruncatingTail;
 
-        for (NSView *v in @[_indexLabel, _dbLabel, _slider, _laneLabel, _nameLabel]) {
+        // Meter bar (level indicator)
+        _meterBar = [[NSView alloc] init];
+        _meterBar.wantsLayer = YES;
+        _meterBar.layer.backgroundColor = [[NSColor systemGreenColor] colorWithAlphaComponent:0.7].CGColor;
+        _meterBar.layer.cornerRadius = 1.5;
+
+        for (NSView *v in @[_indexLabel, _dbLabel, _slider, _meterBar, _roleLabel, _laneLabel, _nameLabel]) {
             v.translatesAutoresizingMaskIntoConstraints = NO;
             [self addSubview:v];
         }
 
         [NSLayoutConstraint activateConstraints:@[
-            [_indexLabel.topAnchor constraintEqualToAnchor:self.topAnchor constant:6],
+            [_indexLabel.topAnchor constraintEqualToAnchor:self.topAnchor constant:4],
             [_indexLabel.centerXAnchor constraintEqualToAnchor:self.centerXAnchor],
 
-            [_dbLabel.topAnchor constraintEqualToAnchor:_indexLabel.bottomAnchor constant:2],
+            [_dbLabel.topAnchor constraintEqualToAnchor:_indexLabel.bottomAnchor constant:1],
             [_dbLabel.centerXAnchor constraintEqualToAnchor:self.centerXAnchor],
 
-            [_slider.topAnchor constraintEqualToAnchor:_dbLabel.bottomAnchor constant:4],
-            [_slider.centerXAnchor constraintEqualToAnchor:self.centerXAnchor],
-            [_slider.bottomAnchor constraintEqualToAnchor:_laneLabel.topAnchor constant:-4],
+            [_slider.topAnchor constraintEqualToAnchor:_dbLabel.bottomAnchor constant:2],
+            [_slider.centerXAnchor constraintEqualToAnchor:self.centerXAnchor constant:-4],
+            [_slider.bottomAnchor constraintEqualToAnchor:_roleLabel.topAnchor constant:-2],
             [_slider.widthAnchor constraintEqualToConstant:22],
 
-            [_laneLabel.bottomAnchor constraintEqualToAnchor:_nameLabel.topAnchor constant:-2],
+            // Meter bar — thin strip to the right of the slider
+            [_meterBar.leadingAnchor constraintEqualToAnchor:_slider.trailingAnchor constant:4],
+            [_meterBar.bottomAnchor constraintEqualToAnchor:_slider.bottomAnchor],
+            [_meterBar.widthAnchor constraintEqualToConstant:5],
+
+            [_roleLabel.bottomAnchor constraintEqualToAnchor:_laneLabel.topAnchor constant:-1],
+            [_roleLabel.centerXAnchor constraintEqualToAnchor:self.centerXAnchor],
+            [_roleLabel.leadingAnchor constraintGreaterThanOrEqualToAnchor:self.leadingAnchor constant:2],
+            [_roleLabel.trailingAnchor constraintLessThanOrEqualToAnchor:self.trailingAnchor constant:-2],
+
+            [_laneLabel.bottomAnchor constraintEqualToAnchor:_nameLabel.topAnchor constant:-1],
             [_laneLabel.centerXAnchor constraintEqualToAnchor:self.centerXAnchor],
 
-            [_nameLabel.bottomAnchor constraintEqualToAnchor:self.bottomAnchor constant:-4],
+            [_nameLabel.bottomAnchor constraintEqualToAnchor:self.bottomAnchor constant:-3],
             [_nameLabel.leadingAnchor constraintEqualToAnchor:self.leadingAnchor constant:2],
             [_nameLabel.trailingAnchor constraintEqualToAnchor:self.trailingAnchor constant:-2],
-            [_nameLabel.heightAnchor constraintLessThanOrEqualToConstant:28],
+            [_nameLabel.heightAnchor constraintLessThanOrEqualToConstant:22],
         ]];
+
+        // Meter height constraint — starts at 0, updated dynamically
+        _meterHeight = [_meterBar.heightAnchor constraintEqualToConstant:0];
+        _meterHeight.active = YES;
     }
     return self;
 }
@@ -180,6 +263,7 @@ static double sliderPosToDB(double pos) {
 
 - (void)updateFromState {
     BOOL active = _state.isActive;
+    BOOL playing = _state.isPlaying;
     _slider.enabled = active;
 
     if (active && !_state.isDragging) {
@@ -187,13 +271,66 @@ static double sliderPosToDB(double pos) {
     }
 
     [self updateDBLabel];
+
+    // Role label — always show for active faders, use FCP's actual role color
+    NSString *role = active ? (_state.role ?: @"") : @"";
+    _roleLabel.stringValue = role;
+    NSColor *roleColor = [NSColor secondaryLabelColor];
+    NSString *hex = _state.roleColorHex;
+    if (hex && hex.length == 7) {
+        unsigned int r = 0, g = 0, b = 0;
+        sscanf([hex UTF8String], "#%02x%02x%02x", &r, &g, &b);
+        roleColor = [NSColor colorWithRed:r/255.0 green:g/255.0 blue:b/255.0 alpha:1.0];
+    }
+    _roleLabel.textColor = playing ? roleColor : [roleColor colorWithAlphaComponent:0.5];
+
+    // Lane and name — always show
     _laneLabel.stringValue = active ? [NSString stringWithFormat:@"L%ld", (long)_state.lane] : @"";
     _nameLabel.stringValue = active ? (_state.clipName ?: @"") : @"--";
-    _nameLabel.textColor = active ? [NSColor labelColor] : [NSColor tertiaryLabelColor];
+    _nameLabel.textColor = playing ? [NSColor labelColor] : [NSColor tertiaryLabelColor];
 
-    self.layer.backgroundColor = active
-        ? [[NSColor controlBackgroundColor] colorWithAlphaComponent:0.3].CGColor
-        : [NSColor clearColor].CGColor;
+    // Slightly darker background when playing at playhead
+    if (playing) {
+        self.layer.backgroundColor = [[NSColor controlAccentColor] colorWithAlphaComponent:0.15].CGColor;
+    } else if (active) {
+        self.layer.backgroundColor = [[NSColor controlBackgroundColor] colorWithAlphaComponent:0.1].CGColor;
+    } else {
+        self.layer.backgroundColor = [NSColor clearColor].CGColor;
+    }
+
+    // Dim the slider thumb when not playing
+    _slider.alphaValue = playing ? 1.0 : (active ? 0.6 : 0.3);
+
+    // Update meter bar — use meterPeak (0..1 visual ratio from FCP's PEMeterLayer)
+    double peak = _state.meterPeak;
+    if (peak > 0.001 && active) {
+        CGFloat sliderHeight = _slider.frame.size.height;
+        CGFloat targetHeight = sliderHeight * peak;
+
+        // Animate meter bar height for smooth movement
+        [NSAnimationContext runAnimationGroup:^(NSAnimationContext *ctx) {
+            ctx.duration = 0.08; // Fast response like real meters
+            ctx.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseOut];
+            self->_meterHeight.animator.constant = targetHeight;
+        }];
+
+        // Color: green < 70%, yellow 70-90%, red > 90%
+        if (peak > 0.9) {
+            _meterBar.layer.backgroundColor = [[NSColor systemRedColor] colorWithAlphaComponent:0.85].CGColor;
+        } else if (peak > 0.7) {
+            _meterBar.layer.backgroundColor = [[NSColor systemYellowColor] colorWithAlphaComponent:0.75].CGColor;
+        } else {
+            _meterBar.layer.backgroundColor = [[NSColor systemGreenColor] colorWithAlphaComponent:0.75].CGColor;
+        }
+        _meterBar.hidden = NO;
+    } else {
+        // Quick decay to zero
+        [NSAnimationContext runAnimationGroup:^(NSAnimationContext *ctx) {
+            ctx.duration = 0.15;
+            self->_meterHeight.animator.constant = 0;
+        }];
+        _meterBar.hidden = NO; // Keep visible during decay animation
+    }
 }
 
 - (void)updateDBLabel {
@@ -207,7 +344,7 @@ static double sliderPosToDB(double pos) {
     } else {
         _dbLabel.stringValue = [NSString stringWithFormat:@"%.1f", _state.volumeDB];
     }
-    _dbLabel.textColor = [NSColor labelColor];
+    _dbLabel.textColor = _state.isPlaying ? [NSColor labelColor] : [NSColor secondaryLabelColor];
 }
 
 @end
@@ -293,36 +430,7 @@ static double sliderPosToDB(double pos) {
 }
 
 - (void)buildUI:(NSView *)content {
-    // --- Header bar ---
-    NSView *header = [[NSView alloc] init];
-    header.translatesAutoresizingMaskIntoConstraints = NO;
-    header.wantsLayer = YES;
-    header.layer.backgroundColor = [[NSColor windowBackgroundColor] CGColor];
-    [content addSubview:header];
-
-    // Status dot
-    self.statusDot = [[NSView alloc] init];
-    self.statusDot.translatesAutoresizingMaskIntoConstraints = NO;
-    self.statusDot.wantsLayer = YES;
-    self.statusDot.layer.cornerRadius = 4;
-    self.statusDot.layer.backgroundColor = [[NSColor systemGreenColor] CGColor];
-    [header addSubview:self.statusDot];
-
-    // Status label
-    self.statusLabel = [NSTextField labelWithString:@"Connected"];
-    self.statusLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    self.statusLabel.font = [NSFont systemFontOfSize:11];
-    self.statusLabel.textColor = [NSColor secondaryLabelColor];
-    [header addSubview:self.statusLabel];
-
-    // Title
-    NSTextField *title = [NSTextField labelWithString:@"Audio Mixer"];
-    title.translatesAutoresizingMaskIntoConstraints = NO;
-    title.font = [NSFont boldSystemFontOfSize:13];
-    title.alignment = NSTextAlignmentCenter;
-    [header addSubview:title];
-
-    // --- Fader container ---
+    // Fader container — fills the entire content area
     NSStackView *faderStack = [[NSStackView alloc] init];
     faderStack.translatesAutoresizingMaskIntoConstraints = NO;
     faderStack.orientation = NSUserInterfaceLayoutOrientationHorizontal;
@@ -352,25 +460,9 @@ static double sliderPosToDB(double pos) {
         [self.faderViews addObject:fv];
     }
 
-    // --- Layout ---
+    // Layout — faders fill the whole window
     [NSLayoutConstraint activateConstraints:@[
-        [header.topAnchor constraintEqualToAnchor:content.topAnchor],
-        [header.leadingAnchor constraintEqualToAnchor:content.leadingAnchor],
-        [header.trailingAnchor constraintEqualToAnchor:content.trailingAnchor],
-        [header.heightAnchor constraintEqualToConstant:32],
-
-        [self.statusDot.leadingAnchor constraintEqualToAnchor:header.leadingAnchor constant:10],
-        [self.statusDot.centerYAnchor constraintEqualToAnchor:header.centerYAnchor],
-        [self.statusDot.widthAnchor constraintEqualToConstant:8],
-        [self.statusDot.heightAnchor constraintEqualToConstant:8],
-
-        [self.statusLabel.leadingAnchor constraintEqualToAnchor:self.statusDot.trailingAnchor constant:6],
-        [self.statusLabel.centerYAnchor constraintEqualToAnchor:header.centerYAnchor],
-
-        [title.centerXAnchor constraintEqualToAnchor:header.centerXAnchor],
-        [title.centerYAnchor constraintEqualToAnchor:header.centerYAnchor],
-
-        [faderStack.topAnchor constraintEqualToAnchor:header.bottomAnchor constant:4],
+        [faderStack.topAnchor constraintEqualToAnchor:content.topAnchor constant:4],
         [faderStack.leadingAnchor constraintEqualToAnchor:content.leadingAnchor constant:4],
         [faderStack.trailingAnchor constraintEqualToAnchor:content.trailingAnchor constant:-4],
         [faderStack.bottomAnchor constraintEqualToAnchor:content.bottomAnchor constant:-4],
@@ -381,8 +473,8 @@ static double sliderPosToDB(double pos) {
 
 - (void)startPolling {
     [self stopPolling];
-    self.isPolling = YES;
-    self.pollTimer = [NSTimer scheduledTimerWithTimeInterval:0.1
+    self.isPolling = NO; // Reset re-entrancy guard
+    self.pollTimer = [NSTimer scheduledTimerWithTimeInterval:0.05
                                                      target:self
                                                    selector:@selector(pollTimerFired:)
                                                    userInfo:nil
@@ -396,194 +488,73 @@ static double sliderPosToDB(double pos) {
 }
 
 - (void)pollTimerFired:(NSTimer *)timer {
-    if (!self.panel.isVisible) return;
-    [self updateMixerState];
+    if (!self.panel || !self.panel.isVisible) return;
+    if (self.isPolling) return; // Guard against re-entrant calls
+    self.isPolling = YES;
+    @try {
+        [self updateMixerState];
+    } @catch (NSException *e) {
+        SpliceKit_log(@"[Mixer] Poll exception: %@ - %@", e.name, e.reason);
+        [self clearAllFaders];
+    }
 }
 
 - (void)updateMixerState {
-    @try {
-        id timeline = SpliceKit_getActiveTimelineModule();
-        if (!timeline) {
-            self.statusLabel.stringValue = @"No timeline";
-            self.statusDot.layer.backgroundColor = [[NSColor systemRedColor] CGColor];
-            [self clearAllFaders];
-            return;
-        }
-
-        self.statusLabel.stringValue = @"Connected";
-        self.statusDot.layer.backgroundColor = [[NSColor systemGreenColor] CGColor];
-
-        id sequence = nil;
-        if ([timeline respondsToSelector:@selector(sequence)]) {
-            sequence = ((id (*)(id, SEL))objc_msgSend)(timeline, @selector(sequence));
-        }
-        if (!sequence) { [self clearAllFaders]; return; }
-
-        // Get playhead
-        SKMixer_CMTime playhead = {0, 1, 0, 0};
-        if ([timeline respondsToSelector:@selector(playheadTime)]) {
-            playhead = ((SKMixer_CMTime (*)(id, SEL))SK_STRET_MSG)(timeline, @selector(playheadTime));
-        }
-        double playheadSec = (playhead.timescale > 0) ? (double)playhead.value / playhead.timescale : 0;
-
-        // Get primaryObject / spine
-        id primaryObj = nil;
-        if ([sequence respondsToSelector:@selector(primaryObject)]) {
-            primaryObj = ((id (*)(id, SEL))objc_msgSend)(sequence, @selector(primaryObject));
-        }
-        if (!primaryObj) { [self clearAllFaders]; return; }
-
-        id spineItems = nil;
-        if ([primaryObj respondsToSelector:@selector(containedItems)]) {
-            spineItems = ((id (*)(id, SEL))objc_msgSend)(primaryObj, @selector(containedItems));
-        }
-        if (!spineItems || ![spineItems isKindOfClass:[NSArray class]]) { [self clearAllFaders]; return; }
-
-        SEL erSel = NSSelectorFromString(@"effectiveRangeOfObject:");
-        BOOL canGetRange = [primaryObj respondsToSelector:erSel];
-
-        // Collect overlapping clips
-        NSMutableArray<NSDictionary *> *clips = [NSMutableArray array];
-
-        for (id item in (NSArray *)spineItems) {
-            BOOL spineOverlaps = NO;
-            double startSec = 0, endSec = 0;
-
-            if (canGetRange) {
-                @try {
-                    SKMixer_CMTimeRange range = ((SKMixer_CMTimeRange (*)(id, SEL, id))SK_STRET_MSG)(
-                        primaryObj, erSel, item);
-                    startSec = (range.start.timescale > 0) ? (double)range.start.value / range.start.timescale : 0;
-                    double dur = (range.duration.timescale > 0) ? (double)range.duration.value / range.duration.timescale : 0;
-                    endSec = startSec + dur;
-                    if (playheadSec >= startSec - 0.001 && playheadSec <= endSec + 0.001)
-                        spineOverlaps = YES;
-                } @catch (NSException *e) {}
-            }
-
-            if (spineOverlaps) {
-                NSString *cls = NSStringFromClass([item class]);
-                if (![cls containsString:@"Gap"] && ![cls containsString:@"Transition"]) {
-                    NSDictionary *info = [self clipInfoForItem:item lane:0 start:startSec end:endSec];
-                    if (info) [clips addObject:info];
-                }
-            }
-
-            // Connected clips
-            SEL anchoredSel = NSSelectorFromString(@"anchoredItems");
-            if ([item respondsToSelector:anchoredSel]) {
-                id anchored = ((id (*)(id, SEL))objc_msgSend)(item, anchoredSel);
-                NSArray *arr = nil;
-                if ([anchored isKindOfClass:[NSArray class]]) arr = (NSArray *)anchored;
-                else if ([anchored isKindOfClass:[NSSet class]]) arr = [(NSSet *)anchored allObjects];
-
-                for (id connected in arr ?: @[]) {
-                    double cStart = 0, cEnd = 0;
-                    BOOL connOverlaps = NO;
-                    if (canGetRange) {
-                        @try {
-                            SKMixer_CMTimeRange range = ((SKMixer_CMTimeRange (*)(id, SEL, id))SK_STRET_MSG)(
-                                primaryObj, erSel, connected);
-                            cStart = (range.start.timescale > 0) ? (double)range.start.value / range.start.timescale : 0;
-                            double dur = (range.duration.timescale > 0) ? (double)range.duration.value / range.duration.timescale : 0;
-                            cEnd = cStart + dur;
-                            if (playheadSec >= cStart - 0.001 && playheadSec <= cEnd + 0.001)
-                                connOverlaps = YES;
-                        } @catch (NSException *e) {}
-                    }
-                    if (!connOverlaps) continue;
-
-                    NSString *cls = NSStringFromClass([connected class]);
-                    if ([cls containsString:@"Transition"]) continue;
-
-                    long long lane = 0;
-                    if ([connected respondsToSelector:@selector(anchoredLane)])
-                        lane = ((long long (*)(id, SEL))objc_msgSend)(connected, @selector(anchoredLane));
-
-                    NSDictionary *info = [self clipInfoForItem:connected lane:(NSInteger)lane start:cStart end:cEnd];
-                    if (info) [clips addObject:info];
-                }
-            }
-        }
-
-        // Sort by lane descending
-        [clips sortUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b) {
-            NSInteger lA = [a[@"lane"] integerValue], lB = [b[@"lane"] integerValue];
-            if (lA != lB) return lB > lA ? NSOrderedAscending : NSOrderedDescending;
-            return [a[@"name"] compare:b[@"name"] ?: @""];
-        }];
-
-        // Update fader views
-        for (NSInteger i = 0; i < 10; i++) {
-            SpliceKitFaderView *fv = self.faderViews[i];
-            if (fv.state.isDragging) continue; // Don't update while dragging
-
-            if (i < (NSInteger)clips.count) {
-                NSDictionary *info = clips[i];
-                fv.state.isActive = YES;
-                fv.state.clipName = info[@"name"];
-                fv.state.lane = [info[@"lane"] integerValue];
-                fv.state.volumeDB = [info[@"volumeDB"] doubleValue];
-                fv.state.volumeLinear = [info[@"volumeLinear"] doubleValue];
-                fv.state.clipHandle = info[@"clipHandle"];
-                fv.state.volumeChannelHandle = info[@"volumeChannelHandle"];
-                fv.state.audioEffectStackHandle = info[@"audioEffectStackHandle"];
-                fv.state.role = info[@"role"];
-            } else {
-                fv.state.isActive = NO;
-                fv.state.clipName = nil;
-                fv.state.clipHandle = nil;
-                fv.state.volumeChannelHandle = nil;
-                fv.state.audioEffectStackHandle = nil;
-            }
-            [fv updateFromState];
-        }
-
-    } @catch (NSException *e) {
-        SpliceKit_log(@"[Mixer] Poll exception: %@", e.reason);
-    }
+    // Call the RPC handler — but it uses SpliceKit_executeOnMainThread internally,
+    // and we're already on the main thread. We need to call it on a background
+    // thread and dispatch results back to update the UI.
+    // For safety, wrap everything in a dispatch to avoid re-entrancy crashes.
+    __weak SpliceKitMixerPanel *weakSelf = self;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0), ^{
+        extern NSDictionary *SpliceKit_handleMixerGetState(NSDictionary *params);
+        NSDictionary *result = SpliceKit_handleMixerGetState(@{});
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [weakSelf applyMixerState:result];
+        });
+    });
 }
 
-- (NSDictionary *)clipInfoForItem:(id)item lane:(NSInteger)lane start:(double)start end:(double)end {
-    NSMutableDictionary *info = [NSMutableDictionary dictionary];
-    info[@"lane"] = @(lane);
-    info[@"start"] = @(start);
-    info[@"end"] = @(end);
-    info[@"clipHandle"] = SpliceKit_storeHandle(item);
+- (void)applyMixerState:(NSDictionary *)result {
+    self.isPolling = NO; // Allow next poll
 
-    if ([item respondsToSelector:@selector(displayName)]) {
-        id name = ((id (*)(id, SEL))objc_msgSend)(item, @selector(displayName));
-        info[@"name"] = name ?: @"";
+    if (result[@"error"]) {
+        [self clearAllFaders];
+        return;
     }
 
-    // Read volume via audioEffectsForIdentifier:
-    @try {
-        SEL aeSel = NSSelectorFromString(@"audioEffectsForIdentifier:");
-        if ([item respondsToSelector:aeSel]) {
-            id audioES = ((id (*)(id, SEL, unsigned long long))objc_msgSend)(item, aeSel, 0ULL);
-            if (audioES) {
-                info[@"audioEffectStackHandle"] = SpliceKit_storeHandle(audioES);
-                SEL volSel = NSSelectorFromString(@"audioLevelChannel");
-                if ([audioES respondsToSelector:volSel]) {
-                    id volChan = ((id (*)(id, SEL))objc_msgSend)(audioES, volSel);
-                    if (volChan) {
-                        double linear = SpliceKit_channelValue(volChan);
-                        info[@"volumeLinear"] = @(linear);
-                        info[@"volumeDB"] = (linear > 0) ? @(20.0 * log10(linear)) : @(-96.0);
-                        info[@"volumeChannelHandle"] = SpliceKit_storeHandle(volChan);
-                    }
-                }
-            }
+    NSArray *faderData = result[@"faders"];
+
+    for (NSInteger i = 0; i < 10; i++) {
+        SpliceKitFaderView *fv = self.faderViews[i];
+        if (fv.state.isDragging) continue;
+
+        if (i < (NSInteger)faderData.count) {
+            NSDictionary *info = faderData[i];
+            fv.state.isActive = YES; // All role faders are always active
+            fv.state.isPlaying = [info[@"playing"] boolValue]; // Playing = clip at playhead
+            fv.state.clipName = info[@"name"] ?: @"";
+            fv.state.lane = [info[@"lane"] integerValue];
+            fv.state.volumeDB = [info[@"volumeDB"] doubleValue];
+            fv.state.volumeLinear = [info[@"volumeLinear"] doubleValue];
+            fv.state.clipHandle = info[@"clipHandle"];
+            fv.state.volumeChannelHandle = info[@"volumeChannelHandle"];
+            fv.state.audioEffectStackHandle = info[@"audioEffectStackHandle"];
+            fv.state.role = info[@"role"];
+            fv.state.roleColorHex = info[@"roleColor"];
+            fv.state.meterDB = [info[@"meterDB"] doubleValue];
+            fv.state.meterLinear = [info[@"meterLinear"] doubleValue];
+            fv.state.meterPeak = [info[@"meterPeak"] doubleValue];
+        } else {
+            fv.state.isActive = NO;
+            fv.state.isPlaying = NO;
+            fv.state.clipName = nil;
+            fv.state.clipHandle = nil;
+            fv.state.volumeChannelHandle = nil;
+            fv.state.audioEffectStackHandle = nil;
+            fv.state.role = nil;
         }
-    } @catch (NSException *e) {}
-
-    // Defaults if no audio
-    if (!info[@"volumeDB"]) {
-        info[@"volumeDB"] = @(0.0);
-        info[@"volumeLinear"] = @(1.0);
+        [fv updateFromState];
     }
-
-    return info;
 }
 
 - (void)clearAllFaders {
@@ -594,6 +565,33 @@ static double sliderPosToDB(double pos) {
         fv.state.volumeChannelHandle = nil;
         [fv updateFromState];
     }
+}
+
+#pragma mark - Debug
+
+- (NSDictionary *)debugState {
+    NSMutableArray *faderStates = [NSMutableArray array];
+    for (SpliceKitFaderView *fv in self.faderViews) {
+        [faderStates addObject:@{
+            @"index": @(fv.state.index),
+            @"active": @(fv.state.isActive),
+            @"playing": @(fv.state.isPlaying),
+            @"dragging": @(fv.state.isDragging),
+            @"name": fv.state.clipName ?: @"",
+            @"role": fv.state.role ?: @"",
+            @"lane": @(fv.state.lane),
+            @"volumeDB": @(fv.state.volumeDB),
+            @"clipHandle": fv.state.clipHandle ?: @"",
+            @"volHandle": fv.state.volumeChannelHandle ?: @"",
+            @"sliderValue": @(fv.slider.doubleValue),
+        }];
+    }
+    return @{
+        @"panelVisible": @(self.panel.isVisible),
+        @"isPolling": @(self.isPolling),
+        @"timerValid": @(self.pollTimer.isValid),
+        @"faders": faderStates,
+    };
 }
 
 #pragma mark - Volume Control

@@ -4,7 +4,7 @@ Welcome to **SpliceKit**!
 
 SpliceKit gives superpowers to Apple's Final Cut Pro.
 
-If you're a video editor, the best place to get started is the official [SpliceKit website](https://splicekit.fcp.cafe).
+If you're a video editor, the best place to get started is the official [SpliceKit website](https://splicekit.fcp.cafe). Definitely check out the [FAQ](https://splicekit.fcp.cafe/faq/) for an easier explanation of some of what SpliceKit can do. 
 
 You can also join us on [FCP Cafe](https://fcp.cafe) in the SpliceKit [Discord channels](https://discord.com/invite/HD3FPc4Azu) for help, questions, or feature requests. 
 

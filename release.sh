@@ -288,12 +288,16 @@ if [ -z "${REMOTE_TAG_SHA}" ]; then
 fi
 
 echo "[14/14] Creating GitHub release..."
-gh release create "${TAG_NAME}" "${DMG_PATH}" \
+if gh release create "${TAG_NAME}" "${DMG_PATH}" \
     -R "${RELEASE_REPO}" \
     --verify-tag \
     --title "${TAG_NAME}" \
-    --notes "${NOTES}" \
-    2>/dev/null && RELEASE_URL=$(gh release view "${TAG_NAME}" -R "${RELEASE_REPO}" --json url -q '.url') || RELEASE_URL="(check GitHub)"
+    --notes "${NOTES}"; then
+    RELEASE_URL=$(gh release view "${TAG_NAME}" -R "${RELEASE_REPO}" --json url -q '.url')
+else
+    echo "ERROR: Failed to create GitHub release ${TAG_NAME}" >&2
+    exit 1
+fi
 
 echo ""
 echo "========================================="

@@ -3255,8 +3255,18 @@ def mixer_get_state() -> str:
         db = f.get("volumeDB", 0)
         db_str = f"-inf" if db == float("-inf") else f"{db:.1f}"
         role_str = f" [{f['role']}]" if f.get("role") else ""
+        flags = []
+        if f.get("soloed"):
+            flags.append("SOLO")
+        if f.get("soloMuted"):
+            flags.append("solo-muted")
+        if f.get("muted"):
+            flags.append("MUTE")
+        elif f.get("muteMixed"):
+            flags.append("mute-mixed")
+        flag_str = f" ({', '.join(flags)})" if flags else ""
         lines.append(f"  Fader {f['index']}: {f.get('name', '?')} (lane {f['lane']})"
-                     f"  {db_str} dB{role_str}")
+                     f"  {db_str} dB{role_str}{flag_str}")
         lines.append(f"    handles: clip={f.get('clipHandle','?')}"
                      f" vol={f.get('volumeChannelHandle','?')}"
                      f" es={f.get('effectStackHandle','?')}")
@@ -3291,6 +3301,67 @@ def mixer_set_volume(handle: str, volume_db: float = None,
     db = r.get("volumeDB", 0)
     db_str = f"-inf" if db == float("-inf") else f"{db:.1f}"
     return f"Volume set: {db_str} dB (linear: {r.get('volumeLinear', 0):.3f})"
+
+
+@mcp.tool(annotations=_tool_annotations("mixer_set_solo"))
+def mixer_set_solo(index: int = -1, role: str = "", mode: str = "toggle",
+                   solo: bool = None) -> str:
+    """Solo, unsolo, or clear solo for a mixer role fader.
+
+    Args:
+        index: Mixer fader index from mixer_get_state. Use -1 when addressing by role or clearing.
+        role: Role name from mixer_get_state, used when index is not provided.
+        mode: "toggle", "exclusive", "add", "remove", or "clear".
+        solo: Optional explicit state. If omitted, toggle/exclusive behavior is used.
+    """
+    params = {"mode": mode}
+    if index >= 0:
+        params["index"] = index
+    if role:
+        params["role"] = role
+    if solo is not None:
+        params["solo"] = solo
+
+    r = bridge.call("mixer.setSolo", **params)
+    if _err(r):
+        return f"Error: {r.get('error', r)}"
+    if mode == "clear":
+        return "Mixer solo cleared"
+    state = "soloed" if r.get("soloed") else "not soloed"
+    target = r.get("role") or f"fader {r.get('index', index)}"
+    return f"Mixer role {target}: {state} ({r.get('soloObjectCount', 0)} soloed objects)"
+
+
+@mcp.tool(annotations=_tool_annotations("mixer_set_mute"))
+def mixer_set_mute(index: int = -1, role: str = "", mode: str = "toggle",
+                   muted: bool = None) -> str:
+    """Mute, unmute, or clear mute for a mixer role fader.
+
+    This uses Final Cut Pro's disabled audio-role playback map, so it does not
+    change clip gain or insert mute effects.
+
+    Args:
+        index: Mixer fader index from mixer_get_state. Use -1 when addressing by role or clearing.
+        role: Role name from mixer_get_state, used when index is not provided.
+        mode: "toggle", "mute", "unmute", or "clear".
+        muted: Optional explicit mute state. If omitted, toggle/mode behavior is used.
+    """
+    params = {"mode": mode}
+    if index >= 0:
+        params["index"] = index
+    if role:
+        params["role"] = role
+    if muted is not None:
+        params["muted"] = muted
+
+    r = bridge.call("mixer.setMute", **params)
+    if _err(r):
+        return f"Error: {r.get('error', r)}"
+    if mode == "clear":
+        return "Mixer role mutes cleared"
+    state = "muted" if r.get("muted") else "unmuted"
+    target = r.get("role") or f"fader {r.get('index', index)}"
+    return f"Mixer role {target}: {state} ({r.get('roleUIDCount', 0)} role UIDs)"
 
 
 @mcp.tool(annotations=_tool_annotations("mixer_volume_begin"))

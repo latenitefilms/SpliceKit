@@ -14823,10 +14823,19 @@ static NSString *SpliceKit_rawClipRoleUID(id clip) {
     if (!clip) return nil;
     @try {
         SEL ariSel = NSSelectorFromString(@"audioRoleIdentifier");
-        if (![clip respondsToSelector:ariSel]) return nil;
-        id roleUID = ((id (*)(id, SEL))objc_msgSend)(clip, ariSel);
-        if ([roleUID isKindOfClass:[NSString class]] && [roleUID length] > 0) {
-            return roleUID;
+        if ([clip respondsToSelector:ariSel]) {
+            id roleUID = ((id (*)(id, SEL))objc_msgSend)(clip, ariSel);
+            if ([roleUID isKindOfClass:[NSString class]] && [roleUID length] > 0) {
+                return roleUID;
+            }
+        }
+
+        SEL guessSel = NSSelectorFromString(@"guessAudioBuiltInMainRoleUID");
+        if ([clip respondsToSelector:guessSel]) {
+            id roleUID = ((id (*)(id, SEL))objc_msgSend)(clip, guessSel);
+            if ([roleUID isKindOfClass:[NSString class]] && [roleUID length] > 0) {
+                return roleUID;
+            }
         }
     } @catch (NSException *e) {}
     return nil;
@@ -14995,10 +15004,12 @@ static void SpliceKit_mixerCollectClipEntries(id item,
     if ((collectionRoleCarrier || SpliceKit_mixerIsAudioCarrier(item)) &&
         endSec > startSec + 0.0001) {
         NSString *role = SpliceKit_readClipRole(item) ?: @"Dialogue";
+        NSString *roleUID = SpliceKit_rawClipRoleUID(item) ?: @"";
         NSString *roleColor = SpliceKit_readClipRoleColor(item) ?: @"";
         [out addObject:@{
             @"item": item,
             @"role": role,
+            @"roleUID": roleUID,
             @"roleColor": roleColor,
             @"start": @(startSec),
             @"end": @(endSec),
@@ -15016,6 +15027,231 @@ static void SpliceKit_mixerCollectClipEntries(id item,
         SpliceKit_mixerCollectClipEntries(child, primaryObj, erSel, canGetRange,
                                           lane, startSec, endSec, out, visited);
     }
+}
+
+static NSMutableOrderedSet *SpliceKit_mixerRoleOrderFromClips(NSArray<NSDictionary *> *allClips) {
+    NSMutableOrderedSet *roleOrder = [NSMutableOrderedSet orderedSet];
+    for (NSDictionary *clip in allClips) {
+        NSString *r = clip[@"role"];
+        if ([r containsString:@"Dialogue"]) [roleOrder addObject:r];
+    }
+    for (NSDictionary *clip in allClips) {
+        NSString *r = clip[@"role"];
+        if ([r containsString:@"Music"]) [roleOrder addObject:r];
+    }
+    for (NSDictionary *clip in allClips) {
+        NSString *r = clip[@"role"];
+        if ([r containsString:@"Effects"]) [roleOrder addObject:r];
+    }
+    for (NSDictionary *clip in allClips) {
+        NSString *r = clip[@"role"];
+        if (r.length > 0) [roleOrder addObject:r];
+    }
+    return roleOrder;
+}
+
+static NSArray *SpliceKit_mixerObjectsForRole(NSArray<NSDictionary *> *allClips, NSString *role) {
+    if (role.length == 0) return @[];
+    NSMutableArray *objects = [NSMutableArray array];
+    NSMutableSet<NSString *> *visited = [NSMutableSet set];
+    for (NSDictionary *clip in allClips) {
+        if (![clip[@"role"] isEqualToString:role]) continue;
+        id item = clip[@"item"];
+        if (!item) continue;
+        NSString *key = SpliceKit_handlePointerKey(item);
+        if (key.length > 0 && [visited containsObject:key]) continue;
+        if (key.length > 0) [visited addObject:key];
+        [objects addObject:item];
+    }
+    return objects;
+}
+
+static NSArray<NSString *> *SpliceKit_mixerRoleUIDsForRole(NSArray<NSDictionary *> *allClips, NSString *role) {
+    if (role.length == 0) return @[];
+    NSMutableOrderedSet<NSString *> *roleUIDs = [NSMutableOrderedSet orderedSet];
+    for (NSDictionary *clip in allClips) {
+        if (![clip[@"role"] isEqualToString:role]) continue;
+        NSString *roleUID = clip[@"roleUID"];
+        if (roleUID.length > 0) [roleUIDs addObject:roleUID];
+    }
+    return [roleUIDs array];
+}
+
+static BOOL SpliceKit_mixerSetIntersectsObjects(NSSet *set, NSArray *objects) {
+    if (set.count == 0 || objects.count == 0) return NO;
+    for (id object in objects) {
+        if ([set containsObject:object]) return YES;
+    }
+    return NO;
+}
+
+static BOOL SpliceKit_mixerBuildRoleSnapshot(id timeline,
+                                             id *outSequence,
+                                             id *outRootObject,
+                                             NSMutableArray **outAllClips,
+                                             NSMutableOrderedSet **outRoleOrder,
+                                             NSString **outError) {
+    if (!timeline) {
+        if (outError) *outError = @"No active timeline module. Is a project open?";
+        return NO;
+    }
+
+    id sequence = nil;
+    @try {
+        if ([timeline respondsToSelector:@selector(sequence)]) {
+            sequence = ((id (*)(id, SEL))objc_msgSend)(timeline, @selector(sequence));
+        }
+    } @catch (NSException *e) {}
+    if (!sequence) {
+        if (outError) *outError = @"No sequence in timeline.";
+        return NO;
+    }
+
+    id primaryObj = nil;
+    @try {
+        if ([sequence respondsToSelector:@selector(primaryObject)]) {
+            primaryObj = ((id (*)(id, SEL))objc_msgSend)(sequence, @selector(primaryObject));
+        }
+    } @catch (NSException *e) {}
+    if (!primaryObj) {
+        if (outError) *outError = @"No primary object on sequence";
+        return NO;
+    }
+
+    id spineItems = nil;
+    @try {
+        if ([primaryObj respondsToSelector:@selector(containedItems)]) {
+            spineItems = ((id (*)(id, SEL))objc_msgSend)(primaryObj, @selector(containedItems));
+        }
+    } @catch (NSException *e) {}
+    if (!spineItems || ![spineItems isKindOfClass:[NSArray class]]) {
+        if (outError) *outError = @"No spine items found";
+        return NO;
+    }
+
+    SEL erSel = NSSelectorFromString(@"effectiveRangeOfObject:");
+    BOOL canGetRange = [primaryObj respondsToSelector:erSel];
+    NSMutableArray *allClips = [NSMutableArray array];
+    NSMutableSet<NSString *> *visited = [NSMutableSet set];
+    for (id item in (NSArray *)spineItems) {
+        SpliceKit_mixerCollectClipEntries(item, primaryObj, erSel, canGetRange,
+                                          0, 0.0, 0.0, allClips, visited);
+    }
+
+    if (outSequence) *outSequence = sequence;
+    if (outRootObject) *outRootObject = primaryObj;
+    if (outAllClips) *outAllClips = allClips;
+    if (outRoleOrder) *outRoleOrder = SpliceKit_mixerRoleOrderFromClips(allClips);
+    return YES;
+}
+
+static NSString *SpliceKit_mixerRoleFromParams(NSDictionary *params,
+                                               NSMutableOrderedSet *roleOrder,
+                                               NSInteger *outIndex) {
+    NSString *role = [params[@"role"] isKindOfClass:[NSString class]] ? params[@"role"] : nil;
+    NSInteger index = NSNotFound;
+    if (role.length == 0 && params[@"index"]) {
+        index = [params[@"index"] integerValue];
+        if (index >= 0 && (NSUInteger)index < roleOrder.count) {
+            role = [roleOrder objectAtIndex:(NSUInteger)index];
+        }
+    } else if (role.length > 0) {
+        NSUInteger found = [roleOrder indexOfObject:role];
+        if (found != NSNotFound) index = (NSInteger)found;
+    }
+    if (outIndex) *outIndex = index;
+    return role;
+}
+
+static NSSet *SpliceKit_mixerSoloedObjects(id sequence) {
+    @try {
+        SEL soloedObjectsSel = NSSelectorFromString(@"soloedObjects");
+        if ([sequence respondsToSelector:soloedObjectsSel]) {
+            id rawSoloed = ((id (*)(id, SEL))objc_msgSend)(sequence, soloedObjectsSel);
+            if ([rawSoloed isKindOfClass:[NSSet class]]) return rawSoloed;
+        }
+    } @catch (NSException *e) {}
+    return nil;
+}
+
+static NSSet *SpliceKit_mixerDisabledAudioRoleUIDs(id sequence) {
+    @try {
+        SEL disabledSel = NSSelectorFromString(@"roleUIDsForDisabledAVRolesOfType:");
+        if ([sequence respondsToSelector:disabledSel]) {
+            id disabled = ((id (*)(id, SEL, int))objc_msgSend)(sequence, disabledSel, 0);
+            if ([disabled isKindOfClass:[NSSet class]]) return disabled;
+        }
+    } @catch (NSException *e) {}
+    return nil;
+}
+
+static NSSet *SpliceKit_mixerDisabledAudioRoleUIDsForRootObject(id rootObject, id sequence) {
+    @try {
+        Class playbackRolesClass = objc_getClass("FFTimelinePlaybackRoles");
+        SEL disabledMapSel = NSSelectorFromString(@"disabledRoleUIDsMapForRootItem:");
+        if (playbackRolesClass && rootObject && [playbackRolesClass respondsToSelector:disabledMapSel]) {
+            id map = ((id (*)(Class, SEL, id))objc_msgSend)(playbackRolesClass, disabledMapSel, rootObject);
+            if ([map respondsToSelector:@selector(objectForKey:)]) {
+                id disabledAudio = ((id (*)(id, SEL, id))objc_msgSend)(map, @selector(objectForKey:), @0);
+                if ([disabledAudio isKindOfClass:[NSSet class]]) return disabledAudio;
+            }
+        }
+    } @catch (NSException *e) {}
+    return SpliceKit_mixerDisabledAudioRoleUIDs(sequence);
+}
+
+static NSUInteger SpliceKit_mixerCountDisabledRoleUIDs(NSArray<NSString *> *roleUIDs, NSSet *disabledRoleUIDs) {
+    if (roleUIDs.count == 0 || disabledRoleUIDs.count == 0) return 0;
+    NSUInteger count = 0;
+    for (NSString *roleUID in roleUIDs) {
+        if ([disabledRoleUIDs containsObject:roleUID]) count++;
+    }
+    return count;
+}
+
+static BOOL SpliceKit_mixerSetAudioRolesEnabled(id rootObject,
+                                                id sequence,
+                                                NSSet<NSString *> *roleUIDs,
+                                                BOOL enabled,
+                                                NSString **outError) {
+    if (roleUIDs.count == 0) {
+        if (outError) *outError = @"No audio role UIDs found for this mixer fader";
+        return NO;
+    }
+
+    Class playbackRolesClass = objc_getClass("FFTimelinePlaybackRoles");
+    SEL setRolesSel = NSSelectorFromString(@"setAudioVideoEnabledState:forAudioRoles:forVideoRoles:inRootItem:");
+    if (playbackRolesClass && [playbackRolesClass respondsToSelector:setRolesSel] && rootObject) {
+        ((void (*)(Class, SEL, BOOL, id, id, id))objc_msgSend)(
+            playbackRolesClass, setRolesSel, enabled, roleUIDs, [NSSet set], rootObject);
+        return YES;
+    }
+
+    SEL setDisabledSel = NSSelectorFromString(@"setRoleUIDsForDisabledAudio:video:");
+    if (![sequence respondsToSelector:setDisabledSel]) {
+        if (outError) *outError = @"FCP sequence does not expose disabled audio role controls";
+        return NO;
+    }
+
+    NSMutableSet *nextDisabled = [NSMutableSet setWithSet:(SpliceKit_mixerDisabledAudioRoleUIDs(sequence) ?: [NSSet set])];
+    if (enabled) {
+        [nextDisabled minusSet:roleUIDs];
+    } else {
+        [nextDisabled unionSet:roleUIDs];
+    }
+
+    NSSet *disabledVideo = nil;
+    @try {
+        SEL disabledSel = NSSelectorFromString(@"roleUIDsForDisabledAVRolesOfType:");
+        if ([sequence respondsToSelector:disabledSel]) {
+            id rawDisabledVideo = ((id (*)(id, SEL, int))objc_msgSend)(sequence, disabledSel, 1);
+            if ([rawDisabledVideo isKindOfClass:[NSSet class]]) disabledVideo = rawDisabledVideo;
+        }
+    } @catch (NSException *e) {}
+
+    ((void (*)(id, SEL, id, id))objc_msgSend)(
+        sequence, setDisabledSel, nextDisabled, disabledVideo ?: [NSSet set]);
+    return YES;
 }
 
 // mixer.getState — enumerate clips at playhead with volumes, lanes, roles
@@ -15161,23 +15397,10 @@ NSDictionary *SpliceKit_handleMixerGetState(NSDictionary *params) {
             }
 
             // Step 2: Collect unique roles (ordered: Dialogue first, then Music, Effects, others)
-            NSMutableOrderedSet *roleOrder = [NSMutableOrderedSet orderedSet];
-            // Add standard roles first so they get consistent positions
-            for (NSDictionary *clip in allClips) {
-                NSString *r = clip[@"role"];
-                if ([r containsString:@"Dialogue"]) [roleOrder addObject:r];
-            }
-            for (NSDictionary *clip in allClips) {
-                NSString *r = clip[@"role"];
-                if ([r containsString:@"Music"]) [roleOrder addObject:r];
-            }
-            for (NSDictionary *clip in allClips) {
-                NSString *r = clip[@"role"];
-                if ([r containsString:@"Effects"]) [roleOrder addObject:r];
-            }
-            for (NSDictionary *clip in allClips) {
-                [roleOrder addObject:clip[@"role"]];
-            }
+            NSMutableOrderedSet *roleOrder = SpliceKit_mixerRoleOrderFromClips(allClips);
+            NSSet *soloedObjects = SpliceKit_mixerSoloedObjects(sequence);
+            BOOL soloActive = (soloedObjects.count > 0);
+            NSSet *disabledAudioRoleUIDs = SpliceKit_mixerDisabledAudioRoleUIDsForRootObject(primaryObj, sequence);
 
             // Step 3: For each role, find the clip at the playhead and build fader data
             NSMutableArray *faders = [NSMutableArray array];
@@ -15217,6 +15440,20 @@ NSDictionary *SpliceKit_handleMixerGetState(NSDictionary *params) {
                 fader[@"index"] = @(faderIdx);
                 fader[@"role"] = role;
                 if (roleColor.length > 0) fader[@"roleColor"] = roleColor;
+
+                NSArray *roleObjects = SpliceKit_mixerObjectsForRole(allClips, role);
+                BOOL roleSoloed = SpliceKit_mixerSetIntersectsObjects(soloedObjects, roleObjects);
+                fader[@"soloed"] = @(roleSoloed);
+                fader[@"soloActive"] = @(soloActive);
+                fader[@"soloMuted"] = @(soloActive && !roleSoloed);
+                fader[@"soloObjectCount"] = @(roleObjects.count);
+
+                NSArray<NSString *> *roleUIDs = SpliceKit_mixerRoleUIDsForRole(allClips, role);
+                NSUInteger mutedUIDCount = SpliceKit_mixerCountDisabledRoleUIDs(roleUIDs, disabledAudioRoleUIDs);
+                fader[@"muted"] = @(roleUIDs.count > 0 && mutedUIDCount == roleUIDs.count);
+                fader[@"muteMixed"] = @(mutedUIDCount > 0 && mutedUIDCount < roleUIDs.count);
+                fader[@"mutedRoleUIDCount"] = @(mutedUIDCount);
+                fader[@"roleUIDCount"] = @(roleUIDs.count);
 
                 if (bestClip) {
                     // Active: clip with this role is at the playhead
@@ -15519,7 +15756,10 @@ NSDictionary *SpliceKit_handleMixerGetState(NSDictionary *params) {
                 @"faders": indexed,
                 @"count": @(indexed.count),
                 @"totalRoles": @(roleOrder.count),
-                @"roles": [roleOrder array]
+                @"roles": [roleOrder array],
+                @"soloActive": @(soloActive),
+                @"soloObjectCount": @(soloedObjects.count),
+                @"mutedRoleUIDCount": @(disabledAudioRoleUIDs.count)
             } mutableCopy];
             NSMutableArray *resolvedClipPreview = [NSMutableArray array];
             NSUInteger previewCount = MIN((NSUInteger)20, allClips.count);
@@ -15622,6 +15862,194 @@ static NSDictionary *SpliceKit_handleMixerSetVolume(NSDictionary *params) {
             } else {
                 result = @{@"error": @"Failed to set channel value"};
             }
+        } @catch (NSException *e) {
+            result = @{@"error": [NSString stringWithFormat:@"Exception: %@", e.reason]};
+        }
+    });
+    return result;
+}
+
+// mixer.setSolo — solo role faders by writing FCP's native sequence solo set
+NSDictionary *SpliceKit_handleMixerSetSolo(NSDictionary *params) {
+    NSString *mode = [params[@"mode"] isKindOfClass:[NSString class]] ? params[@"mode"] : @"toggle";
+
+    __block NSDictionary *result = nil;
+    SpliceKit_executeOnMainThread(^{
+        @try {
+            id timeline = SpliceKit_getActiveTimelineModule();
+            id sequence = nil;
+            id rootObject = nil;
+            NSMutableArray *allClips = nil;
+            NSMutableOrderedSet *roleOrder = nil;
+            NSString *snapshotError = nil;
+            if (!SpliceKit_mixerBuildRoleSnapshot(timeline, &sequence, &rootObject, &allClips, &roleOrder, &snapshotError)) {
+                result = @{@"error": snapshotError ?: @"Unable to inspect mixer roles"};
+                return;
+            }
+
+            SEL setSoloedSel = NSSelectorFromString(@"setSoloedObjects:");
+            if (![sequence respondsToSelector:setSoloedSel]) {
+                result = @{@"error": @"FCP sequence does not expose solo controls"};
+                return;
+            }
+
+            if ([mode isEqualToString:@"clear"]) {
+                ((void (*)(id, SEL, id))objc_msgSend)(sequence, setSoloedSel, nil);
+                result = @{
+                    @"ok": @YES,
+                    @"mode": mode,
+                    @"soloed": @NO,
+                    @"soloActive": @NO,
+                    @"soloObjectCount": @(0)
+                };
+                return;
+            }
+
+            NSInteger index = NSNotFound;
+            NSString *role = SpliceKit_mixerRoleFromParams(params, roleOrder, &index);
+            if (role.length == 0) {
+                result = @{@"error": @"role or index parameter required"};
+                return;
+            }
+
+            NSArray *roleObjects = SpliceKit_mixerObjectsForRole(allClips, role);
+            if (roleObjects.count == 0) {
+                result = @{@"error": @"No timeline objects found for this mixer role"};
+                return;
+            }
+
+            NSSet *currentSoloed = SpliceKit_mixerSoloedObjects(sequence) ?: [NSSet set];
+            NSMutableSet *nextSoloed = [NSMutableSet setWithSet:currentSoloed];
+            BOOL currentlySoloed = SpliceKit_mixerSetIntersectsObjects(currentSoloed, roleObjects);
+
+            BOOL hasExplicitSolo = (params[@"solo"] != nil);
+            BOOL targetSoloed = hasExplicitSolo ? [params[@"solo"] boolValue] : !currentlySoloed;
+            if ([mode isEqualToString:@"add"]) {
+                targetSoloed = YES;
+            } else if ([mode isEqualToString:@"remove"]) {
+                targetSoloed = NO;
+            } else if ([mode isEqualToString:@"exclusive"]) {
+                if (!hasExplicitSolo) targetSoloed = YES;
+                [nextSoloed removeAllObjects];
+            } else if (![mode isEqualToString:@"toggle"]) {
+                result = @{@"error": @"mode must be toggle, exclusive, add, remove, or clear"};
+                return;
+            }
+
+            if (targetSoloed) {
+                [nextSoloed addObjectsFromArray:roleObjects];
+            } else {
+                [nextSoloed minusSet:[NSSet setWithArray:roleObjects]];
+            }
+
+            NSSet *nextSet = nextSoloed.count > 0 ? [NSSet setWithSet:nextSoloed] : nil;
+            ((void (*)(id, SEL, id))objc_msgSend)(sequence, setSoloedSel, nextSet);
+
+            BOOL roleSoloed = SpliceKit_mixerSetIntersectsObjects(nextSet, roleObjects);
+            result = @{
+                @"ok": @YES,
+                @"mode": mode,
+                @"role": role,
+                @"index": @(index),
+                @"soloed": @(roleSoloed),
+                @"soloActive": @(nextSet.count > 0),
+                @"roleObjectCount": @(roleObjects.count),
+                @"soloObjectCount": @(nextSet.count)
+            };
+        } @catch (NSException *e) {
+            result = @{@"error": [NSString stringWithFormat:@"Exception: %@", e.reason]};
+        }
+    });
+    return result;
+}
+
+// mixer.setMute — mute role faders through FCP's disabled audio-role playback map
+NSDictionary *SpliceKit_handleMixerSetMute(NSDictionary *params) {
+    NSString *mode = [params[@"mode"] isKindOfClass:[NSString class]] ? params[@"mode"] : @"toggle";
+
+    __block NSDictionary *result = nil;
+    SpliceKit_executeOnMainThread(^{
+        @try {
+            id timeline = SpliceKit_getActiveTimelineModule();
+            id sequence = nil;
+            id rootObject = nil;
+            NSMutableArray *allClips = nil;
+            NSMutableOrderedSet *roleOrder = nil;
+            NSString *snapshotError = nil;
+            if (!SpliceKit_mixerBuildRoleSnapshot(timeline, &sequence, &rootObject, &allClips, &roleOrder, &snapshotError)) {
+                result = @{@"error": snapshotError ?: @"Unable to inspect mixer roles"};
+                return;
+            }
+
+            id playbackRoot = rootObject ? rootObject : sequence;
+
+            if ([mode isEqualToString:@"clear"]) {
+                NSMutableOrderedSet *allRoleUIDs = [NSMutableOrderedSet orderedSet];
+                for (NSString *role in roleOrder) {
+                    [allRoleUIDs addObjectsFromArray:SpliceKit_mixerRoleUIDsForRole(allClips, role)];
+                }
+                if (allRoleUIDs.count > 0) {
+                    NSString *setError = nil;
+                    BOOL ok = SpliceKit_mixerSetAudioRolesEnabled(
+                        playbackRoot, sequence, [NSSet setWithArray:[allRoleUIDs array]], YES, &setError);
+                    if (!ok) {
+                        result = @{@"error": setError ?: @"Failed to clear mixer role mutes"};
+                        return;
+                    }
+                }
+                result = @{
+                    @"ok": @YES,
+                    @"mode": mode,
+                    @"muted": @NO,
+                    @"roleUIDCount": @(allRoleUIDs.count)
+                };
+                return;
+            }
+
+            NSInteger index = NSNotFound;
+            NSString *role = SpliceKit_mixerRoleFromParams(params, roleOrder, &index);
+            if (role.length == 0) {
+                result = @{@"error": @"role or index parameter required"};
+                return;
+            }
+
+            NSArray<NSString *> *roleUIDs = SpliceKit_mixerRoleUIDsForRole(allClips, role);
+            if (roleUIDs.count == 0) {
+                result = @{@"error": @"No audio role UIDs found for this mixer fader"};
+                return;
+            }
+
+            NSSet *disabledAudioRoleUIDs = SpliceKit_mixerDisabledAudioRoleUIDsForRootObject(rootObject, sequence);
+            NSUInteger mutedUIDCount = SpliceKit_mixerCountDisabledRoleUIDs(roleUIDs, disabledAudioRoleUIDs);
+            BOOL currentlyMuted = (roleUIDs.count > 0 && mutedUIDCount == roleUIDs.count);
+
+            BOOL hasExplicitMuted = (params[@"muted"] != nil);
+            BOOL targetMuted = hasExplicitMuted ? [params[@"muted"] boolValue] : !currentlyMuted;
+            if ([mode isEqualToString:@"mute"]) {
+                targetMuted = YES;
+            } else if ([mode isEqualToString:@"unmute"]) {
+                targetMuted = NO;
+            } else if (![mode isEqualToString:@"toggle"]) {
+                result = @{@"error": @"mode must be toggle, mute, unmute, or clear"};
+                return;
+            }
+
+            NSString *setError = nil;
+            BOOL ok = SpliceKit_mixerSetAudioRolesEnabled(
+                playbackRoot, sequence, [NSSet setWithArray:roleUIDs], !targetMuted, &setError);
+            if (!ok) {
+                result = @{@"error": setError ?: @"Failed to update mixer role mute"};
+                return;
+            }
+
+            result = @{
+                @"ok": @YES,
+                @"mode": mode,
+                @"role": role,
+                @"index": @(index),
+                @"muted": @(targetMuted),
+                @"roleUIDCount": @(roleUIDs.count)
+            };
         } @catch (NSException *e) {
             result = @{@"error": [NSString stringWithFormat:@"Exception: %@", e.reason]};
         }
@@ -24392,6 +24820,10 @@ NSDictionary *SpliceKit_handleRequest(NSDictionary *request) {
         result = SpliceKit_handleMixerGetState(params);
     } else if ([method isEqualToString:@"mixer.setVolume"]) {
         result = SpliceKit_handleMixerSetVolume(params);
+    } else if ([method isEqualToString:@"mixer.setSolo"]) {
+        result = SpliceKit_handleMixerSetSolo(params);
+    } else if ([method isEqualToString:@"mixer.setMute"]) {
+        result = SpliceKit_handleMixerSetMute(params);
     } else if ([method isEqualToString:@"mixer.setMasterVolume"]) {
         result = SpliceKit_handleMixerSetMasterVolume(params);
     } else if ([method isEqualToString:@"mixer.volumeBegin"]) {

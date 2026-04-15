@@ -27,6 +27,16 @@ struct MixerView: View {
                                 Task {
                                     await model.endVolumeChange(faderIndex: fader.id)
                                 }
+                            },
+                            onToggleSolo: {
+                                Task {
+                                    await model.toggleSolo(faderIndex: fader.id)
+                                }
+                            },
+                            onToggleMute: {
+                                Task {
+                                    await model.toggleMute(faderIndex: fader.id)
+                                }
                             }
                         )
 
@@ -140,13 +150,15 @@ private struct MixerChannelStrip: View {
     let onDragStart: () -> Void
     let onDragChange: (Double) -> Void
     let onDragEnd: () -> Void
+    let onToggleSolo: () -> Void
+    let onToggleMute: () -> Void
 
     private var palette: MixerStripPalette {
         MixerStripPalette.make(for: fader)
     }
 
     private var isDimmed: Bool {
-        !fader.isActive || !fader.isPlaying
+        !fader.isActive || !fader.isPlaying || fader.isSoloMuted || fader.isMuted
     }
 
     var body: some View {
@@ -217,6 +229,16 @@ private struct MixerChannelStrip: View {
             MixerStatusTile(title: "ON", isOn: fader.isActive, accent: palette.accent, isDimmed: !fader.isActive)
             MixerStatusTile(title: "LIVE", isOn: fader.isPlaying, accent: .green.opacity(0.9), isDimmed: !fader.isPlaying)
             MixerStatusTile(title: "SIG", isOn: fader.meterPeak > 0.04, accent: .cyan.opacity(0.9), isDimmed: fader.meterPeak <= 0.04)
+            MixerStatusButton(title: fader.isMuteMixed ? "MIX" : "MUTE",
+                              isOn: fader.isMuted || fader.isMuteMixed,
+                              accent: fader.isMuteMixed ? .orange : .red,
+                              isEnabled: fader.isActive,
+                              action: onToggleMute)
+            MixerStatusButton(title: "SOLO",
+                              isOn: fader.isSoloed,
+                              accent: .yellow,
+                              isEnabled: fader.isActive,
+                              action: onToggleSolo)
             MixerStatusTile(title: laneLabel, isOn: fader.isActive, accent: palette.accent.opacity(isConnected ? 0.92 : 0.55), isDimmed: !fader.isActive)
         }
         .padding(.top, 14)
@@ -240,7 +262,7 @@ private struct MixerChannelStrip: View {
             MixerLevelMeter(
                 level: fader.meterPeak,
                 accent: palette.accent,
-                isDimmed: !fader.isActive
+                isDimmed: isDimmed
             )
         }
         .frame(height: 300)
@@ -339,6 +361,42 @@ private struct MixerStatusTile: View {
                     .padding(.horizontal, 4)
             }
             .shadow(color: .black.opacity(0.35), radius: 5, y: 3)
+    }
+}
+
+private struct MixerStatusButton: View {
+    let title: String
+    let isOn: Bool
+    let accent: Color
+    let isEnabled: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: title.count > 3 ? 7.8 : 8.5, weight: .semibold, design: .rounded))
+                .frame(width: 34, height: 28)
+                .foregroundStyle(isOn ? accent.opacity(0.98) : .white.opacity(isEnabled ? 0.58 : 0.24))
+                .background(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(
+                            LinearGradient(
+                                colors: [
+                                    Color.white.opacity(isOn ? 0.22 : 0.14),
+                                    Color.black.opacity(isOn ? 0.34 : 0.25)
+                                ],
+                                startPoint: .top,
+                                endPoint: .bottom
+                            )
+                        )
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .strokeBorder(isOn ? accent.opacity(0.9) : .white.opacity(0.12), lineWidth: 1)
+                )
+        }
+        .buttonStyle(.plain)
+        .disabled(!isEnabled)
     }
 }
 

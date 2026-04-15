@@ -101,6 +101,10 @@ static const char kMeterRoleUIDKey = 0; // associated object key
 @property (nonatomic, assign) CFTimeInterval clipLatchedUntil; // keep clip state visible briefly
 @property (nonatomic, assign) CFTimeInterval lastMeterSampleTime;
 @property (nonatomic, assign) BOOL isAutomationArmed;
+@property (nonatomic, assign) BOOL isSoloed;
+@property (nonatomic, assign) BOOL isSoloMuted;
+@property (nonatomic, assign) BOOL isMuted;
+@property (nonatomic, assign) BOOL isMuteMixed;
 @property (nonatomic, assign) BOOL isActive;
 @property (nonatomic, assign) BOOL isPlaying; // clip with this role is at playhead
 @property (nonatomic, assign) BOOL isMaster;
@@ -134,6 +138,8 @@ static const char kMeterRoleUIDKey = 0; // associated object key
 @property (nonatomic, strong) NSView *clipTagView;
 @property (nonatomic, strong) NSMutableArray<NSView *> *statusBadges;
 @property (nonatomic, strong) NSMutableArray<NSTextField *> *statusBadgeLabels;
+@property (nonatomic, strong) SpliceKitMouseOnlyButton *muteBadgeButton;
+@property (nonatomic, strong) SpliceKitMouseOnlyButton *soloBadgeButton;
 @property (nonatomic, strong) SpliceKitMouseOnlyButton *armBadgeButton;
 @property (nonatomic, strong) NSView *trackView;
 @property (nonatomic, strong) NSView *fillView;
@@ -148,6 +154,8 @@ static const char kMeterRoleUIDKey = 0; // associated object key
 @property (nonatomic, copy) void (^onDragChange)(double db);
 @property (nonatomic, copy) void (^onDragEnd)(void);
 @property (nonatomic, copy) void (^onToggleArm)(void);
+@property (nonatomic, copy) void (^onToggleSolo)(void);
+@property (nonatomic, copy) void (^onToggleMute)(void);
 - (void)updateFromState;
 @end
 
@@ -526,19 +534,11 @@ static double SKMixerDisplayedPeakForUpdate(double currentPeak,
             [self addSubview:badge];
         }
 
-        _armBadgeButton = [[SpliceKitMouseOnlyButton alloc] initWithFrame:NSZeroRect];
-        _armBadgeButton.bordered = NO;
-        _armBadgeButton.focusRingType = NSFocusRingTypeNone;
-        _armBadgeButton.keyEquivalent = @"";
-        _armBadgeButton.wantsLayer = YES;
-        _armBadgeButton.layer.cornerRadius = 8.0;
-        _armBadgeButton.layer.borderWidth = 1.0;
-        _armBadgeButton.layer.masksToBounds = YES;
-        if (@available(macOS 10.15, *)) {
-            _armBadgeButton.layer.cornerCurve = kCACornerCurveContinuous;
-        }
-        _armBadgeButton.target = self;
-        _armBadgeButton.action = @selector(toggleArmBadge:);
+        _muteBadgeButton = [self makeBadgeButtonWithAction:@selector(toggleMuteBadge:)];
+        _soloBadgeButton = [self makeBadgeButtonWithAction:@selector(toggleSoloBadge:)];
+        _armBadgeButton = [self makeBadgeButtonWithAction:@selector(toggleArmBadge:)];
+        [self addSubview:_muteBadgeButton];
+        [self addSubview:_soloBadgeButton];
         [self addSubview:_armBadgeButton];
 
         _iconView = [[NSImageView alloc] initWithFrame:NSZeroRect];
@@ -581,6 +581,31 @@ static double SKMixerDisplayedPeakForUpdate(double currentPeak,
     return label;
 }
 
+- (SpliceKitMouseOnlyButton *)makeBadgeButtonWithAction:(SEL)action {
+    SpliceKitMouseOnlyButton *button = [[SpliceKitMouseOnlyButton alloc] initWithFrame:NSZeroRect];
+    button.bordered = NO;
+    button.focusRingType = NSFocusRingTypeNone;
+    button.keyEquivalent = @"";
+    button.wantsLayer = YES;
+    button.layer.cornerRadius = 8.0;
+    button.layer.borderWidth = 1.0;
+    button.layer.masksToBounds = YES;
+    if (@available(macOS 10.15, *)) {
+        button.layer.cornerCurve = kCACornerCurveContinuous;
+    }
+    button.target = self;
+    button.action = action;
+    return button;
+}
+
+- (void)toggleMuteBadge:(id)sender {
+    if (self.onToggleMute) self.onToggleMute();
+}
+
+- (void)toggleSoloBadge:(id)sender {
+    if (self.onToggleSolo) self.onToggleSolo();
+}
+
 - (void)toggleArmBadge:(id)sender {
     if (self.onToggleArm) self.onToggleArm();
 }
@@ -612,6 +637,7 @@ static double SKMixerDisplayedPeakForUpdate(double currentPeak,
     CGFloat badgeOriginX = floor(NSMinX(self.displayCard.frame) + (NSWidth(self.displayCard.frame) - badgesTotalWidth) / 2.0);
     CGFloat firstBadgeRowY = NSMinY(self.displayCard.frame) - 14.0 - badgeHeight;
     CGFloat secondBadgeRowY = firstBadgeRowY - badgeSpacing - badgeHeight;
+    CGFloat thirdBadgeRowY = secondBadgeRowY - badgeSpacing - badgeHeight;
     for (NSInteger idx = 0; idx < self.statusBadges.count; idx++) {
         NSInteger row = idx / 2;
         NSInteger col = idx % 2;
@@ -627,14 +653,22 @@ static double SKMixerDisplayedPeakForUpdate(double currentPeak,
         labelFrame.origin.y = floor((badgeHeight - NSHeight(labelFrame)) / 2.0) - 1.0;
         badgeLabel.frame = labelFrame;
     }
+    self.muteBadgeButton.frame = NSMakeRect(badgeOriginX + (badgeWidth + badgeSpacing),
+                                            secondBadgeRowY,
+                                            badgeWidth,
+                                            badgeHeight);
+    self.soloBadgeButton.frame = NSMakeRect(badgeOriginX,
+                                            thirdBadgeRowY,
+                                            badgeWidth,
+                                            badgeHeight);
     self.armBadgeButton.frame = NSMakeRect(badgeOriginX + (badgeWidth + badgeSpacing),
-                                           secondBadgeRowY,
+                                           thirdBadgeRowY,
                                            badgeWidth,
                                            badgeHeight);
 
     CGFloat bottomSectionTop = bottomInset + bottomSectionHeight;
     CGFloat faderSectionY = bottomSectionTop + 12.0;
-    CGFloat faderSectionHeight = MAX(220.0, secondBadgeRowY - 18.0 - faderSectionY);
+    CGFloat faderSectionHeight = MAX(220.0, thirdBadgeRowY - 18.0 - faderSectionY);
     CGFloat controlHeight = MIN(270.0, faderSectionHeight - 12.0);
     CGFloat controlY = faderSectionY + floor((faderSectionHeight - controlHeight) / 2.0);
     CGFloat meterWidth = 22.0;
@@ -709,6 +743,8 @@ static double SKMixerDisplayedPeakForUpdate(double currentPeak,
 - (void)updateFromState {
     BOOL active = _state.isActive;
     BOOL playing = _state.isPlaying;
+    BOOL outputMuted = !_state.isMaster && (_state.isMuted || _state.isSoloMuted);
+    BOOL signalEnabled = active && !outputMuted;
     _slider.enabled = active;
     NSColor *accentColor = SKMixerAccentForState(_state);
     NSColor *displayTextColor = active ? accentColor : [[NSColor whiteColor] colorWithAlphaComponent:0.24];
@@ -717,7 +753,7 @@ static double SKMixerDisplayedPeakForUpdate(double currentPeak,
 
     self.layer.borderColor = (_state.isRecordingAutomation
                               ? [[NSColor systemRedColor] colorWithAlphaComponent:0.95].CGColor
-                              : [accentColor colorWithAlphaComponent:(active ? (playing ? 0.28 : 0.14) : 0.12)].CGColor);
+                              : [accentColor colorWithAlphaComponent:(signalEnabled ? (playing ? 0.28 : 0.14) : 0.10)].CGColor);
     self.layer.borderWidth = _state.isRecordingAutomation ? 1.2 : 1.0;
     self.stripGradientLayer.colors = ({
         NSMutableArray *colors = [NSMutableArray array];
@@ -792,26 +828,42 @@ static double SKMixerDisplayedPeakForUpdate(double currentPeak,
                                            : [[NSColor whiteColor] colorWithAlphaComponent:0.12] CGColor];
     }
 
-    NSString *armTitle = _state.isMaster ? @"OUT" : @"ARM";
-    BOOL armEnabled = !_state.isMaster && active;
-    BOOL armHighlighted = _state.isMaster ? active : (_state.isAutomationArmed || _state.isRecordingAutomation);
-    NSColor *armColor = _state.isMaster ? [NSColor systemOrangeColor] : [NSColor systemRedColor];
-    NSDictionary *armAttrs = @{
-        NSFontAttributeName: [NSFont systemFontOfSize:10 weight:NSFontWeightSemibold],
-        NSForegroundColorAttributeName: armHighlighted
-            ? [armColor colorWithAlphaComponent:0.98]
-            : [[NSColor whiteColor] colorWithAlphaComponent:(armEnabled ? 0.58 : 0.24)]
-    };
-    self.armBadgeButton.attributedTitle = [[NSAttributedString alloc] initWithString:armTitle attributes:armAttrs];
-    self.armBadgeButton.enabled = armEnabled;
-    self.armBadgeButton.layer.backgroundColor = [[NSColor whiteColor] colorWithAlphaComponent:(armHighlighted ? 0.18 : 0.10)].CGColor;
-    self.armBadgeButton.layer.borderColor = [armHighlighted
-        ? [armColor colorWithAlphaComponent:0.90]
-        : [[NSColor whiteColor] colorWithAlphaComponent:0.12] CGColor];
-    self.armBadgeButton.alphaValue = (_state.isMaster || active) ? 1.0 : 0.72;
+    void (^configureBadgeButton)(SpliceKitMouseOnlyButton *, NSString *, BOOL, BOOL, NSColor *) =
+        ^(SpliceKitMouseOnlyButton *button, NSString *title, BOOL highlighted, BOOL enabled, NSColor *color) {
+            NSDictionary *attrs = @{
+                NSFontAttributeName: [NSFont systemFontOfSize:(title.length > 3 ? 8.5 : 10.0) weight:NSFontWeightSemibold],
+                NSForegroundColorAttributeName: highlighted
+                    ? [color colorWithAlphaComponent:0.98]
+                    : [[NSColor whiteColor] colorWithAlphaComponent:(enabled ? 0.58 : 0.24)]
+            };
+            button.attributedTitle = [[NSAttributedString alloc] initWithString:title attributes:attrs];
+            button.enabled = enabled;
+            button.layer.backgroundColor = [[NSColor whiteColor] colorWithAlphaComponent:(highlighted ? 0.18 : 0.10)].CGColor;
+            button.layer.borderColor = [highlighted
+                ? [color colorWithAlphaComponent:0.90]
+                : [[NSColor whiteColor] colorWithAlphaComponent:0.12] CGColor];
+            button.alphaValue = (_state.isMaster || active) ? 1.0 : 0.72;
+        };
+
+    BOOL roleControlEnabled = !_state.isMaster && active;
+    configureBadgeButton(self.muteBadgeButton,
+                         _state.isMuteMixed ? @"MIX" : @"MUTE",
+                         (_state.isMuted || _state.isMuteMixed),
+                         roleControlEnabled,
+                         [NSColor systemOrangeColor]);
+    configureBadgeButton(self.soloBadgeButton,
+                         @"SOLO",
+                         _state.isSoloed,
+                         roleControlEnabled,
+                         [NSColor systemYellowColor]);
+    configureBadgeButton(self.armBadgeButton,
+                         _state.isMaster ? @"OUT" : @"ARM",
+                         _state.isMaster ? active : (_state.isAutomationArmed || _state.isRecordingAutomation),
+                         roleControlEnabled,
+                         _state.isMaster ? [NSColor systemOrangeColor] : [NSColor systemRedColor]);
 
     self.trackView.layer.backgroundColor = [SKMixerColor(0.10, 0.10, 0.12) colorWithAlphaComponent:(active ? 0.85 : 0.40)].CGColor;
-    self.fillView.layer.backgroundColor = [accentColor colorWithAlphaComponent:(active ? (playing ? 0.88 : 0.46) : 0.18)].CGColor;
+    self.fillView.layer.backgroundColor = [accentColor colorWithAlphaComponent:(signalEnabled ? (playing ? 0.88 : 0.46) : (active ? 0.22 : 0.18))].CGColor;
     self.knobGradientLayer.colors = active
         ? @[
             (__bridge id)[NSColor colorWithSRGBRed:0.86 green:0.86 blue:0.90 alpha:1.0].CGColor,
@@ -825,11 +877,11 @@ static double SKMixerDisplayedPeakForUpdate(double currentPeak,
         ];
     self.knobView.layer.borderWidth = 1.0;
     self.knobView.layer.borderColor = [[NSColor whiteColor] colorWithAlphaComponent:(active ? 0.4 : 0.12)].CGColor;
-    self.knobAccentView.layer.backgroundColor = [accentColor colorWithAlphaComponent:(active ? (playing ? 0.92 : 0.80) : 0.30)].CGColor;
-    self.knobView.alphaValue = active ? 1.0 : 0.55;
+    self.knobAccentView.layer.backgroundColor = [accentColor colorWithAlphaComponent:(signalEnabled ? (playing ? 0.92 : 0.80) : 0.30)].CGColor;
+    self.knobView.alphaValue = signalEnabled ? 1.0 : (active ? 0.68 : 0.55);
 
     BOOL clipped = active ? SKMixerShowsClipping(_state) : NO;
-    double peak = active ? _state.meterPeak : 0.0;
+    double peak = signalEnabled ? _state.meterPeak : 0.0;
     for (NSInteger idx = 0; idx < self.meterSegments.count; idx++) {
         NSView *segment = self.meterSegments[idx];
         double threshold = (idx + 1) / 34.0;
@@ -871,8 +923,10 @@ static double SKMixerDisplayedPeakForUpdate(double currentPeak,
         _dbLabel.stringValue = [NSString stringWithFormat:@"%.1f dB", _state.volumeDB];
     }
     NSColor *accent = SKMixerAccentForState(_state);
-    _dbLabel.textColor = _state.isActive ? [accent colorWithAlphaComponent:0.88]
-                                         : [[NSColor whiteColor] colorWithAlphaComponent:0.18];
+    BOOL outputMuted = !_state.isMaster && (_state.isMuted || _state.isSoloMuted);
+    _dbLabel.textColor = _state.isActive
+        ? [accent colorWithAlphaComponent:(outputMuted ? 0.44 : 0.88)]
+        : [[NSColor whiteColor] colorWithAlphaComponent:0.18];
 }
 
 @end
@@ -897,6 +951,8 @@ static double SKMixerDisplayedPeakForUpdate(double currentPeak,
 - (void)beginMasterVolumeChange;
 - (void)setMasterVolumeDB:(double)db;
 - (void)endMasterVolumeChange;
+- (void)toggleSoloForFaderIndex:(NSInteger)faderIndex;
+- (void)toggleMuteForFaderIndex:(NSInteger)faderIndex;
 @end
 
 @implementation SpliceKitMixerPanel
@@ -1032,6 +1088,12 @@ static double SKMixerDisplayedPeakForUpdate(double currentPeak,
         fv.onToggleArm = ^{
             [weakSelf toggleAutomationArmForFaderIndex:idx];
         };
+        fv.onToggleSolo = ^{
+            [weakSelf toggleSoloForFaderIndex:idx];
+        };
+        fv.onToggleMute = ^{
+            [weakSelf toggleMuteForFaderIndex:idx];
+        };
 
         [faderStack addArrangedSubview:fv];
         [self.faderViews addObject:fv];
@@ -1114,6 +1176,10 @@ static double SKMixerDisplayedPeakForUpdate(double currentPeak,
         double livePeak = [masterInfo[@"meterPeak"] doubleValue];
         self.masterFaderView.state.isActive = YES;
         self.masterFaderView.state.isAutomationArmed = NO;
+        self.masterFaderView.state.isSoloed = NO;
+        self.masterFaderView.state.isSoloMuted = NO;
+        self.masterFaderView.state.isMuted = NO;
+        self.masterFaderView.state.isMuteMixed = NO;
         self.masterFaderView.state.isPlaying = [masterInfo[@"playing"] boolValue];
         self.masterFaderView.state.clipName = masterInfo[@"name"] ?: @"Playback";
         self.masterFaderView.state.role = masterInfo[@"role"] ?: @"Master";
@@ -1140,6 +1206,10 @@ static double SKMixerDisplayedPeakForUpdate(double currentPeak,
     } else {
         self.masterFaderView.state.isActive = NO;
         self.masterFaderView.state.isAutomationArmed = NO;
+        self.masterFaderView.state.isSoloed = NO;
+        self.masterFaderView.state.isSoloMuted = NO;
+        self.masterFaderView.state.isMuted = NO;
+        self.masterFaderView.state.isMuteMixed = NO;
         self.masterFaderView.state.isPlaying = NO;
         self.masterFaderView.state.clipName = nil;
         self.masterFaderView.state.role = @"Master";
@@ -1164,6 +1234,10 @@ static double SKMixerDisplayedPeakForUpdate(double currentPeak,
             CFTimeInterval deltaTime = fv.state.lastMeterSampleTime > 0 ? now - fv.state.lastMeterSampleTime : 0.05;
             double livePeak = [info[@"meterPeak"] doubleValue];
             fv.state.isActive = YES; // All role faders are always active
+            fv.state.isSoloed = [info[@"soloed"] boolValue];
+            fv.state.isSoloMuted = [info[@"soloMuted"] boolValue];
+            fv.state.isMuted = [info[@"muted"] boolValue];
+            fv.state.isMuteMixed = [info[@"muteMixed"] boolValue];
             fv.state.isPlaying = [info[@"playing"] boolValue]; // Playing = clip at playhead
             fv.state.clipName = info[@"name"] ?: @"";
             fv.state.lane = [info[@"lane"] integerValue];
@@ -1193,6 +1267,10 @@ static double SKMixerDisplayedPeakForUpdate(double currentPeak,
         } else {
             fv.state.isActive = NO;
             fv.state.isAutomationArmed = NO;
+            fv.state.isSoloed = NO;
+            fv.state.isSoloMuted = NO;
+            fv.state.isMuted = NO;
+            fv.state.isMuteMixed = NO;
             fv.state.isPlaying = NO;
             fv.state.isRecordingAutomation = NO;
             fv.state.clipName = nil;
@@ -1218,6 +1296,10 @@ static double SKMixerDisplayedPeakForUpdate(double currentPeak,
 - (void)clearAllFaders {
     self.masterFaderView.state.isActive = NO;
     self.masterFaderView.state.isAutomationArmed = NO;
+    self.masterFaderView.state.isSoloed = NO;
+    self.masterFaderView.state.isSoloMuted = NO;
+    self.masterFaderView.state.isMuted = NO;
+    self.masterFaderView.state.isMuteMixed = NO;
     self.masterFaderView.state.isPlaying = NO;
     self.masterFaderView.state.isDragging = NO;
     self.masterFaderView.state.clipName = nil;
@@ -1236,6 +1318,10 @@ static double SKMixerDisplayedPeakForUpdate(double currentPeak,
         [self finishUndoTransactionsForFader:fv];
         fv.state.isActive = NO;
         fv.state.isAutomationArmed = NO;
+        fv.state.isSoloed = NO;
+        fv.state.isSoloMuted = NO;
+        fv.state.isMuted = NO;
+        fv.state.isMuteMixed = NO;
         fv.state.isPlaying = NO;
         fv.state.isRecordingAutomation = NO;
         fv.state.clipName = nil;
@@ -1303,6 +1389,40 @@ static double SKMixerDisplayedPeakForUpdate(double currentPeak,
     target.state.isAutomationArmed = shouldArm;
     [target updateFromState];
     [self updateAutomationUI];
+}
+
+- (void)toggleSoloForFaderIndex:(NSInteger)faderIndex {
+    if (faderIndex < 0 || faderIndex >= (NSInteger)self.faderViews.count) return;
+    SpliceKitFaderView *target = self.faderViews[faderIndex];
+    if (!target.state.isActive) return;
+
+    extern NSDictionary *SpliceKit_handleMixerSetSolo(NSDictionary *params);
+    NSDictionary *result = SpliceKit_handleMixerSetSolo(@{
+        @"index": @(faderIndex),
+        @"mode": @"toggle"
+    });
+    if (result[@"error"]) {
+        SpliceKit_log(@"[Mixer] Solo failed: %@", result[@"error"]);
+        return;
+    }
+    [self updateMixerState];
+}
+
+- (void)toggleMuteForFaderIndex:(NSInteger)faderIndex {
+    if (faderIndex < 0 || faderIndex >= (NSInteger)self.faderViews.count) return;
+    SpliceKitFaderView *target = self.faderViews[faderIndex];
+    if (!target.state.isActive) return;
+
+    extern NSDictionary *SpliceKit_handleMixerSetMute(NSDictionary *params);
+    NSDictionary *result = SpliceKit_handleMixerSetMute(@{
+        @"index": @(faderIndex),
+        @"mode": @"toggle"
+    });
+    if (result[@"error"]) {
+        SpliceKit_log(@"[Mixer] Mute failed: %@", result[@"error"]);
+        return;
+    }
+    [self updateMixerState];
 }
 
 - (NSString *)currentUndoEffectStackHandleForFader:(SpliceKitFaderView *)fv {
@@ -1435,6 +1555,10 @@ static double SKMixerDisplayedPeakForUpdate(double currentPeak,
             @"index": @(fv.state.index),
             @"active": @(fv.state.isActive),
             @"armed": @(fv.state.isAutomationArmed),
+            @"soloed": @(fv.state.isSoloed),
+            @"soloMuted": @(fv.state.isSoloMuted),
+            @"muted": @(fv.state.isMuted),
+            @"muteMixed": @(fv.state.isMuteMixed),
             @"playing": @(fv.state.isPlaying),
             @"dragging": @(fv.state.isDragging),
             @"recordingAutomation": @(fv.state.isRecordingAutomation),

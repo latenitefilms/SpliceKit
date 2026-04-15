@@ -16,6 +16,10 @@ struct FaderState: Identifiable {
     var meterPeak: Double = 0
     var isActive: Bool = false
     var isPlaying: Bool = false
+    var isSoloed: Bool = false
+    var isSoloMuted: Bool = false
+    var isMuted: Bool = false
+    var isMuteMixed: Bool = false
     var isDragging: Bool = false
     var minDB: Double = -96
     var maxDB: Double = 12
@@ -114,6 +118,10 @@ class MixerModel: ObservableObject {
             fader.meterPeak = dict["meterPeak"] as? Double ?? 0
             fader.isActive = true
             fader.isPlaying = dict["playing"] as? Bool ?? false
+            fader.isSoloed = dict["soloed"] as? Bool ?? false
+            fader.isSoloMuted = dict["soloMuted"] as? Bool ?? false
+            fader.isMuted = dict["muted"] as? Bool ?? false
+            fader.isMuteMixed = dict["muteMixed"] as? Bool ?? false
             fader.minDB = dict["minDB"] as? Double ?? -96
             fader.maxDB = dict["maxDB"] as? Double ?? 12
 
@@ -184,6 +192,34 @@ class MixerModel: ObservableObject {
             _ = try await bridge.call("mixer.volumeEnd", params: [
                 "effectStackHandle": effectStackHandle
             ])
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
+    func toggleSolo(faderIndex: Int) async {
+        guard faders.indices.contains(faderIndex), faders[faderIndex].isActive else { return }
+
+        do {
+            _ = try await bridge.call("mixer.setSolo", params: [
+                "index": faderIndex,
+                "mode": "toggle"
+            ])
+            await poll()
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
+    func toggleMute(faderIndex: Int) async {
+        guard faders.indices.contains(faderIndex), faders[faderIndex].isActive else { return }
+
+        do {
+            _ = try await bridge.call("mixer.setMute", params: [
+                "index": faderIndex,
+                "mode": "toggle"
+            ])
+            await poll()
         } catch {
             lastError = error.localizedDescription
         }

@@ -99,6 +99,8 @@ class MCPToolAnnotationTests(unittest.TestCase):
             "timeline_navigation_action",
             "timeline_edit_action",
             "timeline_destructive_action",
+            "mixer_set_solo",
+            "mixer_set_mute",
         }
         self.assertTrue(expected.issubset(self.tools.keys()))
 
@@ -160,6 +162,30 @@ class MCPToolAnnotationTests(unittest.TestCase):
             [
                 ("backgroundRender.status", {}),
                 ("backgroundRender.control", {"action": "hold_off", "seconds": 2.5}),
+            ],
+        )
+
+    def test_mixer_solo_mute_wrappers_forward_expected_bridge_calls(self):
+        calls = []
+
+        def fake_call(method, **params):
+            calls.append((method, params))
+            if method == "mixer.setSolo":
+                return {"ok": True, "role": "Dialogue", "soloed": True, "soloObjectCount": 2}
+            return {"ok": True, "role": "Music", "muted": False, "roleUIDCount": 1}
+
+        self.module.bridge.call = fake_call
+
+        solo_result = self.module.mixer_set_solo(index=0, mode="exclusive")
+        mute_result = self.module.mixer_set_mute(role="Music", mode="unmute")
+
+        self.assertIn("Dialogue: soloed", solo_result)
+        self.assertIn("Music: unmuted", mute_result)
+        self.assertEqual(
+            calls,
+            [
+                ("mixer.setSolo", {"mode": "exclusive", "index": 0}),
+                ("mixer.setMute", {"mode": "unmute", "role": "Music"}),
             ],
         )
 

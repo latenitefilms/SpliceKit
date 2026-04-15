@@ -80,12 +80,16 @@ make clean && make && make tools
 
 echo "[3/14] Building parakeet-transcriber..."
 PARAKEET_PKG_DIR="patcher/SpliceKitPatcher.app/Contents/Resources/tools/parakeet-transcriber"
-cd "${PARAKEET_PKG_DIR}" && swift build -c release 2>&1 | tail -3 && cd "${REPO_ROOT}"
 PARAKEET_BIN="${PARAKEET_PKG_DIR}/.build/release/parakeet-transcriber"
-if [ -f "$PARAKEET_BIN" ]; then
-    echo "  Built: $(du -h "$PARAKEET_BIN" | cut -f1)"
+if [ -d "${PARAKEET_PKG_DIR}" ]; then
+    cd "${PARAKEET_PKG_DIR}" && swift build -c release 2>&1 | tail -3 && cd "${REPO_ROOT}"
+    if [ -f "$PARAKEET_BIN" ]; then
+        echo "  Built: $(du -h "$PARAKEET_BIN" | cut -f1)"
+    else
+        echo "  WARNING: parakeet-transcriber build failed — release will not include it"
+    fi
 else
-    echo "  WARNING: parakeet-transcriber build failed — release will not include it"
+    echo "  Skipped: parakeet-transcriber package not found (pre-built binary will be used if available)"
 fi
 
 echo "[4/14] Building SpliceKit app via Xcode..."

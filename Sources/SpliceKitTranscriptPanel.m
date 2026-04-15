@@ -18,6 +18,7 @@
 //
 
 #import "SpliceKitTranscriptPanel.h"
+#import "SpliceKitTranscriptDiagnostics.h"
 #import "SpliceKit.h"
 #import <AVFoundation/AVFoundation.h>
 #import <objc/runtime.h>
@@ -138,7 +139,11 @@ static SpliceKitTranscriptWord *SpliceKitTranscript_wordFromDictionary(NSDiction
     if (word.endTime <= word.startTime) word.endTime = word.startTime + word.duration;
     word.confidence = [dict[@"confidence"] doubleValue];
     word.wordIndex = [dict[@"index"] unsignedIntegerValue];
-    word.speaker = dict[@"speaker"] ?: @"Unknown";
+    NSString *spk = dict[@"speaker"] ?: @"Unknown";
+    if (spk.length <= 3 && [spk hasPrefix:@"S"]) {
+        spk = [NSString stringWithFormat:@"Speaker %@", [spk substringFromIndex:1]];
+    }
+    word.speaker = spk;
     word.clipHandle = dict[@"clipHandle"];
     word.clipTimelineStart = [dict[@"clipTimelineStart"] doubleValue];
     word.sourceMediaOffset = [dict[@"sourceMediaOffset"] doubleValue];
@@ -872,18 +877,49 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
     // Check if the current sequence matches what we have in memory.
     // If the sequence changed (project switch), we need to restore/clear even if words exist.
     id sequence = [self currentSequence];
-    if (sequence && self.lastRestoredSequenceKey.length > 0 && self.mutableWords.count > 0) {
+
+    // No sequence (empty timeline or no project) — clear stale data
+    if (!sequence && self.mutableWords.count > 0) {
+        @synchronized (self.mutableWords) {
+            [self.mutableWords removeAllObjects];
+        }
+        [self.mutableSilences removeAllObjects];
+        self.fullText = nil;
+        self.status = SpliceKitTranscriptStatusIdle;
+        self.lastRestoredSequenceKey = nil;
+        if (self.panel) {
+            [self rebuildTextView];
+            self.deleteSilencesButton.enabled = NO;
+            [self updateStatusUI:@"No project open. Open a project and tap Transcribe."];
+        }
+        return;
+    }
+
+    if (sequence) {
         NSDictionary *state = SpliceKit_loadSequenceState(sequence);
         NSString *currentKey = [state[@"sequenceIdentity"] isKindOfClass:[NSDictionary class]]
             ? state[@"sequenceIdentity"][@"cacheKey"] : nil;
-        if (currentKey.length > 0 && ![self.lastRestoredSequenceKey isEqualToString:currentKey]) {
-            // Sequence changed — trigger restore which will clear or load new data
-            [self restorePersistedStateForCurrentSequenceIfNeeded];
-            return;
+
+        // If we have words in memory, check they belong to the current sequence.
+        // After restart lastRestoredSequenceKey is nil — always validate in that case.
+        if (self.mutableWords.count > 0) {
+            BOOL keyMismatch = NO;
+            if (self.lastRestoredSequenceKey.length == 0) {
+                // After restart: we have words but don't know which sequence they're from.
+                // Trigger a restore which will load the correct data for this sequence.
+                keyMismatch = YES;
+            } else if (currentKey.length > 0 && ![self.lastRestoredSequenceKey isEqualToString:currentKey]) {
+                keyMismatch = YES;
+            }
+            if (keyMismatch) {
+                [self restorePersistedStateForCurrentSequenceIfNeeded];
+                return;
+            }
+            return; // Words are loaded and match current sequence
         }
     }
 
-    if (self.mutableWords.count > 0) return;
+    // No words in memory — try to restore from persistence
     [self restorePersistedStateForCurrentSequenceIfNeeded];
 }
 
@@ -1464,7 +1500,10 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
         ((void (*)(Class, SEL, id))objc_msgSend)(SFSpeechRecognizerClass, reqSel,
             ^(NSInteger newStatus) {
                 SpliceKit_log(@"[Transcript] Authorization callback: %ld", (long)newStatus);
-                completion(newStatus == 3);
+                // Always proceed — FCP's process can't show the permission dialog (no
+                // NSSpeechRecognitionUsageDescription), so authorization will typically
+                // return denied. On-device recognition often works regardless.
+                completion(YES);
             });
         return;
     }
@@ -1505,8 +1544,15 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
         } else {
             [self requestSpeechAuthorizationWithCompletion:^(BOOL authorized) {
                 if (!authorized) {
-                    [self openSpeechRecognitionSettings];
-                    [self setErrorState:@"Speech recognition denied. Grant access in Settings > Privacy > Speech Recognition, or use FCP Native engine."];
+                    // Framework not loaded vs. permission denied are different problems
+                    Class srClass = objc_getClass("SFSpeechRecognizer");
+                    if (!srClass) {
+                        [self setErrorState:@"Apple Speech framework not available. "
+                                            "Use Parakeet or FCP Native engine instead."];
+                    } else {
+                        [self setErrorState:@"Apple Speech not authorized. "
+                                            "Use Parakeet or FCP Native engine instead."];
+                    }
                     return;
                 }
                 [self performTimelineTranscription];
@@ -1754,6 +1800,25 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
     if (timelineObject) info[@"timelineObject"] = timelineObject;
     if (clip) info[@"mediaObject"] = clip;
 
+    // Get the media's timecode origin (unclippedRange.start) for coordinate conversion.
+    // FCP stores times in the source media's timecode space, but external ASR tools
+    // like Parakeet return file-relative timestamps starting from 0.
+    double mediaOrigin = 0;
+    SEL ucSel = NSSelectorFromString(@"unclippedRange");
+    if ([clip respondsToSelector:ucSel]) {
+        NSMethodSignature *sig = [clip methodSignatureForSelector:ucSel];
+        if (sig && [sig methodReturnLength] == sizeof(SpliceKitTranscript_CMTimeRange)) {
+            SpliceKitTranscript_CMTimeRange range;
+            NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
+            [inv setTarget:clip];
+            [inv setSelector:ucSel];
+            [inv invoke];
+            [inv getReturnValue:&range];
+            mediaOrigin = CMTimeToSeconds(range.start);
+        }
+    }
+    info[@"mediaOrigin"] = @(mediaOrigin);
+
     if ([clip respondsToSelector:@selector(displayName)]) {
         id name = ((id (*)(id, SEL))objc_msgSend)(clip, @selector(displayName));
         info[@"name"] = name ?: @"Untitled";
@@ -1764,8 +1829,8 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
         info[@"mediaURL"] = mediaURL;
     }
 
-    SpliceKit_log(@"[Transcript] Clip at %.2fs (dur=%.2fs, trim=%.2fs): %@ -> %@",
-                  timelinePos, clipDuration, trimStart, info[@"name"],
+    SpliceKit_log(@"[Transcript] Clip at %.2fs (dur=%.2fs, trim=%.2fs, mediaOrigin=%.2fs): %@ -> %@",
+                  timelinePos, clipDuration, trimStart, mediaOrigin, info[@"name"],
                   mediaURL ? [mediaURL path] : @"(no URL)");
 
     [clipInfos addObject:info];
@@ -1844,6 +1909,7 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
 
 - (void)performFCPNativeTranscription {
     SpliceKit_log(@"[Transcript] Using FCP Native engine (FFTranscriptionCoordinator)");
+    NSDate *diagStartTime = [NSDate date];
 
     // Gather assets from timeline clips on the main thread.
     // FCP's own startBackgroundTranscriptionForClips: iterates clips and calls
@@ -1883,6 +1949,8 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
                 [self setErrorState:collectError ?: @"No items on timeline."];
                 return;
             }
+            SpliceKitTranscriptDiag_logClipInfos(clipInfos, @"FCP Native");
+            SpliceKitTranscriptDiag_logFCPNativeState(clipInfos);
 
             // modalTranscriptsForClips expects objects that respond to `assets`
             // (like FFAnchoredObject subclasses). It internally calls [clip assets]
@@ -1892,6 +1960,11 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
             SEL assetsSel = NSSelectorFromString(@"assets");
             clipInfosByAsset = [NSMapTable strongToStrongObjectsMapTable];
             NSMutableDictionary<NSString *, NSMutableArray<NSDictionary *> *> *mutableClipInfosByPath = [NSMutableDictionary dictionary];
+
+            // Track which FFAsset objects we've already seen so we don't send
+            // the same source file to modalTranscriptsForClips twice (v1 + a1
+            // components share the same FFAsset but are different objects).
+            NSMutableSet *seenAssets = [NSMutableSet set];
 
             for (NSDictionary *clipInfo in clipInfos) {
                 NSURL *mediaURL = clipInfo[@"mediaURL"];
@@ -1908,11 +1981,28 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
                 if (candidate) {
                     id itemAssets = ((id (*)(id, SEL))objc_msgSend)(candidate, assetsSel);
                     if ([itemAssets isKindOfClass:[NSSet class]] && [(NSSet *)itemAssets count] > 0) {
+                        // Check if we've already seen these assets (v1/a1 dedup)
+                        BOOL allSeen = YES;
+                        for (id asset in (NSSet *)itemAssets) {
+                            if (![seenAssets containsObject:asset]) {
+                                allSeen = NO;
+                                break;
+                            }
+                        }
+                        if (allSeen) {
+                            SpliceKit_log(@"[Transcript] Dedup: skipping %@ (assets already covered)",
+                                NSStringFromClass([candidate class]));
+                            // Still add to path mapping for word lookup
+                            continue;
+                        }
+
                         [clipObjects addObject:candidate];
                         SpliceKit_log(@"[Transcript] Item %@ has %lu assets",
                             NSStringFromClass([candidate class]), (unsigned long)[(NSSet *)itemAssets count]);
 
+                        // Map by FFAsset objects (what we expect as result keys)
                         for (id asset in (NSSet *)itemAssets) {
+                            [seenAssets addObject:asset];
                             NSMutableArray *clipsForAsset = [clipInfosByAsset objectForKey:asset];
                             if (!clipsForAsset) {
                                 clipsForAsset = [NSMutableArray array];
@@ -1920,6 +2010,16 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
                             }
                             [clipsForAsset addObject:clipInfo];
                         }
+
+                        // Also map by candidate object itself — modalTranscriptsForClips
+                        // may return the candidate (e.g. FFAnchoredCollection) as the key
+                        // rather than the FFAsset, depending on FCP version.
+                        NSMutableArray *clipsForCandidate = [clipInfosByAsset objectForKey:candidate];
+                        if (!clipsForCandidate) {
+                            clipsForCandidate = [NSMutableArray array];
+                            [clipInfosByAsset setObject:clipsForCandidate forKey:candidate];
+                        }
+                        [clipsForCandidate addObject:clipInfo];
                     }
                 }
             }
@@ -2025,6 +2125,20 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
                 if (!transcript) continue;
 
                 NSArray<NSDictionary *> *matchingClipInfos = [clipInfosByAsset objectForKey:asset];
+
+                // FCP may return clip objects (FFAnchoredCollection) as keys, not FFAsset.
+                // Try resolving the clip's .assets and matching each one.
+                if (matchingClipInfos.count == 0 && [asset respondsToSelector:NSSelectorFromString(@"assets")]) {
+                    id innerAssets = ((id (*)(id, SEL))objc_msgSend)(asset, NSSelectorFromString(@"assets"));
+                    if ([innerAssets isKindOfClass:[NSSet class]]) {
+                        for (id innerAsset in (NSSet *)innerAssets) {
+                            matchingClipInfos = [clipInfosByAsset objectForKey:innerAsset];
+                            if (matchingClipInfos.count > 0) break;
+                        }
+                    }
+                }
+
+                // Fallback: match by media file path
                 if (matchingClipInfos.count == 0) {
                     NSString *assetPath = [self mediaPathForTranscriptAsset:asset];
                     if (assetPath.length > 0) {
@@ -2032,7 +2146,8 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
                     }
                 }
                 if (matchingClipInfos.count == 0) {
-                    SpliceKit_log(@"[Transcript] No clip mapping found for FCP transcript asset %@",
+                    SpliceKit_log(@"[Transcript] No clip mapping found for FCP transcript asset %@ — "
+                                  "tried direct lookup, .assets lookup, and media path fallback",
                                   NSStringFromClass([asset class]));
                     continue;
                 }
@@ -2155,6 +2270,10 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
 
             SpliceKit_log(@"[Transcript] FCP Native complete: %lu words, %lu silences",
                           (unsigned long)self.mutableWords.count, (unsigned long)silenceCount);
+            SpliceKitTranscriptDiag_logSummary(@"FCP Native",
+                -[diagStartTime timeIntervalSinceNow],
+                self.mutableWords.count, silenceCount, 0,
+                self.errorMessage);
             [[NSNotificationCenter defaultCenter] postNotificationName:@"SpliceKitTranscriptDidComplete" object:self];
         });
 
@@ -2168,6 +2287,8 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
 - (void)performAppleSpeechTranscription {
     SpliceKit_log(@"[Transcript] Using Apple Speech engine (SFSpeechRecognizer)");
     SpliceKitTranscript_loadSpeechFramework();
+    NSDate *diagStartTime = [NSDate date];
+    SpliceKitTranscriptDiag_logAppleSpeechState();
 
     __block NSArray *clips = nil;
     __block double totalDuration = 0;
@@ -2221,6 +2342,7 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
     }
 
     SpliceKit_log(@"[Transcript] Found %lu clips, total duration: %.2fs", (unsigned long)clips.count, totalDuration);
+    SpliceKitTranscriptDiag_logClipInfos(clips, @"Apple Speech");
 
     [self.mutableWords removeAllObjects];
     [self.mutableSilences removeAllObjects];
@@ -2283,6 +2405,10 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
 
             SpliceKit_log(@"[Transcript] Complete: %lu words, %lu silences",
                           (unsigned long)self.mutableWords.count, (unsigned long)silenceCount);
+            SpliceKitTranscriptDiag_logSummary(@"Apple Speech",
+                -[diagStartTime timeIntervalSinceNow],
+                self.mutableWords.count, silenceCount, transcribableClips.count,
+                self.errorMessage);
             [[NSNotificationCenter defaultCenter] postNotificationName:@"SpliceKitTranscriptDidComplete" object:self];
         });
     }];
@@ -2298,18 +2424,40 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
     NSURL *mediaURL = clipInfo[@"mediaURL"];
     double timelineStart = [clipInfo[@"timelineStart"] doubleValue];
     double trimStart = [clipInfo[@"trimStart"] doubleValue];
+    double mediaOrigin = [clipInfo[@"mediaOrigin"] doubleValue];
     double clipDuration = [clipInfo[@"duration"] doubleValue];
     NSString *clipHandle = clipInfo[@"handle"];
 
+    // Convert trimStart from FCP timecode space to file-relative for Apple Speech
+    double fileRelativeTrimStart = trimStart - mediaOrigin;
+
     [self transcribeAudioFile:mediaURL
                 timelineStart:timelineStart
-                    trimStart:trimStart
+                    trimStart:fileRelativeTrimStart
                  trimDuration:clipDuration
                    clipHandle:clipHandle
                    completion:^(NSArray<SpliceKitTranscriptWord *> *words, NSError *error) {
         if (error) {
             SpliceKit_log(@"[Transcript] Transcription error for %@: %@", mediaURL.lastPathComponent, error);
+            // Surface permission errors — FCP's process can't get speech authorization
+            // since it has no NSSpeechRecognitionUsageDescription in its Info.plist
+            NSString *errDesc = error.localizedDescription ?: @"";
+            if ([errDesc containsString:@"permission"] || [errDesc containsString:@"denied"] ||
+                [errDesc containsString:@"not authorized"] || error.code == 4 /* kAFAssistantErrorDomain denied */) {
+                [self setErrorState:@"Apple Speech denied — FCP can't request speech permission. "
+                                    "Use Parakeet or FCP Native engine instead."];
+                return;
+            }
         } else {
+            // Apple Speech returns file-relative timestamps, but sourceMediaTime and
+            // sourceMediaOffset must be in FCP's timecode coordinate space for
+            // resyncTimestampsFromTimeline to match words back to clips after edits.
+            if (mediaOrigin != 0) {
+                for (SpliceKitTranscriptWord *word in words) {
+                    word.sourceMediaTime += mediaOrigin;
+                    word.sourceMediaOffset = trimStart; // original FCP trimStart
+                }
+            }
             @synchronized (self.mutableWords) {
                 [self.mutableWords addObjectsFromArray:words];
             }
@@ -2446,6 +2594,10 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
         self.parakeetModelVersion ?: @"v3",
         self.speakerDetectionEnabled ? @"ON" : @"OFF");
 
+    // Diagnostic: system info and environment
+    NSDate *diagStartTime = [NSDate date];
+    SpliceKitTranscriptDiag_logSystemInfo();
+
     // Check / build the CLI tool
     NSString *binaryPath = [self parakeetTranscriberPath];
     if (!binaryPath) {
@@ -2495,6 +2647,7 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
     }
 
     SpliceKit_log(@"[Transcript] Using parakeet-transcriber at: %@", binaryPath);
+    SpliceKitTranscriptDiag_logBinaryInfo(binaryPath);
 
     // Verify the binary is executable
     if (![[NSFileManager defaultManager] isExecutableFileAtPath:binaryPath]) {
@@ -2552,6 +2705,7 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
     }
 
     SpliceKit_log(@"[Transcript] Found %lu items on timeline", (unsigned long)clips.count);
+    SpliceKitTranscriptDiag_logClipInfos(clips, @"Parakeet");
 
     // Filter to clips with media URLs
     NSMutableArray *transcribableClips = [NSMutableArray array];
@@ -2579,6 +2733,31 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
     if (skippedTooShort > 0) {
         SpliceKit_log(@"[Transcript] Skipped %lu clips shorter than 0.5s (too short for speech recognition)",
             (unsigned long)skippedTooShort);
+    }
+
+    // Deduplicate clip infos that share the same source file and time range.
+    // FCP stores video (v1) and audio (a1) as separate FFAnchoredMediaComponent
+    // objects — without dedup, the same words get mapped to both, doubling the count.
+    {
+        NSMutableArray *deduped = [NSMutableArray array];
+        NSMutableSet *seen = [NSMutableSet set];
+        for (NSDictionary *clipInfo in transcribableClips) {
+            NSURL *mediaURL = clipInfo[@"mediaURL"];
+            double trimStart = [clipInfo[@"trimStart"] doubleValue];
+            double duration = [clipInfo[@"duration"] doubleValue];
+            NSString *key = [NSString stringWithFormat:@"%@|%.2f|%.2f", mediaURL.path, trimStart, duration];
+            if ([seen containsObject:key]) {
+                SpliceKit_log(@"[Transcript] Dedup: skipping duplicate component for %@", mediaURL.lastPathComponent);
+                continue;
+            }
+            [seen addObject:key];
+            [deduped addObject:clipInfo];
+        }
+        if (deduped.count < transcribableClips.count) {
+            SpliceKit_log(@"[Transcript] Deduplicated %lu → %lu clip infos (removed audio/video duplicates)",
+                (unsigned long)transcribableClips.count, (unsigned long)deduped.count);
+        }
+        transcribableClips = deduped;
     }
 
     if (transcribableClips.count == 0) {
@@ -2630,6 +2809,8 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
         }
     }
 
+    SpliceKitTranscriptDiag_logBatchManifest(manifestEntries);
+
     // Build arguments for batch mode
     NSMutableArray *taskArgs = [NSMutableArray arrayWithObjects:@"--batch", manifestPath, @"--progress", nil];
     if (self.speakerDetectionEnabled) {
@@ -2638,7 +2819,10 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
     [taskArgs addObject:@"--model"];
     [taskArgs addObject:self.parakeetModelVersion ?: @"v3"];
 
+    SpliceKitTranscriptDiag_logProcessLaunch(binaryPath, taskArgs);
+
     // Run the CLI tool with streaming stderr for progress
+    NSDate *processStartTime = [NSDate date];
     NSTask *task = [[NSTask alloc] init];
     task.launchPath = binaryPath;
     task.arguments = taskArgs;
@@ -2741,6 +2925,19 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
     // Clean up manifest
     [[NSFileManager defaultManager] removeItemAtPath:manifestPath error:nil];
 
+    // Diagnostic: process exit details
+    {
+        NSTimeInterval processElapsed = -[processStartTime timeIntervalSinceNow];
+        NSData *stderrDiagData = [stderrPipe.fileHandleForReading availableData];
+        NSData *stdoutDiagData;
+        @synchronized (stdoutAccum) {
+            stdoutDiagData = [stdoutAccum copy];
+        }
+        SpliceKitTranscriptDiag_logProcessExit(task.terminationStatus,
+                                                stdoutDiagData, stderrDiagData, processElapsed);
+        SpliceKitTranscriptDiag_inspectRawOutput(stdoutDiagData);
+    }
+
     if (task.terminationStatus != 0) {
         SpliceKit_log(@"[Transcript] ─── Parakeet failed (exit code %d) ───", task.terminationStatus);
 
@@ -2839,6 +3036,22 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
         return;
     }
 
+    // CoreML's E5RT runtime can print error messages to stdout before the JSON.
+    // Detect and strip any non-JSON prefix so parsing succeeds.
+    NSString *rawOutput = [[NSString alloc] initWithData:jsonData encoding:NSUTF8StringEncoding];
+    BOOL hadCoreMLWarning = NO;
+    if (rawOutput && [rawOutput hasPrefix:@"E5RT "]) {
+        hadCoreMLWarning = YES;
+        // Find the JSON array start — CoreML error text precedes it
+        NSRange bracketRange = [rawOutput rangeOfString:@"["];
+        if (bracketRange.location != NSNotFound) {
+            NSString *errPrefix = [rawOutput substringToIndex:bracketRange.location];
+            SpliceKit_log(@"[Transcript] CoreML warning on stdout (stripped): %@", [errPrefix stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]]);
+            rawOutput = [rawOutput substringFromIndex:bracketRange.location];
+            jsonData = [rawOutput dataUsingEncoding:NSUTF8StringEncoding];
+        }
+    }
+
     NSError *jsonError = nil;
     NSArray *batchResults = [NSJSONSerialization JSONObjectWithData:jsonData options:0 error:&jsonError];
 
@@ -2854,6 +3067,7 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
     }
 
     SpliceKit_log(@"[Transcript] Got results for %lu files", (unsigned long)batchResults.count);
+    SpliceKitTranscriptDiag_logParsedResults(batchResults);
 
     // Map results back to clips by file path
     NSMutableDictionary *resultsByFile = [NSMutableDictionary dictionary];
@@ -2872,12 +3086,27 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
             double timelineStart = [clipInfo[@"timelineStart"] doubleValue];
             double trimStart = [clipInfo[@"trimStart"] doubleValue];
             double clipDuration = [clipInfo[@"duration"] doubleValue];
+            double mediaOrigin = [clipInfo[@"mediaOrigin"] doubleValue];
             NSString *clipHandle = clipInfo[@"handle"];
 
             NSArray *wordDicts = resultsByFile[mediaURL.path];
             if (!wordDicts) {
                 SpliceKit_log(@"[Transcript] No results for %@", mediaURL.lastPathComponent);
                 continue;
+            }
+
+            // Convert trimStart from FCP's timecode coordinate space to file-relative.
+            // FCP stores times including embedded timecode offsets (e.g. camera TC at 22:32:24 = 81144s),
+            // but Parakeet returns file-relative timestamps starting from 0.
+            double fileRelativeTrimStart = trimStart - mediaOrigin;
+
+            // Log diagnostics for coordinate mapping
+            if (wordDicts.count > 0) {
+                double minTime = [[wordDicts[0] valueForKey:@"startTime"] doubleValue];
+                double maxTime = [[wordDicts[wordDicts.count - 1] valueForKey:@"startTime"] doubleValue];
+                SpliceKit_log(@"[Transcript] %@ — %lu raw words (%.2fs-%.2fs), filter window: %.2fs-%.2fs (mediaOrigin=%.2fs)",
+                    mediaURL.lastPathComponent, (unsigned long)wordDicts.count,
+                    minTime, maxTime, fileRelativeTrimStart, fileRelativeTrimStart + clipDuration, mediaOrigin);
             }
 
             NSUInteger wordsAdded = 0;
@@ -2887,17 +3116,21 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
                 double endTime = [wd[@"endTime"] doubleValue];
                 double confidence = [wd[@"confidence"] doubleValue];
                 NSString *speaker = wd[@"speaker"] ?: @"Unknown";
+                // Expand short diarization labels (S1, S2) to readable names
+                if (speaker.length <= 3 && [speaker hasPrefix:@"S"]) {
+                    speaker = [NSString stringWithFormat:@"Speaker %@", [speaker substringFromIndex:1]];
+                }
 
-                if (startTime >= trimStart && startTime < trimStart + clipDuration) {
+                if (startTime >= fileRelativeTrimStart && startTime < fileRelativeTrimStart + clipDuration) {
                     SpliceKitTranscriptWord *word = [[SpliceKitTranscriptWord alloc] init];
                     word.text = text;
-                    word.startTime = timelineStart + (startTime - trimStart);
-                    word.duration = MIN(endTime - startTime, (trimStart + clipDuration) - startTime);
+                    word.startTime = timelineStart + (startTime - fileRelativeTrimStart);
+                    word.duration = MIN(endTime - startTime, (fileRelativeTrimStart + clipDuration) - startTime);
                     word.confidence = confidence;
                     word.clipHandle = clipHandle;
                     word.clipTimelineStart = timelineStart;
                     word.sourceMediaOffset = trimStart;
-                    word.sourceMediaTime = startTime;
+                    word.sourceMediaTime = startTime + mediaOrigin;
                     word.sourceMediaPath = mediaURL.path;
                     word.speaker = speaker;
                     [self.mutableWords addObject:word];
@@ -2907,7 +3140,23 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
 
             SpliceKit_log(@"[Transcript] Parakeet got %lu words from %@",
                 (unsigned long)wordsAdded, mediaURL.lastPathComponent);
+            SpliceKitTranscriptDiag_logWordFiltering(mediaURL.lastPathComponent,
+                wordDicts, trimStart, mediaOrigin, clipDuration, wordsAdded);
         }
+    }
+
+    // If CoreML had an error and we got 0 words, surface actionable guidance
+    NSUInteger totalWords;
+    @synchronized (self.mutableWords) {
+        totalWords = self.mutableWords.count;
+    }
+    if (totalWords == 0 && hadCoreMLWarning) {
+        SpliceKit_log(@"[Transcript] ERROR: CoreML returned 0 words due to E5RT shape error. "
+                       "This is a macOS CoreML compatibility issue with the current model.");
+        [self setErrorState:@"CoreML model error (0 words). Try: (1) update macOS, "
+                            "(2) switch to a different engine (Apple Speech or FCP Native), "
+                            "or (3) delete ~/Library/Application Support/FluidAudio/Models/ and retry."];
+        return;
     }
 
     // Finalize — sort, index, detect silences, build UI
@@ -2941,6 +3190,13 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
 
         SpliceKit_log(@"[Transcript] Parakeet transcription complete: %lu words, %lu silences",
             (unsigned long)self.mutableWords.count, (unsigned long)self.mutableSilences.count);
+        SpliceKitTranscriptDiag_logSummary(
+            [NSString stringWithFormat:@"Parakeet %@", self.parakeetModelVersion ?: @"v3"],
+            -[diagStartTime timeIntervalSinceNow],
+            self.mutableWords.count,
+            self.mutableSilences.count,
+            transcribableClips.count,
+            self.errorMessage);
         [[NSNotificationCenter defaultCenter] postNotificationName:@"SpliceKitTranscriptDidComplete" object:self];
     });
 }
@@ -3075,13 +3331,61 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
 #pragma mark - Speaker Assignment
 
 - (void)assignSpeakers {
-    // If speaker diarization provided real labels (macOS 26+), keep them.
-    // Otherwise label unknown words as "Unknown" (same as Premiere Pro).
+    // If speaker diarization provided real labels, keep them.
+    // Fill gaps: short runs of "Unknown" between the same speaker inherit that speaker.
+    // This is standard diarization cleanup — the diarizer often drops confidence on
+    // 1-2 word fragments at sentence boundaries, creating noise in the display.
     // Users can always manually override via setSpeaker:forWordsFrom:count:.
     @synchronized (self.mutableWords) {
+        NSUInteger count = self.mutableWords.count;
+        if (count == 0) return;
+
+        // Pass 1: fill empty/nil speakers with "Unknown"
         for (SpliceKitTranscriptWord *word in self.mutableWords) {
             if (!word.speaker || word.speaker.length == 0) {
                 word.speaker = @"Unknown";
+            }
+        }
+
+        // Pass 2: propagate known speakers to neighboring "Unknown" runs.
+        // For each run of Unknown words, if the speakers before and after the run
+        // are the same, assign that speaker to the entire run. If only one side
+        // has a known speaker, use that. This merges fragments like:
+        //   Speaker 1 | Unknown | Speaker 1  →  Speaker 1 | Speaker 1 | Speaker 1
+        NSUInteger i = 0;
+        while (i < count) {
+            if ([self.mutableWords[i].speaker isEqualToString:@"Unknown"]) {
+                // Find the end of this Unknown run
+                NSUInteger runStart = i;
+                while (i < count && [self.mutableWords[i].speaker isEqualToString:@"Unknown"]) {
+                    i++;
+                }
+                NSUInteger runEnd = i; // exclusive
+                NSUInteger runLen = runEnd - runStart;
+
+                // Get speakers before and after the run
+                NSString *before = (runStart > 0) ? self.mutableWords[runStart - 1].speaker : nil;
+                NSString *after = (runEnd < count) ? self.mutableWords[runEnd].speaker : nil;
+                BOOL beforeKnown = before && ![before isEqualToString:@"Unknown"];
+                BOOL afterKnown = after && ![after isEqualToString:@"Unknown"];
+
+                NSString *assign = nil;
+                if (beforeKnown && afterKnown && [before isEqualToString:after]) {
+                    // Same speaker on both sides — merge
+                    assign = before;
+                } else if (runLen <= 3) {
+                    // Short run (1-3 words) — assign from whichever side is known
+                    if (beforeKnown) assign = before;
+                    else if (afterKnown) assign = after;
+                }
+
+                if (assign) {
+                    for (NSUInteger j = runStart; j < runEnd; j++) {
+                        self.mutableWords[j].speaker = assign;
+                    }
+                }
+            } else {
+                i++;
             }
         }
     }
@@ -3559,8 +3863,8 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
     NSColor *lowConfColor = [NSColor systemOrangeColor];
     NSColor *headerSpeakerColor = [NSColor colorWithCalibratedRed:0.6 green:0.75 blue:1.0 alpha:1.0];
     NSColor *headerTimeColor = [NSColor colorWithCalibratedWhite:0.5 alpha:1.0];
-    NSColor *silenceBgColor = [NSColor colorWithCalibratedRed:0.82 green:0.62 blue:0.17 alpha:1.0];
-    NSColor *silenceFgColor = [NSColor colorWithCalibratedWhite:0.1 alpha:1.0];
+    NSColor *silenceBgColor = [NSColor colorWithCalibratedWhite:0.3 alpha:1.0];
+    NSColor *silenceFgColor = [NSColor colorWithCalibratedWhite:0.55 alpha:1.0];
 
     NSFont *normalFont = [NSFont systemFontOfSize:15];
     NSFont *headerSpeakerFont = [NSFont boldSystemFontOfSize:13];
@@ -3570,14 +3874,14 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
     NSDictionary *normalAttrs = @{
         NSFontAttributeName: normalFont,
         NSForegroundColorAttributeName: normalColor,
-        NSCursorAttributeName: [NSCursor pointingHandCursor],
+        NSCursorAttributeName: [NSCursor IBeamCursor],
         FCPAttrItemType: @"word",
     };
 
     NSDictionary *lowConfAttrs = @{
         NSFontAttributeName: normalFont,
         NSForegroundColorAttributeName: lowConfColor,
-        NSCursorAttributeName: [NSCursor pointingHandCursor],
+        NSCursorAttributeName: [NSCursor IBeamCursor],
         FCPAttrItemType: @"word",
     };
 
@@ -3604,15 +3908,9 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
 
             if (i == 0) {
                 newSegment = YES;
-            } else {
-                SpliceKitTranscriptWord *prev = self.mutableWords[i - 1];
-                double gap = word.startTime - prev.endTime;
-                // New segment on sentence-level pauses (>1s) or speaker change.
-                // 1 second is a natural sentence/thought boundary that creates
-                // readable paragraph-sized chunks matching Premiere's layout.
-                if (gap > 1.0 || ![word.speaker isEqualToString:currentSpeaker]) {
-                    newSegment = YES;
-                }
+            } else if (![word.speaker isEqualToString:currentSpeaker]) {
+                // Break on speaker change
+                newSegment = YES;
             }
 
             if (newSegment) {
@@ -4107,33 +4405,33 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
 
             // Blade at start
             [self setPlayheadToTime:deleteStart];
-            [NSThread sleepForTimeInterval:0.05];
+            [NSThread sleepForTimeInterval:0.02];
 
             SEL bladeSel = NSSelectorFromString(@"blade:");
             if ([timeline respondsToSelector:bladeSel]) {
                 ((void (*)(id, SEL, id))objc_msgSend)(timeline, bladeSel, nil);
             }
-            [NSThread sleepForTimeInterval:0.05];
+            [NSThread sleepForTimeInterval:0.02];
 
             // Blade at end
             [self setPlayheadToTime:deleteEnd];
-            [NSThread sleepForTimeInterval:0.05];
+            [NSThread sleepForTimeInterval:0.02];
 
             if ([timeline respondsToSelector:bladeSel]) {
                 ((void (*)(id, SEL, id))objc_msgSend)(timeline, bladeSel, nil);
             }
-            [NSThread sleepForTimeInterval:0.05];
+            [NSThread sleepForTimeInterval:0.02];
 
             // Select clip at midpoint
             double midPoint = (deleteStart + deleteEnd) / 2.0;
             [self setPlayheadToTime:midPoint];
-            [NSThread sleepForTimeInterval:0.05];
+            [NSThread sleepForTimeInterval:0.02];
 
             SEL selectSel = NSSelectorFromString(@"selectClipAtPlayhead:");
             if ([timeline respondsToSelector:selectSel]) {
                 ((void (*)(id, SEL, id))objc_msgSend)(timeline, selectSel, nil);
             }
-            [NSThread sleepForTimeInterval:0.05];
+            [NSThread sleepForTimeInterval:0.02];
 
             // Delete (ripple delete)
             SEL deleteSel = NSSelectorFromString(@"delete:");
@@ -4246,8 +4544,11 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
 
     __block NSUInteger deletedCount = 0;
     __block NSString *lastError = nil;
-    double totalTimeRemoved = 0;
+    __block double totalTimeRemoved = 0;
 
+    // Use the safe blade+select+delete approach via the responder chain.
+    // Sleeps are reduced from 50ms to 20ms since these are direct ObjC calls
+    // that execute synchronously — the sleep is just for FCP's internal state to settle.
     for (SpliceKitTranscriptSilence *silence in toDelete) {
         // Adjust times for already-removed content
         double adjStart = silence.startTime - totalTimeRemoved;
@@ -4261,12 +4562,13 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
             deletedCount++;
             totalTimeRemoved += silence.duration;
         }
-        [NSThread sleepForTimeInterval:0.1];
 
-        dispatch_async(dispatch_get_main_queue(), ^{
-            [self updateStatusUI:[NSString stringWithFormat:@"Deleting pauses... %lu/%lu",
-                (unsigned long)deletedCount, (unsigned long)toDelete.count]];
-        });
+        if (deletedCount % 5 == 0) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [self updateStatusUI:[NSString stringWithFormat:@"Deleting pauses... %lu/%lu",
+                    (unsigned long)deletedCount, (unsigned long)toDelete.count]];
+            });
+        }
     }
 
     // Re-read the actual clip layout after the ripple deletes instead of trying

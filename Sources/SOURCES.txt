@@ -10,6 +10,7 @@ SpliceKitSwizzle.m
 SpliceKitServer.m
 SpliceKitLogPanel.m
 SpliceKitTranscriptPanel.m
+SpliceKitTranscriptDiagnostics.m
 SpliceKitCaptionPanel.m
 SpliceKitCommandPalette.m
 SpliceKitDebugUI.m

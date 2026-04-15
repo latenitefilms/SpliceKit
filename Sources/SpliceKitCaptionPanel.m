@@ -15,6 +15,7 @@
 
 #import "SpliceKitCaptionPanel.h"
 #import "SpliceKit.h"
+#import "SpliceKitTranscriptDiagnostics.h"
 #import <objc/runtime.h>
 #import <objc/message.h>
 #import <float.h>
@@ -1969,6 +1970,23 @@ static void SpliceKit_installDragSpy(void) {
     if (timelineObject) info[@"timelineObject"] = timelineObject;
     if (clip) info[@"mediaObject"] = clip;
 
+    // Get the media's timecode origin (unclippedRange.start) for coordinate conversion.
+    double mediaOrigin = 0;
+    SEL ucSel = NSSelectorFromString(@"unclippedRange");
+    if ([clip respondsToSelector:ucSel]) {
+        NSMethodSignature *sig = [clip methodSignatureForSelector:ucSel];
+        if (sig && [sig methodReturnLength] == sizeof(SpliceKitCaption_CMTimeRange)) {
+            SpliceKitCaption_CMTimeRange range;
+            NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
+            [inv setTarget:clip];
+            [inv setSelector:ucSel];
+            [inv invoke];
+            [inv getReturnValue:&range];
+            mediaOrigin = SpliceKitCaption_CMTimeToSeconds(range.start);
+        }
+    }
+    info[@"mediaOrigin"] = @(mediaOrigin);
+
     NSURL *mediaURL = [self getMediaURLForClip:clip];
     if (mediaURL) info[@"mediaURL"] = mediaURL;
     [clipInfos addObject:info];
@@ -2195,14 +2213,28 @@ static void SpliceKit_installDragSpy(void) {
         return;
     }
 
+    // CoreML's E5RT runtime can print error messages to stdout before the JSON.
+    // Detect and strip any non-JSON prefix so parsing succeeds.
+    NSString *rawOutput = [[NSString alloc] initWithData:jsonData encoding:NSUTF8StringEncoding];
+    if (rawOutput && [rawOutput hasPrefix:@"E5RT "]) {
+        NSRange bracketRange = [rawOutput rangeOfString:@"["];
+        if (bracketRange.location != NSNotFound) {
+            NSString *errPrefix = [rawOutput substringToIndex:bracketRange.location];
+            SpliceKit_log(@"[Captions] CoreML warning on stdout (stripped): %@", [errPrefix stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]]);
+            rawOutput = [rawOutput substringFromIndex:bracketRange.location];
+            jsonData = [rawOutput dataUsingEncoding:NSUTF8StringEncoding];
+        }
+    }
+
     NSError *jsonError = nil;
     NSArray *batchResults = [NSJSONSerialization JSONObjectWithData:jsonData options:0 error:&jsonError];
     if (![batchResults isKindOfClass:[NSArray class]]) {
-        [self transcriptionFailedWithError:@"Parakeet returned unexpected output."];
+        [self transcriptionFailedWithError:@"Parakeet returned unexpected output. Check the log for details."];
         return;
     }
 
     // Map results back to clips
+    SpliceKitTranscriptDiag_logParsedResults(batchResults);
     NSMutableDictionary *resultsByFile = [NSMutableDictionary dictionary];
     for (NSDictionary *result in batchResults) {
         NSString *file = result[@"file"];
@@ -2219,10 +2251,14 @@ static void SpliceKit_installDragSpy(void) {
         double timelineStart = [clipInfo[@"timelineStart"] doubleValue];
         double trimStart = [clipInfo[@"trimStart"] doubleValue];
         double clipDuration = [clipInfo[@"duration"] doubleValue];
+        double mediaOrigin = [clipInfo[@"mediaOrigin"] doubleValue];
         NSString *clipHandle = clipInfo[@"handle"];
 
         NSArray *wordDicts = resultsByFile[mediaURL.path];
         if (!wordDicts) continue;
+
+        // Convert trimStart from FCP's timecode coordinate space to file-relative
+        double fileRelativeTrimStart = trimStart - mediaOrigin;
 
         for (NSDictionary *wd in wordDicts) {
             NSString *text = wd[@"word"];
@@ -2230,17 +2266,17 @@ static void SpliceKit_installDragSpy(void) {
             double endTime = [wd[@"endTime"] doubleValue];
             double confidence = [wd[@"confidence"] doubleValue];
 
-            if (startTime >= trimStart && startTime < trimStart + clipDuration) {
+            if (startTime >= fileRelativeTrimStart && startTime < fileRelativeTrimStart + clipDuration) {
                 SpliceKitTranscriptWord *word = [[SpliceKitTranscriptWord alloc] init];
                 word.text = text;
-                word.startTime = timelineStart + (startTime - trimStart);
-                word.duration = MIN(endTime - startTime, (trimStart + clipDuration) - startTime);
+                word.startTime = timelineStart + (startTime - fileRelativeTrimStart);
+                word.duration = MIN(endTime - startTime, (fileRelativeTrimStart + clipDuration) - startTime);
                 word.endTime = word.startTime + word.duration;
                 word.confidence = confidence;
                 word.clipHandle = clipHandle;
                 word.clipTimelineStart = timelineStart;
                 word.sourceMediaOffset = trimStart;
-                word.sourceMediaTime = startTime;
+                word.sourceMediaTime = startTime + mediaOrigin;
                 word.sourceMediaPath = mediaURL.path;
                 [allWords addObject:word];
             }

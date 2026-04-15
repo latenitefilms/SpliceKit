@@ -6,6 +6,22 @@
     <description>SpliceKit Patcher release updates</description>
     <language>en</language>
     <item>
+      <title>SpliceKit v3.1.144</title>
+      <sparkle:version>3.1.144</sparkle:version>
+      <sparkle:shortVersionString>3.1.144</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+      <pubDate>Wed, 15 Apr 2026 15:17:10 +0000</pubDate>
+      <description><![CDATA[
+        <h2>What's New in 3.1.144</h2>
+        <p>Transcript Editor diagnostics, timestamp mapping fixes, speaker cleanup, and faster pause deletion</p>
+      ]]></description>
+      <enclosure
+        url="https://github.com/elliotttate/SpliceKit/releases/download/v3.1.144/SpliceKit-v3.1.144.dmg"
+        sparkle:edSignature="aLQDhJcj+CQxnzR4KbFYoTQ9SUqrjY4W7Q4PuChhyDTPhBuQmMETUWvlsjJWvg3WQnwnsvCc5VhakoUtQfWrAg=="
+        length="12166188"
+        type="application/octet-stream" />
+    </item>
+    <item>
       <title>SpliceKit v3.1.143</title>
       <sparkle:version>3.1.143</sparkle:version>
       <sparkle:shortVersionString>3.1.143</sparkle:shortVersionString>

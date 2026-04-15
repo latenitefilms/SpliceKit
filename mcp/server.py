@@ -1894,7 +1894,7 @@ def _song_cut_preset(pace: str) -> dict | None:
             "segment_min_step": 1,
             "segment_max_step": 4,
             "step_weights": {"1": 1, "2": 8, "4": 3},
-            "label": "mostly whole-beat cuts, sometimes two beats, rarely half-beats",
+            "label": "mostly whole-beat cuts, sometimes two beats, rarely paired half-beats",
         },
         "medium": {
             "grid": "half_beat",
@@ -1906,7 +1906,8 @@ def _song_cut_preset(pace: str) -> dict | None:
             "grid": "half_beat",
             "segment_min_step": 1,
             "segment_max_step": 2,
-            "label": "half- to full-beat cuts",
+            "step_weights": {"1": 1, "2": 4},
+            "label": "half- to full-beat cuts, half-beats always paired",
         },
         "aggressive": {
             "grid": "quarter_beat",

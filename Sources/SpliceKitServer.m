@@ -78,6 +78,9 @@ static void SpliceKit_collectKeyframeTargetsForClipRecursive(id clip,
                                                             NSString *clipLabel);
 static NSArray<id> *SpliceKit_keyframeTargetsForClip(id clip);
 static NSDictionary *SpliceKit_removeAllKeyframesFromEffectStack(id effectStack, NSString *actionName);
+static NSArray *SpliceKit_mixerArrayFromContainer(id value);
+static BOOL SpliceKit_mixerIsCollectionLike(id item);
+static BOOL SpliceKit_mixerIsSkippableItem(id item);
 
 static void SpliceKit_searchLayerTreeForMeterPeak(CALayer *layer,
                                                   Class meterLayerClass,
@@ -189,6 +192,12 @@ NSDictionary *SpliceKit_listHandles(void) {
 
 typedef struct { int64_t value; int32_t timescale; uint32_t flags; int64_t epoch; } SpliceKit_CMTime;
 typedef struct { SpliceKit_CMTime start; SpliceKit_CMTime duration; } SpliceKit_CMTimeRange;
+
+static SpliceKit_CMTimeRange SpliceKit_clipRangeForItem(id item);
+static NSDictionary *SpliceKit_prepareBrowserClipSourceForInsertion(id sourceBrowserClip,
+                                                                    SpliceKit_CMTimeRange clipRange,
+                                                                    BOOL preferAudio);
+static id SpliceKit_normalizeSourceObjectForInsertion(id sourceObject);
 
 static NSDictionary *SpliceKit_serializeCMTime(SpliceKit_CMTime t) {
     double seconds = (t.timescale > 0) ? (double)t.value / t.timescale : 0;
@@ -2129,8 +2138,16 @@ static NSDictionary *SpliceKit_handleGetClipEffects(NSDictionary *params) {
 //
 
 id SpliceKit_getActiveTimelineModule(void) {
-    id editorContainer = SpliceKit_dualTimelineFocusedEditorContainer();
+    id editorContainer = nil;
     id delegate = nil;
+
+    // Only walk the dual timeline focus chain if the feature is actually installed.
+    // Without this check, the focus chain can dereference stale or invalid state
+    // on platforms where the dual timeline swizzles failed to install.
+    if (SpliceKit_isDualTimelineInstalled()) {
+        editorContainer = SpliceKit_dualTimelineFocusedEditorContainer();
+    }
+
     if (!editorContainer) {
         id app = ((id (*)(id, SEL))objc_msgSend)(
             objc_getClass("NSApplication"), @selector(sharedApplication));
@@ -4829,6 +4846,834 @@ static NSDictionary *SpliceKit_handleBladeAtTimes(NSDictionary *params) {
         }
     });
     return result ?: @{@"error": @"Failed to blade at times"};
+}
+
+static double SpliceKit_secondsFromTime(SpliceKit_CMTime t) {
+    if (t.timescale <= 0) return 0.0;
+    return (double)t.value / (double)t.timescale;
+}
+
+static BOOL SpliceKit_tryReadTimelineRange(id primaryObj, id item, SpliceKit_CMTimeRange *outRange) {
+    if (!primaryObj || !item || !outRange) return NO;
+    SEL erSel = NSSelectorFromString(@"effectiveRangeOfObject:");
+    if (![primaryObj respondsToSelector:erSel]) return NO;
+    @try {
+        *outRange = ((SpliceKit_CMTimeRange (*)(id, SEL, id))STRET_MSG)(primaryObj, erSel, item);
+        return outRange->start.timescale > 0 && outRange->duration.timescale > 0;
+    } @catch (NSException *e) {}
+    return NO;
+}
+
+static BOOL SpliceKit_tryReadLocalAudioRange(id item, SpliceKit_CMTimeRange *outRange) {
+    if (!item || !outRange) return NO;
+
+    SEL audioSel = NSSelectorFromString(@"audioClippedRange");
+    if ([item respondsToSelector:audioSel]) {
+        @try {
+            SpliceKit_CMTimeRange range = ((SpliceKit_CMTimeRange (*)(id, SEL))STRET_MSG)(item, audioSel);
+            if (range.start.timescale > 0 && range.duration.timescale > 0) {
+                *outRange = range;
+                return YES;
+            }
+        } @catch (NSException *e) {}
+    }
+
+    SEL clipSel = NSSelectorFromString(@"clippedRange");
+    if ([item respondsToSelector:clipSel]) {
+        @try {
+            SpliceKit_CMTimeRange range = ((SpliceKit_CMTimeRange (*)(id, SEL))STRET_MSG)(item, clipSel);
+            if (range.start.timescale > 0 && range.duration.timescale > 0) {
+                *outRange = range;
+                return YES;
+            }
+        } @catch (NSException *e) {}
+    }
+
+    return NO;
+}
+
+static NSArray<NSNumber *> *SpliceKit_sortedUniqueSeconds(NSArray<NSNumber *> *values, double epsilon) {
+    if (!values || values.count == 0) return @[];
+
+    NSArray<NSNumber *> *sorted = [values sortedArrayUsingSelector:@selector(compare:)];
+    NSMutableArray<NSNumber *> *unique = [NSMutableArray arrayWithCapacity:sorted.count];
+    double last = 0.0;
+    BOOL hasLast = NO;
+    for (NSNumber *num in sorted) {
+        double value = [num doubleValue];
+        if (!isfinite(value)) continue;
+        if (!hasLast || fabs(value - last) > epsilon) {
+            [unique addObject:@(value)];
+            last = value;
+            hasLast = YES;
+        }
+    }
+    return unique;
+}
+
+static NSArray<NSNumber *> *SpliceKit_copyTimingMetadataSecondsForType(id clip, NSInteger type) {
+    if (!clip || ![clip respondsToSelector:@selector(newTimingMetadata)]) return @[];
+
+    id timing = ((id (*)(id, SEL))objc_msgSend)(clip, @selector(newTimingMetadata));
+    if (!timing) return @[];
+
+    SEL typeSel = NSSelectorFromString(@"newTimingMetadataForType:");
+    if (![timing respondsToSelector:typeSel]) return @[];
+
+    id entriesValue = ((id (*)(id, SEL, NSInteger))objc_msgSend)(timing, typeSel, type);
+    NSArray *entries = SpliceKit_mixerArrayFromContainer(entriesValue);
+    if (!entries || entries.count == 0) return @[];
+
+    SEL timeSel = NSSelectorFromString(@"time");
+    NSMutableArray<NSNumber *> *times = [NSMutableArray arrayWithCapacity:entries.count];
+    for (id entry in entries) {
+        if (![entry respondsToSelector:timeSel]) continue;
+        @try {
+            SpliceKit_CMTime time = ((SpliceKit_CMTime (*)(id, SEL))STRET_MSG)(entry, timeSel);
+            double seconds = SpliceKit_secondsFromTime(time);
+            if (isfinite(seconds)) [times addObject:@(seconds)];
+        } @catch (NSException *e) {}
+    }
+
+    return SpliceKit_sortedUniqueSeconds(times, 0.0001);
+}
+
+static double SpliceKit_copyTimingMetadataTempo(id clip) {
+    if (!clip || ![clip respondsToSelector:@selector(newTimingMetadata)]) return 0.0;
+
+    id timing = ((id (*)(id, SEL))objc_msgSend)(clip, @selector(newTimingMetadata));
+    if (!timing) return 0.0;
+
+    SEL typeSel = NSSelectorFromString(@"newTimingMetadataForType:");
+    if (![timing respondsToSelector:typeSel]) return 0.0;
+
+    id entriesValue = ((id (*)(id, SEL, NSInteger))objc_msgSend)(timing, typeSel, 8);
+    NSArray *entries = SpliceKit_mixerArrayFromContainer(entriesValue);
+    if (!entries || entries.count == 0) return 0.0;
+
+    id first = entries.firstObject;
+    if (!first) return 0.0;
+
+    SEL dataSel = NSSelectorFromString(@"data");
+    if (![first respondsToSelector:dataSel]) return 0.0;
+
+    id data = ((id (*)(id, SEL))objc_msgSend)(first, dataSel);
+    SEL valueSel = NSSelectorFromString(@"value");
+    if (!data || ![data respondsToSelector:valueSel]) return 0.0;
+
+    @try {
+        return ((float (*)(id, SEL))objc_msgSend)(data, valueSel);
+    } @catch (NSException *e) {}
+    return 0.0;
+}
+
+static NSArray<NSNumber *> *SpliceKit_translateTimingMetadataToTimeline(id clip,
+                                                                        id primaryObj,
+                                                                        NSString *gridMode,
+                                                                        double *outStartSec,
+                                                                        double *outEndSec,
+                                                                        double *outTempo) {
+    if (!clip || !primaryObj) return @[];
+
+    SpliceKit_CMTimeRange timelineRange;
+    if (!SpliceKit_tryReadTimelineRange(primaryObj, clip, &timelineRange)) return @[];
+
+    SpliceKit_CMTimeRange localRange;
+    if (!SpliceKit_tryReadLocalAudioRange(clip, &localRange)) return @[];
+
+    double timelineStartSec = SpliceKit_secondsFromTime(timelineRange.start);
+    double timelineDurationSec = SpliceKit_secondsFromTime(timelineRange.duration);
+    double timelineEndSec = timelineStartSec + timelineDurationSec;
+    double localStartSec = SpliceKit_secondsFromTime(localRange.start);
+    double localDurationSec = SpliceKit_secondsFromTime(localRange.duration);
+    double localEndSec = localStartSec + localDurationSec;
+
+    if (outStartSec) *outStartSec = timelineStartSec;
+    if (outEndSec) *outEndSec = timelineEndSec;
+    if (outTempo) *outTempo = SpliceKit_copyTimingMetadataTempo(clip);
+
+    NSArray<NSNumber *> *beats = SpliceKit_copyTimingMetadataSecondsForType(clip, 1);
+    NSArray<NSNumber *> *bars = SpliceKit_copyTimingMetadataSecondsForType(clip, 2);
+    NSArray<NSNumber *> *sections = SpliceKit_copyTimingMetadataSecondsForType(clip, 4);
+
+    NSMutableArray<NSNumber *> *timelinePoints = [NSMutableArray array];
+    NSString *mode = (gridMode ?: @"beat").lowercaseString;
+    BOOL useBars = [mode isEqualToString:@"bar"];
+    BOOL useSections = [mode isEqualToString:@"section"];
+    BOOL useHalfBeats = [mode isEqualToString:@"half"] || [mode isEqualToString:@"half_beat"];
+    BOOL useQuarterBeats = [mode isEqualToString:@"quarter"] || [mode isEqualToString:@"quarter_beat"];
+
+    NSArray<NSNumber *> *base = beats;
+    if (useBars) base = bars;
+    if (useSections) base = sections;
+
+    for (NSNumber *num in base) {
+        double localSec = [num doubleValue];
+        if (localSec + 0.0001 < localStartSec || localSec - 0.0001 > localEndSec) continue;
+        double timelineSec = timelineStartSec + (localSec - localStartSec);
+        if (timelineSec + 0.0001 < timelineStartSec || timelineSec - 0.0001 > timelineEndSec) continue;
+        [timelinePoints addObject:@(timelineSec)];
+    }
+
+    if (useQuarterBeats && beats.count > 1) {
+        for (NSUInteger i = 0; i + 1 < beats.count; i++) {
+            double left = [beats[i] doubleValue];
+            double right = [beats[i + 1] doubleValue];
+            if (right <= left) continue;
+            double delta = right - left;
+            double quarter = left + (delta * 0.25);
+            double midpoint = left + (delta * 0.5);
+            double threeQuarter = left + (delta * 0.75);
+            for (NSNumber *subdivision in @[@(quarter), @(midpoint), @(threeQuarter)]) {
+                double localSec = [subdivision doubleValue];
+                if (localSec + 0.0001 < localStartSec || localSec - 0.0001 > localEndSec) continue;
+                double timelineSec = timelineStartSec + (localSec - localStartSec);
+                if (timelineSec + 0.0001 < timelineStartSec || timelineSec - 0.0001 > timelineEndSec) continue;
+                [timelinePoints addObject:@(timelineSec)];
+            }
+        }
+    } else if (useHalfBeats && beats.count > 1) {
+        for (NSUInteger i = 0; i + 1 < beats.count; i++) {
+            double left = [beats[i] doubleValue];
+            double right = [beats[i + 1] doubleValue];
+            if (right <= left) continue;
+            double midpoint = left + ((right - left) * 0.5);
+            if (midpoint + 0.0001 < localStartSec || midpoint - 0.0001 > localEndSec) continue;
+            double timelineSec = timelineStartSec + (midpoint - localStartSec);
+            if (timelineSec + 0.0001 < timelineStartSec || timelineSec - 0.0001 > timelineEndSec) continue;
+            [timelinePoints addObject:@(timelineSec)];
+        }
+    }
+
+    return SpliceKit_sortedUniqueSeconds(timelinePoints, 0.0001);
+}
+
+static BOOL SpliceKit_boolForSelector(id item, NSString *selectorName) {
+    if (!item || selectorName.length == 0) return NO;
+    SEL sel = NSSelectorFromString(selectorName);
+    if (![item respondsToSelector:sel]) return NO;
+    @try {
+        return ((BOOL (*)(id, SEL))objc_msgSend)(item, sel);
+    } @catch (NSException *e) {}
+    return NO;
+}
+
+static NSInteger SpliceKit_laneForItem(id item) {
+    if (!item) return 0;
+    SEL laneSel = NSSelectorFromString(@"anchoredLane");
+    if (![item respondsToSelector:laneSel]) return 0;
+    @try {
+        return (NSInteger)((long long (*)(id, SEL))objc_msgSend)(item, laneSel);
+    } @catch (NSException *e) {}
+    return 0;
+}
+
+static NSString *SpliceKit_displayNameForItem(id item) {
+    if (!item || ![item respondsToSelector:@selector(displayName)]) return @"";
+    @try {
+        id name = ((id (*)(id, SEL))objc_msgSend)(item, @selector(displayName));
+        return name ?: @"";
+    } @catch (NSException *e) {}
+    return @"";
+}
+
+static void SpliceKit_collectVisibleTimelineEntries(id item,
+                                                    id primaryObj,
+                                                    NSMutableArray<NSDictionary *> *out,
+                                                    NSMutableSet<NSString *> *visited) {
+    if (!item || !out || !visited) return;
+
+    NSString *pointerKey = SpliceKit_handlePointerKey(item);
+    if (pointerKey.length == 0 || [visited containsObject:pointerKey]) return;
+    [visited addObject:pointerKey];
+    BOOL skipSelf = SpliceKit_mixerIsSkippableItem(item);
+    BOOL hasVideo = NO;
+    BOOL isConnectedStoryline = NO;
+
+    if (!skipSelf) {
+        SpliceKit_CMTimeRange range;
+        if (SpliceKit_tryReadTimelineRange(primaryObj, item, &range)) {
+            double startSec = SpliceKit_secondsFromTime(range.start);
+            double durationSec = SpliceKit_secondsFromTime(range.duration);
+            double endSec = startSec + durationSec;
+            if (isfinite(startSec) && isfinite(endSec) && endSec > startSec + 0.0001) {
+                hasVideo = SpliceKit_boolForSelector(item, @"hasVideo");
+                BOOL hasAudio = SpliceKit_boolForSelector(item, @"hasAudio");
+                BOOL isAudioOnly = SpliceKit_boolForSelector(item, @"isAudioOnly");
+                isConnectedStoryline = SpliceKit_boolForSelector(item, @"isConnectedStoryline");
+                BOOL hasTimingMetadata = SpliceKit_boolForSelector(item, @"hasTimingMetadata");
+                BOOL beatGridEnabled = SpliceKit_boolForSelector(item, @"beatGridEnabled");
+
+                [out addObject:@{
+                    @"item": item,
+                    @"pointerKey": pointerKey,
+                    @"name": SpliceKit_displayNameForItem(item),
+                    @"start": @(startSec),
+                    @"end": @(endSec),
+                    @"lane": @(SpliceKit_laneForItem(item)),
+                    @"hasVideo": @(hasVideo),
+                    @"hasAudio": @(hasAudio),
+                    @"isAudioOnly": @(isAudioOnly),
+                    @"isConnectedStoryline": @(isConnectedStoryline),
+                    @"hasTimingMetadata": @(hasTimingMetadata),
+                    @"beatGridEnabled": @(beatGridEnabled),
+                }];
+            }
+        }
+    }
+
+    SEL anchoredSel = NSSelectorFromString(@"anchoredItems");
+    NSArray *anchored = [item respondsToSelector:anchoredSel]
+        ? SpliceKit_mixerArrayFromContainer(((id (*)(id, SEL))objc_msgSend)(item, anchoredSel))
+        : nil;
+
+    SEL containedSel = NSSelectorFromString(@"containedItems");
+    NSArray *contained = [item respondsToSelector:containedSel]
+        ? SpliceKit_mixerArrayFromContainer(((id (*)(id, SEL))objc_msgSend)(item, containedSel))
+        : nil;
+
+    BOOL recurseContained = isConnectedStoryline || (!hasVideo && SpliceKit_mixerIsCollectionLike(item));
+    if (recurseContained) {
+        for (id child in contained) {
+            SpliceKit_collectVisibleTimelineEntries(child, primaryObj, out, visited);
+        }
+    }
+    for (id child in anchored) {
+        SpliceKit_collectVisibleTimelineEntries(child, primaryObj, out, visited);
+    }
+}
+
+static uint64_t SpliceKit_nextRandom(uint64_t *state) {
+    *state = (*state * 6364136223846793005ULL) + 1442695040888963407ULL;
+    return *state;
+}
+
+static NSInteger SpliceKit_chooseRandomAssemblyStep(NSInteger segmentMinStep,
+                                                    NSInteger segmentMaxStep,
+                                                    NSDictionary<NSNumber *, NSNumber *> *stepWeights,
+                                                    uint64_t *rngState) {
+    if (segmentMinStep < 1) segmentMinStep = 1;
+    if (segmentMaxStep < segmentMinStep) segmentMaxStep = segmentMinStep;
+
+    NSInteger totalWeight = 0;
+    if (stepWeights.count > 0) {
+        for (NSInteger step = segmentMinStep; step <= segmentMaxStep; step++) {
+            NSInteger weight = [stepWeights[@(step)] integerValue];
+            if (weight > 0) totalWeight += weight;
+        }
+    }
+
+    if (totalWeight > 0) {
+        NSInteger pick = (NSInteger)(SpliceKit_nextRandom(rngState) % (uint64_t)totalWeight);
+        NSInteger cumulative = 0;
+        for (NSInteger step = segmentMinStep; step <= segmentMaxStep; step++) {
+            NSInteger weight = [stepWeights[@(step)] integerValue];
+            if (weight <= 0) continue;
+            cumulative += weight;
+            if (pick < cumulative) return step;
+        }
+    }
+
+    if (segmentMaxStep <= segmentMinStep) return segmentMinStep;
+    NSInteger span = segmentMaxStep - segmentMinStep + 1;
+    return segmentMinStep + (NSInteger)(SpliceKit_nextRandom(rngState) % (uint64_t)span);
+}
+
+static id SpliceKit_findSequenceNamedInActiveLibraries(NSString *projectName);
+
+static NSDictionary *SpliceKit_buildVisibleEntryContextForSequence(id sequence) {
+    if (!sequence) {
+        return @{@"error": @"Missing sequence"};
+    }
+
+    id primaryObj = [sequence respondsToSelector:@selector(primaryObject)]
+        ? ((id (*)(id, SEL))objc_msgSend)(sequence, @selector(primaryObject)) : nil;
+    if (!primaryObj) {
+        return @{@"error": @"Sequence has no primary storyline"};
+    }
+
+    NSArray *rootItems = SpliceKit_mixerArrayFromContainer(
+        ((id (*)(id, SEL))objc_msgSend)(primaryObj, @selector(containedItems))) ?: @[];
+    NSMutableArray<NSDictionary *> *visibleEntries = [NSMutableArray array];
+    NSMutableSet<NSString *> *visited = [NSMutableSet set];
+    for (id item in rootItems) {
+        SpliceKit_collectVisibleTimelineEntries(item, primaryObj, visibleEntries, visited);
+    }
+
+    return @{
+        @"sequence": sequence,
+        @"primaryObject": primaryObj,
+        @"visibleEntries": visibleEntries,
+        @"sequenceName": SpliceKit_displayNameForItem(sequence) ?: @"",
+    };
+}
+
+static NSDictionary *SpliceKit_findVisibleEntryContextNamed(NSString *projectName) {
+    if (projectName.length == 0) {
+        return @{@"error": @"Missing project name"};
+    }
+
+    id sequence = SpliceKit_findSequenceNamedInActiveLibraries(projectName);
+    if (!sequence) {
+        return @{@"error": [NSString stringWithFormat:@"Couldn't find sequence named \"%@\"", projectName]};
+    }
+
+    return SpliceKit_buildVisibleEntryContextForSequence(sequence);
+}
+
+static double SpliceKit_quantizeSecondsToFrameGrid(double seconds, double frameSeconds);
+
+static NSDictionary *SpliceKit_handleTrimClipsToBeats(NSDictionary *params) {
+    NSString *sourceHandle = [params[@"sourceHandle"] isKindOfClass:[NSString class]] ? params[@"sourceHandle"] : nil;
+    NSArray *targetHandles = [params[@"targetHandles"] isKindOfClass:[NSArray class]] ? params[@"targetHandles"] : nil;
+    NSString *grid = [params[@"grid"] isKindOfClass:[NSString class]] ? [params[@"grid"] lowercaseString] : @"beat";
+    NSString *targetMode = [params[@"targetMode"] isKindOfClass:[NSString class]]
+        ? [params[@"targetMode"] lowercaseString] : @"auto";
+    BOOL randomize = [params[@"randomize"] boolValue];
+    BOOL dryRun = [params[@"dryRun"] boolValue];
+    NSInteger randomMinStep = params[@"randomMinStep"] ? [params[@"randomMinStep"] integerValue] : 1;
+    NSInteger randomMaxStep = params[@"randomMaxStep"] ? [params[@"randomMaxStep"] integerValue] : 4;
+    long long randomSeed = params[@"randomSeed"] ? [params[@"randomSeed"] longLongValue] : 1337;
+    double minTrimSeconds = params[@"minTrimSeconds"] ? [params[@"minTrimSeconds"] doubleValue] : -1.0;
+    double minResultDuration = params[@"minResultDuration"] ? [params[@"minResultDuration"] doubleValue] : -1.0;
+    __block double effectiveMinTrimSeconds = minTrimSeconds;
+    __block double effectiveMinResultDuration = minResultDuration;
+
+    if ([grid isEqualToString:@"random"]) {
+        grid = @"beat";
+        randomize = YES;
+    } else if ([grid isEqualToString:@"random_half"] || [grid isEqualToString:@"random_half_beat"]) {
+        grid = @"half_beat";
+        randomize = YES;
+    } else if ([grid isEqualToString:@"random_quarter"] || [grid isEqualToString:@"random_quarter_beat"]) {
+        grid = @"quarter_beat";
+        randomize = YES;
+    }
+
+    NSSet *allowed = [NSSet setWithArray:@[@"beat", @"half", @"half_beat", @"quarter", @"quarter_beat", @"bar", @"section"]];
+    if (![allowed containsObject:grid]) {
+        return @{@"error": @"grid must be one of: beat, half_beat, quarter_beat, bar, section, random, random_half_beat, random_quarter_beat"};
+    }
+    if (![@[@"auto", @"selected", @"overlay", @"all"] containsObject:targetMode]) {
+        return @{@"error": @"targetMode must be one of: auto, selected, overlay, all"};
+    }
+
+    if (randomMinStep < 1) randomMinStep = 1;
+    if (randomMaxStep < randomMinStep) randomMaxStep = randomMinStep;
+
+    __block NSDictionary *result = nil;
+    SpliceKit_executeOnMainThread(^{
+        @try {
+            id timeline = SpliceKit_getActiveTimelineModule();
+            if (!timeline) { result = @{@"error": @"No active timeline module"}; return; }
+
+            id sequence = [timeline respondsToSelector:@selector(sequence)]
+                ? ((id (*)(id, SEL))objc_msgSend)(timeline, @selector(sequence)) : nil;
+            if (!sequence) { result = @{@"error": @"No sequence in timeline"}; return; }
+
+            id primaryObj = [sequence respondsToSelector:@selector(primaryObject)]
+                ? ((id (*)(id, SEL))objc_msgSend)(sequence, @selector(primaryObject)) : nil;
+            if (!primaryObj) { result = @{@"error": @"Cannot access primary storyline"}; return; }
+
+            SpliceKit_CMTime frameDuration = {100, 3000, 1, 0};
+            SEL fdSel = NSSelectorFromString(@"frameDuration");
+            if ([sequence respondsToSelector:fdSel]) {
+                SpliceKit_CMTime fd = ((SpliceKit_CMTime (*)(id, SEL))STRET_MSG)(sequence, fdSel);
+                if (fd.timescale > 0 && fd.value > 0) frameDuration = fd;
+            }
+            double frameSeconds = MAX(0.001, SpliceKit_secondsFromTime(frameDuration));
+            if (effectiveMinTrimSeconds < 0.0) effectiveMinTrimSeconds = frameSeconds;
+            if (effectiveMinResultDuration < 0.0) effectiveMinResultDuration = frameSeconds * 2.0;
+
+            NSArray *rootItems = SpliceKit_mixerArrayFromContainer(((id (*)(id, SEL))objc_msgSend)(primaryObj, @selector(containedItems)));
+            if (!rootItems || rootItems.count == 0) {
+                result = @{@"error": @"No clips found in timeline"};
+                return;
+            }
+
+            NSMutableArray<NSDictionary *> *visibleEntries = [NSMutableArray array];
+            NSMutableSet<NSString *> *visited = [NSMutableSet set];
+            for (id item in rootItems) {
+                SpliceKit_collectVisibleTimelineEntries(item, primaryObj, visibleEntries, visited);
+            }
+            if (visibleEntries.count == 0) {
+                result = @{@"error": @"No visible timeline items found"};
+                return;
+            }
+
+            NSArray *selectedItems = nil;
+            NSMutableSet<NSString *> *selectedKeys = [NSMutableSet set];
+            SEL selectedSel = NSSelectorFromString(@"selectedItems:includeItemBeforePlayheadIfLast:");
+            if ([timeline respondsToSelector:selectedSel]) {
+                id selItems = ((id (*)(id, SEL, BOOL, BOOL))objc_msgSend)(timeline, selectedSel, NO, NO);
+                selectedItems = SpliceKit_mixerArrayFromContainer(selItems);
+            } else if ([timeline respondsToSelector:@selector(selectedItems)]) {
+                selectedItems = SpliceKit_mixerArrayFromContainer(((id (*)(id, SEL))objc_msgSend)(timeline, @selector(selectedItems)));
+            }
+            for (id selectedItem in selectedItems) {
+                NSString *pointerKey = SpliceKit_handlePointerKey(selectedItem);
+                if (pointerKey.length > 0) [selectedKeys addObject:pointerKey];
+            }
+
+            NSDictionary *sourceEntry = nil;
+            NSString *sourceKey = nil;
+            if (sourceHandle.length > 0) {
+                id sourceObj = SpliceKit_resolveHandle(sourceHandle);
+                if (!sourceObj) {
+                    result = @{@"error": [NSString stringWithFormat:@"Source handle not found: %@", sourceHandle]};
+                    return;
+                }
+                sourceKey = SpliceKit_handlePointerKey(sourceObj);
+                for (NSDictionary *entry in visibleEntries) {
+                    if ([entry[@"pointerKey"] isEqualToString:sourceKey]) {
+                        sourceEntry = entry;
+                        break;
+                    }
+                }
+                if (!sourceEntry) {
+                    result = @{@"error": @"Source clip is not visible in the active timeline"};
+                    return;
+                }
+            } else {
+                NSArray *orderedEntries = [visibleEntries sortedArrayUsingComparator:^NSComparisonResult(NSDictionary *lhs, NSDictionary *rhs) {
+                    return [lhs[@"start"] compare:rhs[@"start"]];
+                }];
+                for (NSDictionary *entry in orderedEntries) {
+                    if (![selectedKeys containsObject:entry[@"pointerKey"]]) continue;
+                    if (![entry[@"hasTimingMetadata"] boolValue] || ![entry[@"hasAudio"] boolValue]) continue;
+                    sourceEntry = entry;
+                    break;
+                }
+                if (!sourceEntry) {
+                    for (NSDictionary *entry in orderedEntries) {
+                        if (![entry[@"hasTimingMetadata"] boolValue] || ![entry[@"hasAudio"] boolValue]) continue;
+                        if (![entry[@"beatGridEnabled"] boolValue]) continue;
+                        sourceEntry = entry;
+                        break;
+                    }
+                }
+                if (!sourceEntry) {
+                    for (NSDictionary *entry in orderedEntries) {
+                        if ([entry[@"hasTimingMetadata"] boolValue] && [entry[@"hasAudio"] boolValue]) {
+                            sourceEntry = entry;
+                            break;
+                        }
+                    }
+                }
+                if (!sourceEntry) {
+                    result = @{@"error": @"No beat-detected audio clip found in the active timeline. Select one or pass sourceHandle."};
+                    return;
+                }
+                sourceKey = sourceEntry[@"pointerKey"];
+            }
+
+            id sourceItem = sourceEntry[@"item"];
+            if (!SpliceKit_boolForSelector(sourceItem, @"hasTimingMetadata")) {
+                result = @{@"error": @"Source clip does not have Apple timing metadata. Run beat detection on it first."};
+                return;
+            }
+            SpliceKit_CMTimeRange sourceClipRange = SpliceKit_clipRangeForItem(sourceItem);
+
+            double sourceStartSec = 0.0;
+            double sourceEndSec = 0.0;
+            double tempo = 0.0;
+            NSArray<NSNumber *> *rawTimelineGrid = SpliceKit_translateTimingMetadataToTimeline(
+                sourceItem, primaryObj, grid, &sourceStartSec, &sourceEndSec, &tempo);
+            if (rawTimelineGrid.count == 0) {
+                result = @{@"error": @"Source clip has no usable timing metadata for the requested grid"};
+                return;
+            }
+
+            NSMutableArray<NSNumber *> *quantizedTimelineGrid = [NSMutableArray arrayWithCapacity:rawTimelineGrid.count];
+            for (NSNumber *markerNum in rawTimelineGrid) {
+                double markerSec = SpliceKit_quantizeSecondsToFrameGrid([markerNum doubleValue], frameSeconds);
+                if (markerSec > 0.0) [quantizedTimelineGrid addObject:@(markerSec)];
+            }
+            NSArray<NSNumber *> *timelineGrid = SpliceKit_sortedUniqueSeconds(
+                quantizedTimelineGrid, frameSeconds * 0.25);
+            if (timelineGrid.count == 0) {
+                result = @{@"error": @"Source clip has no frame-quantized timing metadata for the requested grid"};
+                return;
+            }
+
+            NSMutableSet<NSString *> *requestedTargetKeys = [NSMutableSet set];
+            for (id handleValue in targetHandles) {
+                if (![handleValue isKindOfClass:[NSString class]]) continue;
+                id targetObj = SpliceKit_resolveHandle(handleValue);
+                NSString *pointerKey = SpliceKit_handlePointerKey(targetObj);
+                if (pointerKey.length > 0) [requestedTargetKeys addObject:pointerKey];
+            }
+
+            BOOL haveSelectedVideoTargets = NO;
+            BOOL haveOverlayTargets = NO;
+            NSInteger sourceLane = [sourceEntry[@"lane"] integerValue];
+            BOOL sourceIsAudioOnly = [sourceEntry[@"hasAudio"] boolValue] && ![sourceEntry[@"hasVideo"] boolValue];
+            for (NSDictionary *entry in visibleEntries) {
+                if ([entry[@"pointerKey"] isEqualToString:sourceKey]) continue;
+                if (![entry[@"hasVideo"] boolValue]) continue;
+                if ([entry[@"isConnectedStoryline"] boolValue]) continue;
+                if ([selectedKeys containsObject:entry[@"pointerKey"]]) haveSelectedVideoTargets = YES;
+                if ([entry[@"lane"] integerValue] != sourceLane) haveOverlayTargets = YES;
+            }
+
+            NSMutableArray<NSDictionary *> *targetEntries = [NSMutableArray array];
+            for (NSDictionary *entry in visibleEntries) {
+                NSString *pointerKey = entry[@"pointerKey"];
+                if ([pointerKey isEqualToString:sourceKey]) continue;
+                if (![entry[@"hasVideo"] boolValue]) continue;
+                if ([entry[@"isConnectedStoryline"] boolValue]) continue;
+
+                if (requestedTargetKeys.count > 0) {
+                    if (![requestedTargetKeys containsObject:pointerKey]) continue;
+                } else if ([targetMode isEqualToString:@"selected"]) {
+                    if (![selectedKeys containsObject:pointerKey]) continue;
+                } else if ([targetMode isEqualToString:@"overlay"]) {
+                    if ([entry[@"lane"] integerValue] == sourceLane) continue;
+                } else if ([targetMode isEqualToString:@"auto"]) {
+                    if (haveSelectedVideoTargets) {
+                        if (![selectedKeys containsObject:pointerKey]) continue;
+                    } else if (sourceIsAudioOnly && haveOverlayTargets) {
+                        if ([entry[@"lane"] integerValue] == sourceLane) continue;
+                    }
+                }
+
+                [targetEntries addObject:entry];
+            }
+
+            if (targetEntries.count == 0) {
+                result = @{@"error": @"No target video clips found to trim"};
+                return;
+            }
+
+            [targetEntries sortUsingComparator:^NSComparisonResult(NSDictionary *lhs, NSDictionary *rhs) {
+                NSComparisonResult startCmp = [lhs[@"start"] compare:rhs[@"start"]];
+                if (startCmp != NSOrderedSame) return startCmp;
+                return [lhs[@"lane"] compare:rhs[@"lane"]];
+            }];
+
+            NSMutableArray<NSDictionary *> *plan = [NSMutableArray array];
+            uint64_t rngState = (uint64_t)randomSeed;
+            NSUInteger planned = 0;
+
+            for (NSDictionary *entry in targetEntries) {
+                double clipStart = [entry[@"start"] doubleValue];
+                double clipEnd = [entry[@"end"] doubleValue];
+                double currentDuration = clipEnd - clipStart;
+                NSString *name = entry[@"name"] ?: @"";
+                NSString *handle = SpliceKit_storeHandle(entry[@"item"]);
+
+                BOOL alreadyAligned = NO;
+                for (NSNumber *markerNum in timelineGrid) {
+                    double markerSec = [markerNum doubleValue];
+                    if (fabs(markerSec - clipEnd) <= (frameSeconds * 0.25)) {
+                        alreadyAligned = YES;
+                        break;
+                    }
+                }
+                if (alreadyAligned) {
+                    [plan addObject:[NSMutableDictionary dictionaryWithDictionary:@{
+                        @"handle": handle,
+                        @"name": name,
+                        @"start": @(clipStart),
+                        @"end": @(clipEnd),
+                        @"status": @"skipped",
+                        @"reason": @"Clip already ends on a beat boundary",
+                    }]];
+                    continue;
+                }
+
+                NSMutableArray<NSNumber *> *futureMarkers = [NSMutableArray array];
+                for (NSNumber *markerNum in timelineGrid) {
+                    double markerSec = [markerNum doubleValue];
+                    if (markerSec > clipStart + 0.0001 && markerSec < clipEnd - effectiveMinTrimSeconds + 0.0001) {
+                        NSNumber *last = [futureMarkers lastObject];
+                        if (!last || fabs([last doubleValue] - markerSec) > (frameSeconds * 0.25)) {
+                            [futureMarkers addObject:@(markerSec)];
+                        }
+                    }
+                }
+
+                if (futureMarkers.count == 0) {
+                    [plan addObject:[NSMutableDictionary dictionaryWithDictionary:@{
+                        @"handle": handle,
+                        @"name": name,
+                        @"start": @(clipStart),
+                        @"end": @(clipEnd),
+                        @"status": @"skipped",
+                        @"reason": @"No beat boundary falls inside the current clip range",
+                    }]];
+                    continue;
+                }
+
+                double targetSec = 0.0;
+                if (randomize) {
+                    NSInteger lastIndex = (NSInteger)futureMarkers.count - 1;
+                    NSInteger minDistanceFromEnd = MAX(1, randomMinStep);
+                    NSInteger maxDistanceFromEnd = MAX(minDistanceFromEnd, randomMaxStep);
+                    NSInteger minIndex = MAX(0, lastIndex - maxDistanceFromEnd + 1);
+                    NSInteger maxIndex = MAX(0, lastIndex - minDistanceFromEnd + 1);
+                    if (maxIndex < minIndex) maxIndex = minIndex;
+                    NSMutableArray<NSNumber *> *eligible = [NSMutableArray array];
+                    for (NSInteger idx = minIndex; idx <= maxIndex; idx++) {
+                        double candidate = [futureMarkers[idx] doubleValue];
+                        double newDuration = candidate - clipStart;
+                        double trimAmount = clipEnd - candidate;
+                        if (newDuration >= effectiveMinResultDuration && trimAmount >= effectiveMinTrimSeconds) {
+                            [eligible addObject:@(candidate)];
+                        }
+                    }
+                    if (eligible.count == 0) {
+                        [plan addObject:[NSMutableDictionary dictionaryWithDictionary:@{
+                            @"handle": handle,
+                            @"name": name,
+                            @"start": @(clipStart),
+                            @"end": @(clipEnd),
+                            @"status": @"skipped",
+                            @"reason": @"No random beat candidate satisfied the duration constraints",
+                        }]];
+                        continue;
+                    }
+                    uint64_t next = SpliceKit_nextRandom(&rngState);
+                    targetSec = [eligible[(NSUInteger)(next % eligible.count)] doubleValue];
+                } else {
+                    BOOL found = NO;
+                    for (NSInteger idx = (NSInteger)futureMarkers.count - 1; idx >= 0; idx--) {
+                        NSNumber *candidateNum = futureMarkers[(NSUInteger)idx];
+                        double candidate = [candidateNum doubleValue];
+                        double newDuration = candidate - clipStart;
+                        double trimAmount = clipEnd - candidate;
+                        if (newDuration >= effectiveMinResultDuration && trimAmount >= effectiveMinTrimSeconds) {
+                            targetSec = candidate;
+                            found = YES;
+                            break;
+                        }
+                    }
+                    if (!found) {
+                        [plan addObject:[NSMutableDictionary dictionaryWithDictionary:@{
+                            @"handle": handle,
+                            @"name": name,
+                            @"start": @(clipStart),
+                            @"end": @(clipEnd),
+                            @"status": @"skipped",
+                            @"reason": @"The available beat boundaries would create a clip that is too short",
+                        }]];
+                        continue;
+                    }
+                }
+
+                double trimAmount = clipEnd - targetSec;
+                [plan addObject:[NSMutableDictionary dictionaryWithDictionary:@{
+                    @"handle": handle,
+                    @"name": name,
+                    @"start": @(clipStart),
+                    @"end": @(clipEnd),
+                    @"targetEnd": @(targetSec),
+                    @"oldDuration": @(currentDuration),
+                    @"newDuration": @(targetSec - clipStart),
+                    @"trimAmount": @(trimAmount),
+                    @"status": @"planned",
+                    @"item": entry[@"item"],
+                }]];
+                planned++;
+            }
+
+            NSUInteger applied = 0;
+            SEL trimSel = NSSelectorFromString(
+                @"operationTrimEdit:endEdits:edgeType:byDelta:trimCommand:trimFlags:temporalResolutionMode:animationHint:error:");
+            if (!dryRun && planned > 0 && [sequence respondsToSelector:trimSel]) {
+                if ([sequence respondsToSelector:@selector(beginEditing)]) {
+                    ((void (*)(id, SEL))objc_msgSend)(sequence, @selector(beginEditing));
+                }
+
+                NSMethodSignature *sig = [sequence methodSignatureForSelector:trimSel];
+                for (NSMutableDictionary *entry in plan) {
+                    if (![entry[@"status"] isEqualToString:@"planned"]) continue;
+
+                    id item = entry[@"item"];
+                    NSArray *clipArray = @[item];
+                    id nilValue = nil;
+                    int edgeType = 0;
+                    int trimCommand = 1;
+                    int trimFlags = 2;
+                    int temporalRes = 0;
+                    id animHint = nil;
+                    void *errorPtr = NULL;
+                    double trimAmount = [entry[@"trimAmount"] doubleValue];
+                    SpliceKit_CMTime delta = SpliceKit_buildCMTime(-trimAmount, timeline);
+
+                    BOOL ok = NO;
+                    @try {
+                        NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
+                        [inv setTarget:sequence];
+                        [inv setSelector:trimSel];
+                        [inv setArgument:&nilValue atIndex:2];
+                        [inv setArgument:&clipArray atIndex:3];
+                        [inv setArgument:&edgeType atIndex:4];
+                        [inv setArgument:&delta atIndex:5];
+                        [inv setArgument:&trimCommand atIndex:6];
+                        [inv setArgument:&trimFlags atIndex:7];
+                        [inv setArgument:&temporalRes atIndex:8];
+                        [inv setArgument:&animHint atIndex:9];
+                        [inv setArgument:&errorPtr atIndex:10];
+                        [inv invoke];
+                        [inv getReturnValue:&ok];
+                    } @catch (NSException *e) {
+                        entry[@"status"] = @"failed";
+                        entry[@"reason"] = e.reason ?: @"trim invocation failed";
+                    }
+
+                    if (ok) {
+                        entry[@"status"] = @"applied";
+                        applied++;
+                    } else if (!entry[@"reason"]) {
+                        entry[@"status"] = @"failed";
+                        entry[@"reason"] = @"operationTrimEdit returned NO";
+                    }
+                    [entry removeObjectForKey:@"item"];
+                }
+
+                if ([sequence respondsToSelector:@selector(endEditing)]) {
+                    ((void (*)(id, SEL))objc_msgSend)(sequence, @selector(endEditing));
+                }
+            } else {
+                for (NSMutableDictionary *entry in plan) {
+                    [entry removeObjectForKey:@"item"];
+                }
+            }
+
+            NSMutableArray *gridPreview = [NSMutableArray array];
+            NSUInteger previewCount = MIN((NSUInteger)12, timelineGrid.count);
+            for (NSUInteger i = 0; i < previewCount; i++) {
+                [gridPreview addObject:timelineGrid[i]];
+            }
+
+            result = @{
+                @"status": @"ok",
+                @"dryRun": @(dryRun),
+                @"grid": grid,
+                @"targetMode": targetMode,
+                @"randomize": @(randomize),
+                @"randomSeed": @(randomSeed),
+                @"source": @{
+                    @"handle": SpliceKit_storeHandle(sourceItem),
+                    @"name": sourceEntry[@"name"] ?: @"",
+                    @"start": @(sourceStartSec),
+                    @"end": @(sourceEndSec),
+                    @"tempo": @(tempo),
+                    @"beatGridEnabled": sourceEntry[@"beatGridEnabled"] ?: @NO,
+                },
+                @"gridPointCount": @(timelineGrid.count),
+                @"gridPreview": gridPreview,
+                @"targetCount": @(targetEntries.count),
+                @"planned": @(planned),
+                @"applied": @(applied),
+                @"plan": plan,
+            };
+        } @catch (NSException *e) {
+            result = @{@"error": [NSString stringWithFormat:@"Exception: %@", e.reason]};
+        }
+    });
+    return result ?: @{@"error": @"Failed to trim clips to beats"};
 }
 
 // Batch timeline/playback actions executed server-side (no per-action round-trip)
@@ -10405,75 +11250,79 @@ void SpliceKit_installEffectDragSwizzlesNow(void) {
     // be installed on the next main thread run loop iteration.
     if (sOrigValidateEffectsDrop && sOrigTLKPerformDragOp) return; // Already installed
     SpliceKit_executeOnMainThreadAsync(^{
-        if (sOrigValidateEffectsDrop && sOrigTLKPerformDragOp) {
-            sEffectDragInstallRetryScheduled = NO;
-            return;
-        }
+        // Wrap in safeInstall — the getActiveTimelineModule() call can crash on
+        // platforms where the editor container class layout has changed.
+        SpliceKit_safeInstall("EffectDragSwizzles", ^{
+            if (sOrigValidateEffectsDrop && sOrigTLKPerformDragOp) {
+                sEffectDragInstallRetryScheduled = NO;
+                return;
+            }
 
-        Class tlmClass = Nil;
-        Class tlkClass = Nil;
+            Class tlmClass = Nil;
+            Class tlkClass = Nil;
 
-        id activeModule = SpliceKit_getActiveTimelineModule();
-        if (activeModule) {
-            tlmClass = [activeModule class];
-            SEL tvSel = NSSelectorFromString(@"timelineView");
-            if ([activeModule respondsToSelector:tvSel]) {
-                id timelineView = ((id (*)(id, SEL))objc_msgSend)(activeModule, tvSel);
-                if (timelineView) {
-                    tlkClass = [timelineView class];
+            id activeModule = SpliceKit_getActiveTimelineModule();
+            if (activeModule) {
+                tlmClass = [activeModule class];
+                SEL tvSel = NSSelectorFromString(@"timelineView");
+                if ([activeModule respondsToSelector:tvSel]) {
+                    id timelineView = ((id (*)(id, SEL))objc_msgSend)(activeModule, tvSel);
+                    if (timelineView) {
+                        tlkClass = [timelineView class];
+                    }
                 }
             }
-        }
 
-        if (!tlmClass) tlmClass = SpliceKit_findLoadedClassNamed("FFAnchoredTimelineModule");
-        if (!tlkClass) tlkClass = SpliceKit_findLoadedClassNamed("TLKTimelineView");
+            if (!tlmClass) tlmClass = SpliceKit_findLoadedClassNamed("FFAnchoredTimelineModule");
+            if (!tlkClass) tlkClass = SpliceKit_findLoadedClassNamed("TLKTimelineView");
 
-        if (!tlmClass || !tlkClass) {
-            if (sEffectDragInstallAttempts == 0) {
-                SpliceKit_log(@"[EffectDrag] Timeline classes not available yet; waiting to install swizzles");
+            if (!tlmClass || !tlkClass) {
+                if (sEffectDragInstallAttempts == 0) {
+                    SpliceKit_log(@"[EffectDrag] Timeline classes not available yet; waiting to install swizzles");
+                }
+                SpliceKit_scheduleEffectDragInstallRetry();
+                return;
             }
-            SpliceKit_scheduleEffectDragInstallRetry();
-            return;
-        }
 
-        SEL valSel = NSSelectorFromString(@"_validateEffectsDrop:onItem:atIndex:");
-        Method valMethod = class_getInstanceMethod(tlmClass, valSel);
-        if (!sOrigValidateEffectsDrop && valMethod) {
-            sOrigValidateEffectsDrop = method_setImplementation(
-                valMethod, (IMP)SpliceKit_swizzled_validateEffectsDrop);
-            SpliceKit_log(@"[EffectDrag] Swizzled -[%@ _validateEffectsDrop:onItem:atIndex:]",
-                          NSStringFromClass(tlmClass));
-        }
+            SEL valSel = NSSelectorFromString(@"_validateEffectsDrop:onItem:atIndex:");
+            Method valMethod = class_getInstanceMethod(tlmClass, valSel);
+            if (!sOrigValidateEffectsDrop && valMethod) {
+                sOrigValidateEffectsDrop = method_setImplementation(
+                    valMethod, (IMP)SpliceKit_swizzled_validateEffectsDrop);
+                SpliceKit_log(@"[EffectDrag] Swizzled -[%@ _validateEffectsDrop:onItem:atIndex:]",
+                              NSStringFromClass(tlmClass));
+            }
 
-        SEL perfSel = @selector(performDragOperation:);
-        Method perfMethod = class_getInstanceMethod(tlkClass, perfSel);
-        if (!sOrigTLKPerformDragOp && perfMethod) {
-            sOrigTLKPerformDragOp = method_setImplementation(
-                perfMethod, (IMP)SpliceKit_swizzled_TLKPerformDragOp);
-            SpliceKit_log(@"[EffectDrag] Swizzled -[%@ performDragOperation:]",
-                          NSStringFromClass(tlkClass));
-        }
+            SEL perfSel = @selector(performDragOperation:);
+            Method perfMethod = class_getInstanceMethod(tlkClass, perfSel);
+            if (!sOrigTLKPerformDragOp && perfMethod) {
+                sOrigTLKPerformDragOp = method_setImplementation(
+                    perfMethod, (IMP)SpliceKit_swizzled_TLKPerformDragOp);
+                SpliceKit_log(@"[EffectDrag] Swizzled -[%@ performDragOperation:]",
+                              NSStringFromClass(tlkClass));
+            }
 
-        Class appClass = [NSApplication class];
-        SEL keyWindowActiveModuleSel = NSSelectorFromString(@"keyWindowActiveModule");
-        Method keyWindowActiveModuleMethod = class_getInstanceMethod(appClass, keyWindowActiveModuleSel);
-        if (!sOrigKeyWindowActiveModule && keyWindowActiveModuleMethod) {
-            sOrigKeyWindowActiveModule = method_setImplementation(
-                keyWindowActiveModuleMethod, (IMP)SpliceKit_swizzled_keyWindowActiveModule);
-            SpliceKit_log(@"[EffectDrag] Swizzled -[NSApplication keyWindowActiveModule]");
-        }
+            Class appClass = [NSApplication class];
+            SEL keyWindowActiveModuleSel = NSSelectorFromString(@"keyWindowActiveModule");
+            Method keyWindowActiveModuleMethod = class_getInstanceMethod(appClass, keyWindowActiveModuleSel);
+            if (!sOrigKeyWindowActiveModule && keyWindowActiveModuleMethod) {
+                sOrigKeyWindowActiveModule = method_setImplementation(
+                    keyWindowActiveModuleMethod, (IMP)SpliceKit_swizzled_keyWindowActiveModule);
+                SpliceKit_log(@"[EffectDrag] Swizzled -[NSApplication keyWindowActiveModule]");
+            }
 
-        if (!sOrigValidateEffectsDrop || !sOrigTLKPerformDragOp || !sOrigKeyWindowActiveModule) {
-            SpliceKit_log(@"[EffectDrag] Waiting for swizzles: validate=%@ perform=%@ keyWindowActiveModule=%@",
-                          sOrigValidateEffectsDrop ? @"ok" : @"missing",
-                          sOrigTLKPerformDragOp ? @"ok" : @"missing",
-                          sOrigKeyWindowActiveModule ? @"ok" : @"missing");
-            SpliceKit_scheduleEffectDragInstallRetry();
-            return;
-        }
+            if (!sOrigValidateEffectsDrop || !sOrigTLKPerformDragOp || !sOrigKeyWindowActiveModule) {
+                SpliceKit_log(@"[EffectDrag] Waiting for swizzles: validate=%@ perform=%@ keyWindowActiveModule=%@",
+                              sOrigValidateEffectsDrop ? @"ok" : @"missing",
+                              sOrigTLKPerformDragOp ? @"ok" : @"missing",
+                              sOrigKeyWindowActiveModule ? @"ok" : @"missing");
+                SpliceKit_scheduleEffectDragInstallRetry();
+                return;
+            }
 
-        sEffectDragInstallRetryScheduled = NO;
-        sEffectDragInstallAttempts = 0;
+            sEffectDragInstallRetryScheduled = NO;
+            sEffectDragInstallAttempts = 0;
+        });
     });
 }
 
@@ -12092,6 +12941,7 @@ static NSDictionary *SpliceKit_handleCommandAIAppleAgentic(NSDictionary *params)
 
 // List clips available in the event browser
 static NSDictionary *SpliceKit_handleBrowserListClips(NSDictionary *params) {
+    NSString *eventFilter = [params[@"event"] isKindOfClass:[NSString class]] ? params[@"event"] : nil;
     __block NSDictionary *result = nil;
 
     SpliceKit_executeOnMainThread(^{
@@ -12125,6 +12975,10 @@ static NSDictionary *SpliceKit_handleBrowserListClips(NSDictionary *params) {
                 NSString *eventName = @"";
                 if ([event respondsToSelector:@selector(displayName)])
                     eventName = ((id (*)(id, SEL))objc_msgSend)(event, @selector(displayName)) ?: @"";
+                if (eventFilter.length > 0 &&
+                    ![[eventName lowercaseString] containsString:[eventFilter lowercaseString]]) {
+                    continue;
+                }
 
                 // Events are FFFolder objects. Get their child items which are event clips.
                 // Try multiple approaches: childItems, items, ownedClips, containedItems
@@ -12171,6 +13025,14 @@ static NSDictionary *SpliceKit_handleBrowserListClips(NSDictionary *params) {
                     if ([clip respondsToSelector:@selector(duration)]) {
                         SpliceKit_CMTime d = ((SpliceKit_CMTime (*)(id, SEL))STRET_MSG)(clip, @selector(duration));
                         info[@"duration"] = SpliceKit_serializeCMTime(d);
+                    } else if ([clip respondsToSelector:NSSelectorFromString(@"clippedRange")]) {
+                        SpliceKit_CMTimeRange r = ((SpliceKit_CMTimeRange (*)(id, SEL))STRET_MSG)(
+                            clip, NSSelectorFromString(@"clippedRange"));
+                        info[@"duration"] = SpliceKit_serializeCMTime(r.duration);
+                    } else if ([clip respondsToSelector:NSSelectorFromString(@"unclippedRange")]) {
+                        SpliceKit_CMTimeRange r = ((SpliceKit_CMTimeRange (*)(id, SEL))STRET_MSG)(
+                            clip, NSSelectorFromString(@"unclippedRange"));
+                        info[@"duration"] = SpliceKit_serializeCMTime(r.duration);
                     }
 
                     NSString *handle = SpliceKit_storeHandle(clip);
@@ -16839,7 +17701,7 @@ static NSDictionary *SpliceKit_handleBeatsDetect(NSDictionary *params) {
 }
 #endif
 
-// Helper: get the original media URL from a browser clip
+// Helper: get the original media URL from a browser or timeline clip
 // NOTE: Many FFAsset/FFMediaRep methods deadlock when called from main thread
 // inside SpliceKit_executeOnMainThread. This helper runs on a background thread
 // with a timeout to avoid hanging the RPC server.
@@ -16851,12 +17713,111 @@ static NSString *SpliceKit_getMediaURLForClip(id clip) {
 
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         @try {
+            id clipForMedia = clip;
+            SEL primarySel = NSSelectorFromString(@"primaryObject");
+            if ([clipForMedia respondsToSelector:primarySel]) {
+                id primary = ((id (*)(id, SEL))objc_msgSend)(clipForMedia, primarySel);
+                if (primary) clipForMedia = primary;
+            }
+            SEL containedSel = NSSelectorFromString(@"containedItems");
+            if ([clip respondsToSelector:containedSel]) {
+                id contained = ((id (*)(id, SEL))objc_msgSend)(clip, containedSel);
+                NSArray *containedItems = SpliceKit_mixerArrayFromContainer(contained);
+                for (id child in containedItems) {
+                    NSString *className = NSStringFromClass([child class]);
+                    if ([className containsString:@"MediaComponent"] ||
+                        [className containsString:@"Asset"] ||
+                        [className containsString:@"Clip"]) {
+                        clipForMedia = child;
+                        break;
+                    }
+                }
+            }
+            if ([clipForMedia respondsToSelector:containedSel]) {
+                id contained = ((id (*)(id, SEL))objc_msgSend)(clipForMedia, containedSel);
+                NSArray *containedItems = SpliceKit_mixerArrayFromContainer(contained);
+                for (id child in containedItems) {
+                    NSString *className = NSStringFromClass([child class]);
+                    if ([className containsString:@"MediaComponent"] ||
+                        [className containsString:@"Asset"] ||
+                        [className containsString:@"Clip"]) {
+                        clipForMedia = child;
+                        break;
+                    }
+                }
+            }
+
             SEL origSel = NSSelectorFromString(@"originalMediaURL");
-            if ([clip respondsToSelector:origSel]) {
-                id url = ((id (*)(id, SEL))objc_msgSend)(clip, origSel);
+            if ([clipForMedia respondsToSelector:origSel]) {
+                id url = ((id (*)(id, SEL))objc_msgSend)(clipForMedia, origSel);
                 if (url && [url isKindOfClass:[NSURL class]]) {
                     result = [url absoluteString];
                 }
+            }
+
+            if (!result) {
+                id media = nil;
+                SEL mediaSel = NSSelectorFromString(@"media");
+                if ([clipForMedia respondsToSelector:mediaSel]) {
+                    media = ((id (*)(id, SEL))objc_msgSend)(clipForMedia, mediaSel);
+                }
+                if (media && [media respondsToSelector:origSel]) {
+                    id url = ((id (*)(id, SEL))objc_msgSend)(media, origSel);
+                    if ([url isKindOfClass:[NSURL class]]) result = [url absoluteString];
+                }
+                if (!result && media) {
+                    SEL repSel = NSSelectorFromString(@"originalMediaRep");
+                    if ([media respondsToSelector:repSel]) {
+                        id rep = ((id (*)(id, SEL))objc_msgSend)(media, repSel);
+                        SEL fileURLsSel = NSSelectorFromString(@"fileURLs");
+                        if (rep && [rep respondsToSelector:fileURLsSel]) {
+                            NSArray *urls = ((id (*)(id, SEL))objc_msgSend)(rep, fileURLsSel);
+                            if ([urls isKindOfClass:[NSArray class]] && urls.count > 0 &&
+                                [urls.firstObject isKindOfClass:[NSURL class]]) {
+                                result = [urls.firstObject absoluteString];
+                            }
+                        }
+                    }
+                }
+                if (!result && media) {
+                    SEL repSel = NSSelectorFromString(@"currentRep");
+                    if ([media respondsToSelector:repSel]) {
+                        id rep = ((id (*)(id, SEL))objc_msgSend)(media, repSel);
+                        SEL fileURLsSel = NSSelectorFromString(@"fileURLs");
+                        if (rep && [rep respondsToSelector:fileURLsSel]) {
+                            NSArray *urls = ((id (*)(id, SEL))objc_msgSend)(rep, fileURLsSel);
+                            if ([urls isKindOfClass:[NSArray class]] && urls.count > 0 &&
+                                [urls.firstObject isKindOfClass:[NSURL class]]) {
+                                result = [urls.firstObject absoluteString];
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (!result) {
+                SEL refSel = NSSelectorFromString(@"assetMediaReference");
+                if ([clipForMedia respondsToSelector:refSel]) {
+                    id ref = ((id (*)(id, SEL))objc_msgSend)(clipForMedia, refSel);
+                    SEL resolvedSel = NSSelectorFromString(@"resolvedURL");
+                    if (ref && [ref respondsToSelector:resolvedSel]) {
+                        id url = ((id (*)(id, SEL))objc_msgSend)(ref, resolvedSel);
+                        if ([url isKindOfClass:[NSURL class]]) result = [url absoluteString];
+                    }
+                }
+            }
+
+            if (!result) {
+                @try {
+                    id url = [clipForMedia valueForKeyPath:@"media.fileURL"];
+                    if ([url isKindOfClass:[NSURL class]]) result = [url absoluteString];
+                } @catch (NSException *e) {}
+            }
+            if (!result) {
+                @try {
+                    id url = [clipForMedia valueForKeyPath:@"clipInPlace.asset.originalMediaURL"];
+                    if ([url isKindOfClass:[NSURL class]]) result = [url absoluteString];
+                } @catch (NSException *e) {}
             }
         } @catch (NSException *e) { /* ignore */ }
         dispatch_semaphore_signal(sem);
@@ -16927,6 +17888,1719 @@ static SpliceKit_CMTime SpliceKit_cmtimeFromSeconds(double seconds) {
 static double SpliceKit_cmtimeToSeconds(SpliceKit_CMTime t) {
     if (t.timescale <= 0) return 0.0;
     return (double)t.value / (double)t.timescale;
+}
+
+static NSString *SpliceKit_escapeXMLString(NSString *value) {
+    NSString *escaped = value ?: @"";
+    escaped = [escaped stringByReplacingOccurrencesOfString:@"&" withString:@"&amp;"];
+    escaped = [escaped stringByReplacingOccurrencesOfString:@"\"" withString:@"&quot;"];
+    escaped = [escaped stringByReplacingOccurrencesOfString:@"<" withString:@"&lt;"];
+    escaped = [escaped stringByReplacingOccurrencesOfString:@">" withString:@"&gt;"];
+    return escaped;
+}
+
+static NSString *SpliceKit_fcpxmlTimeString(double seconds, SpliceKit_CMTime frameDuration) {
+    if (!isfinite(seconds) || seconds <= 0.000001) return @"0s";
+    if (frameDuration.timescale <= 0 || frameDuration.value <= 0) {
+        long long millis = llround(seconds * 1000.0);
+        return [NSString stringWithFormat:@"%lld/1000s", millis];
+    }
+
+    double frameSeconds = SpliceKit_secondsFromTime(frameDuration);
+    long long frames = llround(seconds / MAX(frameSeconds, 0.000001));
+    long long value = frames * frameDuration.value;
+    if (value == 0) value = frameDuration.value;
+    return [NSString stringWithFormat:@"%lld/%ds", value, frameDuration.timescale];
+}
+
+static NSString *SpliceKit_fcpxmlTimeStringForFrameCount(long long frameCount,
+                                                         SpliceKit_CMTime frameDuration) {
+    if (frameCount <= 0) return @"0s";
+    long long value = frameCount * frameDuration.value;
+    return [NSString stringWithFormat:@"%lld/%ds", value, frameDuration.timescale];
+}
+
+static NSString *SpliceKit_buildRandomClipAssemblyFCPXML(NSArray<NSMutableDictionary *> *plan,
+                                                         NSString *projectName,
+                                                         NSString *eventName,
+                                                         SpliceKit_CMTime frameDuration,
+                                                         NSString *songMediaURL,
+                                                         long long totalDurationFrames,
+                                                         NSString **errorOut) {
+    NSMutableDictionary<NSString *, NSDictionary *> *mediaResources = [NSMutableDictionary dictionary];
+    NSInteger resourceIndex = 0;
+
+    for (NSMutableDictionary *entry in plan) {
+        if (![entry[@"status"] isEqualToString:@"planned"]) continue;
+
+        NSString *mediaURL = [entry[@"mediaURL"] isKindOfClass:[NSString class]] ? entry[@"mediaURL"] : @"";
+        if (mediaURL.length == 0) {
+            NSString *clipHandle = [entry[@"clipHandle"] isKindOfClass:[NSString class]] ? entry[@"clipHandle"] : @"";
+            id browserClip = clipHandle.length > 0 ? SpliceKit_resolveHandle(clipHandle) : nil;
+            mediaURL = SpliceKit_getMediaURLForClip(browserClip) ?: @"";
+            if (mediaURL.length > 0) entry[@"mediaURL"] = mediaURL;
+        }
+        if (mediaURL.length == 0) {
+            if (errorOut) {
+                *errorOut = [NSString stringWithFormat:@"Clip '%@' is missing a browser media URL, so it cannot be assembled via FCPXML",
+                             entry[@"clipName"] ?: @"Clip"];
+            }
+            return nil;
+        }
+        if (!mediaResources[mediaURL]) {
+            mediaResources[mediaURL] = @{
+                @"id": [NSString stringWithFormat:@"r%ld", (long)++resourceIndex],
+                @"url": mediaURL,
+            };
+        }
+    }
+
+    if (songMediaURL.length == 0 && totalDurationFrames > 0) {
+        if (errorOut) *errorOut = @"The selected song does not expose a media URL, so it cannot be attached in the FCPXML build";
+        return nil;
+    }
+
+    NSString *uid = [[[NSUUID UUID] UUIDString] substringToIndex:8];
+    NSString *formatId = [NSString stringWithFormat:@"fmt_%@", uid];
+    NSString *frameDurationString = SpliceKit_fcpxmlTimeStringForFrameCount(1, frameDuration);
+    NSString *sequenceDurationString = SpliceKit_fcpxmlTimeStringForFrameCount(totalDurationFrames, frameDuration);
+    NSString *escapedProject = SpliceKit_escapeXMLString(projectName ?: @"Beat Random Cut");
+    NSString *escapedEvent = SpliceKit_escapeXMLString(eventName.length > 0 ? eventName : @"SpliceKit Tests");
+
+    NSMutableString *xml = [NSMutableString string];
+    [xml appendString:@"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"];
+    [xml appendString:@"<!DOCTYPE fcpxml>\n\n"];
+    [xml appendString:@"<fcpxml version=\"1.14\">\n"];
+    [xml appendString:@"    <resources>\n"];
+    [xml appendFormat:@"        <format id=\"%@\" name=\"FFVideoFormatCustom\" frameDuration=\"%@\" width=\"1920\" height=\"1080\"/>\n",
+                      formatId, frameDurationString];
+
+    for (NSString *urlKey in mediaResources) {
+        NSDictionary *res = mediaResources[urlKey];
+        [xml appendFormat:@"        <asset id=\"%@\" name=\"%@\" hasVideo=\"1\" format=\"%@\" hasAudio=\"1\" videoSources=\"1\" audioSources=\"1\" audioChannels=\"2\" audioRate=\"48000\">\n",
+                          res[@"id"], res[@"id"], formatId];
+        [xml appendFormat:@"            <media-rep kind=\"original-media\" src=\"%@\"/>\n",
+                          SpliceKit_escapeXMLString(res[@"url"])];
+        [xml appendString:@"        </asset>\n"];
+    }
+
+    if (songMediaURL.length > 0) {
+        [xml appendString:@"        <asset id=\"song_audio\" name=\"Music\" hasAudio=\"1\" audioSources=\"1\" audioChannels=\"2\" audioRate=\"48000\">\n"];
+        [xml appendFormat:@"            <media-rep kind=\"original-media\" src=\"%@\"/>\n",
+                          SpliceKit_escapeXMLString(songMediaURL)];
+        [xml appendString:@"        </asset>\n"];
+    }
+
+    [xml appendString:@"    </resources>\n"];
+    [xml appendString:@"    <library>\n"];
+    [xml appendFormat:@"        <event name=\"%@\">\n", escapedEvent];
+    [xml appendFormat:@"            <project name=\"%@\">\n", escapedProject];
+    [xml appendFormat:@"                <sequence format=\"%@\" duration=\"%@\" tcStart=\"0s\" tcFormat=\"NDF\" audioLayout=\"stereo\" audioRate=\"48k\">\n",
+                      formatId, sequenceDurationString];
+    [xml appendString:@"                    <spine>\n"];
+
+    BOOL attachedSong = NO;
+    for (NSMutableDictionary *entry in plan) {
+        long long offsetFrames = [entry[@"timelineOffsetFrames"] longLongValue];
+        long long durationFrames = [entry[@"durationFrames"] longLongValue];
+        NSString *offsetString = SpliceKit_fcpxmlTimeStringForFrameCount(offsetFrames, frameDuration);
+        NSString *durationString = SpliceKit_fcpxmlTimeStringForFrameCount(durationFrames, frameDuration);
+        NSString *clipName = SpliceKit_escapeXMLString(entry[@"clipName"] ?: @"Clip");
+        BOOL addSongChild = (!attachedSong && songMediaURL.length > 0);
+
+        if ([entry[@"status"] isEqualToString:@"gap"]) {
+            if (addSongChild) {
+                [xml appendFormat:@"                        <gap name=\"%@\" offset=\"%@\" duration=\"%@\">\n",
+                                  clipName, offsetString, durationString];
+                [xml appendFormat:@"                            <asset-clip ref=\"song_audio\" lane=\"-1\" name=\"Music\" offset=\"0s\" duration=\"%@\" start=\"0s\"/>\n",
+                                  sequenceDurationString];
+                [xml appendString:@"                        </gap>\n"];
+                attachedSong = YES;
+            } else {
+                [xml appendFormat:@"                        <gap name=\"%@\" offset=\"%@\" duration=\"%@\"/>\n",
+                                  clipName, offsetString, durationString];
+            }
+            continue;
+        }
+
+        NSString *mediaURL = entry[@"mediaURL"];
+        NSDictionary *resource = mediaResources[mediaURL];
+        NSString *inString = SpliceKit_fcpxmlTimeStringForFrameCount([entry[@"inFrames"] longLongValue], frameDuration);
+
+        if (addSongChild) {
+            [xml appendFormat:@"                        <asset-clip ref=\"%@\" name=\"%@\" offset=\"%@\" duration=\"%@\" start=\"%@\">\n",
+                              resource[@"id"], clipName, offsetString, durationString, inString];
+            // Connected clip offset is in parent's local time coordinates.
+            // Anchor the song at the parent clip's start (in-point) so it
+            // lines up with the parent's first visible frame on the timeline.
+            [xml appendFormat:@"                            <asset-clip ref=\"song_audio\" lane=\"-1\" name=\"Music\" offset=\"%@\" duration=\"%@\" start=\"0s\"/>\n",
+                              inString, sequenceDurationString];
+            [xml appendString:@"                        </asset-clip>\n"];
+            attachedSong = YES;
+        } else {
+            [xml appendFormat:@"                        <asset-clip ref=\"%@\" name=\"%@\" offset=\"%@\" duration=\"%@\" start=\"%@\"/>\n",
+                              resource[@"id"], clipName, offsetString, durationString, inString];
+        }
+    }
+
+    [xml appendString:@"                    </spine>\n"];
+    [xml appendString:@"                </sequence>\n"];
+    [xml appendString:@"            </project>\n"];
+    [xml appendString:@"        </event>\n"];
+    [xml appendString:@"    </library>\n"];
+    [xml appendString:@"</fcpxml>\n"];
+    return xml;
+}
+
+static double SpliceKit_quantizeSecondsToFrameGrid(double seconds, double frameSeconds) {
+    if (!isfinite(seconds) || seconds <= 0.0) return 0.0;
+    if (!isfinite(frameSeconds) || frameSeconds <= 0.000001) return seconds;
+    long long frames = llround(seconds / frameSeconds);
+    return (double)frames * frameSeconds;
+}
+
+static BOOL SpliceKit_mediaURLLooksAudioOnly(NSString *urlString) {
+    if (urlString.length == 0) return NO;
+
+    NSString *path = [[NSURL URLWithString:urlString] path] ?: urlString;
+    NSString *ext = [[path pathExtension] lowercaseString];
+    static NSSet<NSString *> *audioExts = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        audioExts = [NSSet setWithArray:@[@"mp3", @"m4a", @"aac", @"wav", @"aif", @"aiff", @"caf", @"flac"]];
+    });
+    return [audioExts containsObject:ext];
+}
+
+static NSArray *SpliceKit_copyBrowserClipsForEvent(id event) {
+    if (!event) return @[];
+
+    id clips = nil;
+    SEL displayClipsSel = NSSelectorFromString(@"displayOwnedClips");
+    SEL ownedClipsSel = NSSelectorFromString(@"ownedClips");
+    SEL childItemsSel = NSSelectorFromString(@"childItems");
+    SEL itemsSel = NSSelectorFromString(@"items");
+
+    if ([event respondsToSelector:displayClipsSel]) {
+        clips = ((id (*)(id, SEL))objc_msgSend)(event, displayClipsSel);
+    } else if ([event respondsToSelector:ownedClipsSel]) {
+        clips = ((id (*)(id, SEL))objc_msgSend)(event, ownedClipsSel);
+    } else if ([event respondsToSelector:childItemsSel]) {
+        clips = ((id (*)(id, SEL))objc_msgSend)(event, childItemsSel);
+    } else if ([event respondsToSelector:itemsSel]) {
+        clips = ((id (*)(id, SEL))objc_msgSend)(event, itemsSel);
+    }
+
+    return SpliceKit_mixerArrayFromContainer(clips) ?: @[];
+}
+
+static SpliceKit_CMTimeRange SpliceKit_clipRangeForItem(id item) {
+    SpliceKit_CMTimeRange clipRange = {0};
+    if (!item) return clipRange;
+
+    if ([item respondsToSelector:@selector(clippedRange)]) {
+        clipRange = ((SpliceKit_CMTimeRange (*)(id, SEL))STRET_MSG)(item, @selector(clippedRange));
+    } else if ([item respondsToSelector:@selector(duration)]) {
+        SpliceKit_CMTime dur = ((SpliceKit_CMTime (*)(id, SEL))STRET_MSG)(item, @selector(duration));
+        clipRange.start = (SpliceKit_CMTime){0, dur.timescale > 0 ? dur.timescale : 6000, 1, 0};
+        clipRange.duration = dur;
+    }
+
+    if (clipRange.start.timescale <= 0) {
+        clipRange.start.timescale = clipRange.duration.timescale > 0 ? clipRange.duration.timescale : 6000;
+        clipRange.start.flags = 1;
+    }
+    if (clipRange.duration.timescale <= 0 && clipRange.duration.value > 0) {
+        clipRange.duration.timescale = clipRange.start.timescale > 0 ? clipRange.start.timescale : 6000;
+        clipRange.duration.flags = 1;
+    }
+    return clipRange;
+}
+
+static id SpliceKit_findBrowserClipMatchingMediaURL(NSString *mediaURL, NSString *fallbackName) {
+    id libs = ((id (*)(id, SEL))objc_msgSend)(
+        objc_getClass("FFLibraryDocument"), @selector(copyActiveLibraries));
+    if (![libs isKindOfClass:[NSArray class]]) return nil;
+
+    BOOL requireURLMatch = (mediaURL.length > 0);
+    NSString *lowerFallback = requireURLMatch ? nil : [fallbackName lowercaseString];
+    for (id library in (NSArray *)libs) {
+        SEL eventsSel = NSSelectorFromString(@"events");
+        if (![library respondsToSelector:eventsSel]) continue;
+        id events = ((id (*)(id, SEL))objc_msgSend)(library, eventsSel);
+        if (![events isKindOfClass:[NSArray class]]) continue;
+
+        for (id event in (NSArray *)events) {
+            NSArray *clips = SpliceKit_copyBrowserClipsForEvent(event);
+            for (id clip in clips) {
+                NSString *clipURL = SpliceKit_getMediaURLForClip(clip);
+                if (mediaURL.length > 0 && clipURL.length > 0 && [clipURL isEqualToString:mediaURL]) {
+                    return clip;
+                }
+
+                if (lowerFallback.length > 0) {
+                    NSString *clipName = SpliceKit_displayNameForItem(clip);
+                    if (clipName.length > 0 &&
+                        [[clipName lowercaseString] containsString:lowerFallback]) {
+                        return clip;
+                    }
+                }
+            }
+        }
+    }
+
+    return nil;
+}
+
+static id SpliceKit_normalizeSourceObjectForInsertion(id sourceObject) {
+    if (!sourceObject) return nil;
+
+    SEL mediaRangeSel = NSSelectorFromString(@"mediaRange");
+    SEL sequenceSel = NSSelectorFromString(@"sequence");
+    SEL organizerItemSel = NSSelectorFromString(@"organizerDataItem");
+
+    // Organizer/browser-backed items respond to sequenceRecord and are acceptable as-is.
+    // Raw timeline items (FFAnchoredMediaComponent) also respond to mediaRange/sequence
+    // but crash on sequenceRecord, so they must NOT be returned early.
+    if ([sourceObject respondsToSelector:mediaRangeSel] &&
+        [sourceObject respondsToSelector:sequenceSel] &&
+        [sourceObject respondsToSelector:NSSelectorFromString(@"sequenceRecord")]) {
+        return sourceObject;
+    }
+
+    SEL isMediaRefSel = NSSelectorFromString(@"isMediaRef");
+    if ([sourceObject respondsToSelector:organizerItemSel]) {
+        @try {
+            id organizerItem = ((id (*)(id, SEL))objc_msgSend)(sourceObject, organizerItemSel);
+            if (organizerItem && [organizerItem respondsToSelector:isMediaRefSel]) return organizerItem;
+        } @catch (NSException *e) {}
+    }
+
+    // Timeline-backed items usually need to be promoted through their owning sequence.
+    if ([sourceObject respondsToSelector:sequenceSel]) {
+        @try {
+            id sourceSequence = ((id (*)(id, SEL))objc_msgSend)(sourceObject, sequenceSel);
+            if (sourceSequence && [sourceSequence respondsToSelector:organizerItemSel]) {
+                id organizerItem = ((id (*)(id, SEL))objc_msgSend)(sourceSequence, organizerItemSel);
+                if (organizerItem && [organizerItem respondsToSelector:isMediaRefSel]) return organizerItem;
+            }
+        } @catch (NSException *e) {}
+    }
+
+    // Last resort: find the matching browser clip by media URL or display name.
+    NSString *normMediaURL = SpliceKit_getMediaURLForClip(sourceObject) ?: @"";
+    NSString *normDisplayName = SpliceKit_displayNameForItem(sourceObject);
+    if (normMediaURL.length > 0 || normDisplayName.length > 0) {
+        id browserClip = SpliceKit_findBrowserClipMatchingMediaURL(normMediaURL, normDisplayName);
+        if (!browserClip && normMediaURL.length > 0 && normDisplayName.length > 0) {
+            // URL didn't match (media may be wrapped in a browser sequence). Try name only.
+            browserClip = SpliceKit_findBrowserClipMatchingMediaURL(nil, normDisplayName);
+        }
+        if (browserClip) return browserClip;
+    }
+
+    return sourceObject;
+}
+
+static NSDictionary *SpliceKit_prepareBrowserClipSourceForInsertion(id sourceBrowserClip,
+                                                                    SpliceKit_CMTimeRange clipRange,
+                                                                    BOOL preferAudio) {
+    NSMutableDictionary *diag = [NSMutableDictionary dictionary];
+    diag[@"ok"] = @NO;
+
+    if (!sourceBrowserClip) {
+        diag[@"error"] = @"Missing source browser clip";
+        return diag;
+    }
+    if (clipRange.duration.timescale <= 0 || clipRange.duration.value <= 0) {
+        diag[@"error"] = @"Missing source media range";
+        return diag;
+    }
+    diag[@"sourceClipClass"] = NSStringFromClass([sourceBrowserClip class]) ?: @"";
+
+    id insertionSource = SpliceKit_normalizeSourceObjectForInsertion(sourceBrowserClip);
+    if (!insertionSource) {
+        diag[@"error"] = @"Unable to normalize source object for insertion";
+        return diag;
+    }
+    if (insertionSource != sourceBrowserClip) {
+        diag[@"normalizedSourceClass"] = NSStringFromClass([insertionSource class]) ?: @"";
+    }
+
+    id appController = ((id (*)(id, SEL))objc_msgSend)(
+        objc_getClass("PEAppController"), NSSelectorFromString(@"appController"));
+    id organizerContainer = appController &&
+        [appController respondsToSelector:NSSelectorFromString(@"mediaEventOrganizerContainer")]
+            ? ((id (*)(id, SEL))objc_msgSend)(appController, NSSelectorFromString(@"mediaEventOrganizerContainer"))
+            : nil;
+    id organizer = organizerContainer &&
+        [organizerContainer respondsToSelector:NSSelectorFromString(@"activeOrganizerModule")]
+            ? ((id (*)(id, SEL))objc_msgSend)(organizerContainer, NSSelectorFromString(@"activeOrganizerModule"))
+            : nil;
+
+    if (!organizer) {
+        diag[@"error"] = @"No active organizer module";
+        return diag;
+    }
+
+    diag[@"activeOrganizerClass"] = NSStringFromClass([organizer class]) ?: @"";
+
+    if ([organizer respondsToSelector:NSSelectorFromString(@"setSidebarHidden:")]) {
+        ((void (*)(id, SEL, BOOL))objc_msgSend)(organizer, NSSelectorFromString(@"setSidebarHidden:"), NO);
+    }
+    if ([organizer respondsToSelector:NSSelectorFromString(@"setLibrarySidebarActive:")]) {
+        ((void (*)(id, SEL, BOOL))objc_msgSend)(organizer, NSSelectorFromString(@"setLibrarySidebarActive:"), YES);
+    }
+    if ([organizer respondsToSelector:NSSelectorFromString(@"_showLibrarySidebar")]) {
+        ((void (*)(id, SEL))objc_msgSend)(organizer, NSSelectorFromString(@"_showLibrarySidebar"));
+    }
+    if ([organizer respondsToSelector:NSSelectorFromString(@"_syncSidebarButtonsToVisibleState")]) {
+        ((void (*)(id, SEL))objc_msgSend)(organizer, NSSelectorFromString(@"_syncSidebarButtonsToVisibleState"));
+    }
+
+    id mediaDetail = [organizer respondsToSelector:NSSelectorFromString(@"mediaDetailContainerModule")]
+        ? ((id (*)(id, SEL))objc_msgSend)(organizer, NSSelectorFromString(@"mediaDetailContainerModule"))
+        : nil;
+    id mediaBrowser = mediaDetail &&
+        [mediaDetail respondsToSelector:NSSelectorFromString(@"getActiveMediaBrowser")]
+            ? ((id (*)(id, SEL))objc_msgSend)(mediaDetail, NSSelectorFromString(@"getActiveMediaBrowser"))
+            : nil;
+    if (!mediaBrowser && [organizer respondsToSelector:NSSelectorFromString(@"filmstripModule")]) {
+        mediaBrowser = ((id (*)(id, SEL))objc_msgSend)(organizer, NSSelectorFromString(@"filmstripModule"));
+    }
+    if (!mediaBrowser && organizerContainer &&
+        [organizerContainer respondsToSelector:NSSelectorFromString(@"getActiveMediaBrowser")]) {
+        mediaBrowser = ((id (*)(id, SEL))objc_msgSend)(organizerContainer, NSSelectorFromString(@"getActiveMediaBrowser"));
+    }
+    if (!mediaBrowser) {
+        diag[@"error"] = @"No active media browser";
+        return diag;
+    }
+    diag[@"mediaBrowserClass"] = NSStringFromClass([mediaBrowser class]) ?: @"";
+
+    if ([mediaBrowser respondsToSelector:NSSelectorFromString(@"_ensureModuleIsVisible")]) {
+        ((void (*)(id, SEL))objc_msgSend)(mediaBrowser, NSSelectorFromString(@"_ensureModuleIsVisible"));
+    }
+
+    Class rangeObjClass = objc_getClass("FigTimeRangeAndObject");
+    SEL rangeAndObjSel = NSSelectorFromString(@"rangeAndObjectWithRange:andObject:");
+    if (!rangeObjClass || ![(id)rangeObjClass respondsToSelector:rangeAndObjSel]) {
+        diag[@"error"] = @"FigTimeRangeAndObject unavailable";
+        return diag;
+    }
+
+    id mediaRange = ((id (*)(id, SEL, SpliceKit_CMTimeRange, id))objc_msgSend)(
+        (id)rangeObjClass, rangeAndObjSel, clipRange, insertionSource);
+    if (!mediaRange) {
+        diag[@"error"] = @"Failed to build source media range";
+        return diag;
+    }
+
+    NSArray *ranges = @[mediaRange];
+    SpliceKit_CMTime zero = {0, clipRange.duration.timescale > 0 ? clipRange.duration.timescale : 6000, 1, 0};
+    SEL revealSel = NSSelectorFromString(@"revealObject:andRange:atPlayhead:");
+    if ([organizer respondsToSelector:revealSel]) {
+        ((BOOL (*)(id, SEL, id, SpliceKit_CMTimeRange, SpliceKit_CMTime))objc_msgSend)(
+            organizer, revealSel, insertionSource, clipRange, zero);
+    }
+    SEL revealRangesSel = NSSelectorFromString(@"revealMediaRanges:");
+    if ([organizer respondsToSelector:revealRangesSel]) {
+        ((void (*)(id, SEL, id))objc_msgSend)(organizer, revealRangesSel, ranges);
+    }
+
+    SEL selectSel = NSSelectorFromString(@"_selectMediaRanges:");
+    if (![mediaBrowser respondsToSelector:selectSel]) {
+        diag[@"error"] = @"Media browser cannot select ranges";
+        return diag;
+    }
+    ((void (*)(id, SEL, id))objc_msgSend)(mediaBrowser, selectSel, ranges);
+
+    id selectionManager = ((id (*)(id, SEL))objc_msgSend)(
+        objc_getClass("PESelectionManager"), NSSelectorFromString(@"defaultSelectionManager"));
+    if (selectionManager) {
+        id context = nil;
+        Class contextClass = objc_getClass("FFContext");
+        if (contextClass) {
+            context = ((id (*)(id, SEL))objc_msgSend)((id)contextClass, @selector(alloc));
+            context = ((id (*)(id, SEL))objc_msgSend)(context, @selector(init));
+        }
+        SEL displaySel = NSSelectorFromString(@"displayMedia:context:effectCount:loadingBlock:unloadingBlock:");
+        id displayTarget = [mediaBrowser respondsToSelector:displaySel] ? mediaBrowser : organizer;
+        if (displayTarget && [displayTarget respondsToSelector:displaySel]) {
+            ((void (*)(id, SEL, id, id, NSInteger, id, id))objc_msgSend)(
+                displayTarget,
+                displaySel,
+                insertionSource,
+                context,
+                0,
+                nil,
+                nil);
+        } else {
+            id viewed = nil;
+            Class viewedClipSetClass = objc_getClass("PEViewedClipSet");
+            if (viewedClipSetClass) {
+                viewed = ((id (*)(id, SEL))objc_msgSend)((id)viewedClipSetClass, @selector(alloc));
+                viewed = ((id (*)(id, SEL, id, id, id, int, id))objc_msgSend)(
+                    viewed,
+                    NSSelectorFromString(@"initWithClips:contexts:effectCounts:layoutStyle:owner:"),
+                    @[insertionSource],
+                    @[context ?: [NSNull null]],
+                    @[@0],
+                    0,
+                    nil);
+            }
+            if (viewed) {
+                if ([viewed respondsToSelector:NSSelectorFromString(@"setTargetPlayer:")]) {
+                    ((void (*)(id, SEL, int))objc_msgSend)(viewed, NSSelectorFromString(@"setTargetPlayer:"), 1);
+                }
+                if ([selectionManager respondsToSelector:NSSelectorFromString(@"setViewedClips:")]) {
+                    ((void (*)(id, SEL, id))objc_msgSend)(selectionManager, NSSelectorFromString(@"setViewedClips:"), viewed);
+                }
+            }
+        }
+        if ([selectionManager respondsToSelector:NSSelectorFromString(@"viewedClips")]) {
+            id viewed = ((id (*)(id, SEL))objc_msgSend)(selectionManager, NSSelectorFromString(@"viewedClips"));
+            if ([viewed respondsToSelector:NSSelectorFromString(@"setPreferAudio:")]) {
+                ((void (*)(id, SEL, BOOL))objc_msgSend)(viewed, NSSelectorFromString(@"setPreferAudio:"), preferAudio);
+            }
+        }
+    }
+
+    [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.15]];
+
+    NSUInteger selectedRangeCount = 0;
+    if ([organizer respondsToSelector:NSSelectorFromString(@"selectedRangesOfMediaForTimelineEditing")]) {
+        id selectedRanges = ((id (*)(id, SEL))objc_msgSend)(
+            organizer, NSSelectorFromString(@"selectedRangesOfMediaForTimelineEditing"));
+        if ([selectedRanges respondsToSelector:@selector(count)]) {
+            selectedRangeCount = [selectedRanges count];
+        }
+    } else if ([organizer respondsToSelector:NSSelectorFromString(@"selectedRangesOfMedia")]) {
+        id selectedRanges = ((id (*)(id, SEL))objc_msgSend)(
+            organizer, NSSelectorFromString(@"selectedRangesOfMedia"));
+        if ([selectedRanges respondsToSelector:@selector(count)]) {
+            selectedRangeCount = [selectedRanges count];
+        }
+    }
+
+    NSUInteger viewedClipCount = 0;
+    if (selectionManager && [selectionManager respondsToSelector:NSSelectorFromString(@"viewedClips")]) {
+        id viewedClips = ((id (*)(id, SEL))objc_msgSend)(selectionManager, NSSelectorFromString(@"viewedClips"));
+        if (viewedClips && [viewedClips respondsToSelector:NSSelectorFromString(@"clips")]) {
+            id clips = ((id (*)(id, SEL))objc_msgSend)(viewedClips, NSSelectorFromString(@"clips"));
+            if ([clips respondsToSelector:@selector(count)]) {
+                viewedClipCount = [clips count];
+            }
+        }
+    }
+
+    diag[@"selectedRangeCount"] = @(selectedRangeCount);
+    diag[@"viewedClipCount"] = @(viewedClipCount);
+    diag[@"ok"] = @((selectedRangeCount > 0) && (viewedClipCount > 0));
+    if (selectedRangeCount == 0 || viewedClipCount == 0) {
+        diag[@"error"] = [NSString stringWithFormat:
+            @"Source prep incomplete (selectedRangeCount=%lu viewedClipCount=%lu)",
+            (unsigned long)selectedRangeCount,
+            (unsigned long)viewedClipCount];
+    }
+    return diag;
+}
+
+static BOOL SpliceKit_sendGlobalAction(NSString *selectorName) {
+    if (selectorName.length == 0) return NO;
+    id app = ((id (*)(id, SEL))objc_msgSend)(
+        objc_getClass("NSApplication"), @selector(sharedApplication));
+    return ((BOOL (*)(id, SEL, SEL, id, id))objc_msgSend)(
+        app, @selector(sendAction:to:from:), NSSelectorFromString(selectorName), nil, nil);
+}
+
+static id SpliceKit_findSequenceNamedInActiveLibraries(NSString *projectName) {
+    if (projectName.length == 0) return nil;
+
+    id libs = ((id (*)(id, SEL))objc_msgSend)(
+        objc_getClass("FFLibraryDocument"), NSSelectorFromString(@"copyActiveLibraries"));
+    if (![libs isKindOfClass:[NSArray class]]) return nil;
+
+    for (id library in (NSArray *)libs) {
+        if (!library) continue;
+
+        id seqSet = nil;
+        SEL deepSel = NSSelectorFromString(@"_deepLoadedSequences");
+        if ([library respondsToSelector:deepSel]) {
+            seqSet = ((id (*)(id, SEL))objc_msgSend)(library, deepSel);
+        }
+        if (!seqSet) continue;
+
+        id seqArray = nil;
+        if ([seqSet respondsToSelector:@selector(allObjects)]) {
+            seqArray = ((id (*)(id, SEL))objc_msgSend)(seqSet, @selector(allObjects));
+        } else if ([seqSet isKindOfClass:[NSArray class]]) {
+            seqArray = seqSet;
+        }
+        if (![seqArray isKindOfClass:[NSArray class]]) continue;
+
+        // First pass: exact match
+        for (id seq in (NSArray *)seqArray) {
+            NSString *seqName = nil;
+            if ([seq respondsToSelector:@selector(displayName)]) {
+                seqName = ((id (*)(id, SEL))objc_msgSend)(seq, @selector(displayName));
+            }
+            if (seqName && [seqName isEqualToString:projectName]) {
+                return seq;
+            }
+        }
+        // Second pass: case-insensitive substring match
+        NSString *lowerProjectName = [projectName lowercaseString];
+        for (id seq in (NSArray *)seqArray) {
+            NSString *seqName = nil;
+            if ([seq respondsToSelector:@selector(displayName)]) {
+                seqName = ((id (*)(id, SEL))objc_msgSend)(seq, @selector(displayName));
+            }
+            if (seqName && [[seqName lowercaseString] containsString:lowerProjectName]) {
+                return seq;
+            }
+        }
+    }
+
+    return nil;
+}
+
+static BOOL SpliceKit_loadSequenceInActiveEditor(id sequence) {
+    if (!sequence) return NO;
+
+    id app = ((id (*)(id, SEL))objc_msgSend)(
+        objc_getClass("NSApplication"), @selector(sharedApplication));
+    id delegate = ((id (*)(id, SEL))objc_msgSend)(app, @selector(delegate));
+    if (!delegate) return NO;
+
+    SEL containerSel = @selector(activeEditorContainer);
+    if (![delegate respondsToSelector:containerSel]) return NO;
+    id editorContainer = ((id (*)(id, SEL))objc_msgSend)(delegate, containerSel);
+    if (!editorContainer) return NO;
+
+    SEL loadSel = NSSelectorFromString(@"loadEditorForSequence:");
+    if (![editorContainer respondsToSelector:loadSel]) return NO;
+
+    ((void (*)(id, SEL, id))objc_msgSend)(editorContainer, loadSel, sequence);
+    return YES;
+}
+
+static SpliceKit_CMTime SpliceKit_makeCMTimeWithTimescale(double seconds, int32_t timescale) {
+    if (!isfinite(seconds)) seconds = 0.0;
+    if (timescale <= 0) timescale = 6000;
+    return (SpliceKit_CMTime){
+        .value = (int64_t)llround(seconds * (double)timescale),
+        .timescale = timescale,
+        .flags = 1,
+        .epoch = 0,
+    };
+}
+
+static SpliceKit_CMTime SpliceKit_addSecondsToCMTime(SpliceKit_CMTime base, double seconds) {
+    double baseSeconds = (base.timescale > 0) ? ((double)base.value / (double)base.timescale) : 0.0;
+    int32_t timescale = base.timescale > 0 ? base.timescale : 6000;
+    return SpliceKit_makeCMTimeWithTimescale(baseSeconds + seconds, timescale);
+}
+
+static id SpliceKit_findAssemblyEvent(NSArray *events, NSString *eventName) {
+    if (![events isKindOfClass:[NSArray class]] || events.count == 0) return nil;
+    if (eventName.length == 0) return events.firstObject;
+
+    NSString *needle = [eventName lowercaseString];
+    for (id event in events) {
+        NSString *name = SpliceKit_displayNameForItem(event);
+        if (name.length > 0 && [[name lowercaseString] containsString:needle]) {
+            return event;
+        }
+    }
+    return nil;
+}
+
+static NSDictionary *SpliceKit_createNativeProjectSequence(NSString *projectName, id targetEvent) {
+    NSMutableDictionary *diag = [NSMutableDictionary dictionary];
+    diag[@"ok"] = @NO;
+
+    if (projectName.length == 0) {
+        diag[@"error"] = @"Missing project name";
+        return diag;
+    }
+    if (!targetEvent) {
+        diag[@"error"] = @"Missing target event for project creation";
+        return diag;
+    }
+
+    SEL libraryItemSel = NSSelectorFromString(@"libraryItem");
+    id eventLibraryItem = [targetEvent respondsToSelector:libraryItemSel]
+        ? ((id (*)(id, SEL))objc_msgSend)(targetEvent, libraryItemSel)
+        : targetEvent;
+    if (!eventLibraryItem) {
+        diag[@"error"] = @"Target event does not expose a library item";
+        return diag;
+    }
+
+    Class projectDocClass = objc_getClass("FFProjectDocument");
+    SEL createSel = NSSelectorFromString(@"actionNewProject:name:sequence:actionName:error:");
+    if (!projectDocClass || ![(id)projectDocClass respondsToSelector:createSel]) {
+        diag[@"error"] = @"FFProjectDocument actionNewProject:name:sequence:actionName:error: unavailable";
+        return diag;
+    }
+
+    NSError *error = nil;
+    id createdProjectClip = ((id (*)(id, SEL, id, id, id, id, NSError **))objc_msgSend)(
+        (id)projectDocClass,
+        createSel,
+        eventLibraryItem,
+        projectName,
+        nil,
+        @"SpliceKit Song Cut",
+        &error);
+    if (!createdProjectClip) {
+        diag[@"error"] = error.localizedDescription ?: @"Native project creation returned nil";
+        return diag;
+    }
+
+    id sequence = nil;
+    for (int attempt = 0; attempt < 40 && !sequence; attempt++) {
+        [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.1]];
+        sequence = SpliceKit_findSequenceNamedInActiveLibraries(projectName);
+    }
+    if (!sequence) {
+        diag[@"error"] = @"Created the native project clip, but could not resolve the backing sequence";
+        diag[@"createdObjectClass"] = NSStringFromClass([createdProjectClip class]) ?: @"";
+        return diag;
+    }
+
+    BOOL loaded = SpliceKit_loadSequenceInActiveEditor(sequence);
+    diag[@"sequence"] = sequence;
+    diag[@"sequenceHandle"] = SpliceKit_storeHandle(sequence) ?: @"";
+    diag[@"createdObjectClass"] = NSStringFromClass([createdProjectClip class]) ?: @"";
+    diag[@"eventName"] = SpliceKit_displayNameForItem(targetEvent) ?: @"";
+    diag[@"loaded"] = @(loaded);
+    diag[@"ok"] = @(loaded);
+    if (!loaded) {
+        diag[@"error"] = @"Created project but failed to load it into the active editor";
+    }
+    return diag;
+}
+
+static NSDictionary *SpliceKit_performPreparedMediaEdit(id timeline,
+                                                        NSInteger editKind,
+                                                        BOOL backTimed,
+                                                        NSString *trackType,
+                                                        BOOL useExplicitTime,
+                                                        SpliceKit_CMTime explicitTime) {
+    NSMutableDictionary *diag = [NSMutableDictionary dictionary];
+    diag[@"ok"] = @NO;
+    diag[@"editKind"] = @(editKind);
+    diag[@"trackType"] = trackType ?: @"all";
+    diag[@"useExplicitTime"] = @(useExplicitTime);
+
+    if (!timeline) {
+        diag[@"error"] = @"Missing active timeline";
+        return diag;
+    }
+
+    Class editActionClass = objc_getClass("FFEditAction");
+    SEL createEditSel = NSSelectorFromString(@"editActionOfKind:backTimed:trackType:");
+    if (!editActionClass || ![(id)editActionClass respondsToSelector:createEditSel]) {
+        diag[@"error"] = @"FFEditAction editActionOfKind:backTimed:trackType: unavailable";
+        return diag;
+    }
+
+    id editAction = ((id (*)(id, SEL, NSInteger, BOOL, id))objc_msgSend)(
+        (id)editActionClass,
+        createEditSel,
+        editKind,
+        backTimed,
+        trackType ?: @"all");
+    if (!editAction) {
+        diag[@"error"] = @"Failed to build edit action";
+        return diag;
+    }
+
+    NSString *pasteboardName = [NSString stringWithFormat:@"com.apple.nle.splicekit.%@",
+                                [[NSUUID UUID] UUIDString]];
+    diag[@"pasteboardName"] = pasteboardName;
+
+    id appController = ((id (*)(id, SEL))objc_msgSend)(
+        objc_getClass("PEAppController"), NSSelectorFromString(@"appController"));
+    id source = appController &&
+        [appController respondsToSelector:NSSelectorFromString(@"activeSourceForEditAction:")]
+            ? ((id (*)(id, SEL, id))objc_msgSend)(appController, NSSelectorFromString(@"activeSourceForEditAction:"), editAction)
+            : nil;
+
+    if (!source && appController) {
+        id organizerContainer = [appController respondsToSelector:NSSelectorFromString(@"mediaEventOrganizerContainer")]
+            ? ((id (*)(id, SEL))objc_msgSend)(appController, NSSelectorFromString(@"mediaEventOrganizerContainer"))
+            : nil;
+        id organizer = organizerContainer &&
+            [organizerContainer respondsToSelector:NSSelectorFromString(@"activeOrganizerModule")]
+                ? ((id (*)(id, SEL))objc_msgSend)(organizerContainer, NSSelectorFromString(@"activeOrganizerModule"))
+                : nil;
+        id mediaDetail = organizer &&
+            [organizer respondsToSelector:NSSelectorFromString(@"mediaDetailContainerModule")]
+                ? ((id (*)(id, SEL))objc_msgSend)(organizer, NSSelectorFromString(@"mediaDetailContainerModule"))
+                : nil;
+        source = mediaDetail &&
+            [mediaDetail respondsToSelector:NSSelectorFromString(@"getActiveMediaBrowser")]
+                ? ((id (*)(id, SEL))objc_msgSend)(mediaDetail, NSSelectorFromString(@"getActiveMediaBrowser"))
+                : nil;
+        if (!source && organizer && [organizer respondsToSelector:NSSelectorFromString(@"filmstripModule")]) {
+            source = ((id (*)(id, SEL))objc_msgSend)(organizer, NSSelectorFromString(@"filmstripModule"));
+        }
+    }
+
+    if (!source) {
+        diag[@"error"] = @"No active source for the prepared browser selection";
+        return diag;
+    }
+    diag[@"sourceClass"] = NSStringFromClass([source class]) ?: @"";
+
+    BOOL canSource = YES;
+    SEL canSourceSel = NSSelectorFromString(@"canSourceDataForEditAction:");
+    if ([source respondsToSelector:canSourceSel]) {
+        canSource = ((BOOL (*)(id, SEL, id))objc_msgSend)(source, canSourceSel, editAction);
+    }
+    diag[@"canSource"] = @(canSource);
+    if (!canSource) {
+        diag[@"error"] = @"Prepared browser selection cannot source data for this edit action";
+        return diag;
+    }
+
+    SEL writeSel = NSSelectorFromString(@"writeDataForEditAction:toPasteboardWithName:");
+    if (![source respondsToSelector:writeSel]) {
+        diag[@"error"] = @"Source module cannot write edit data to the pasteboard";
+        return diag;
+    }
+    BOOL wrote = ((BOOL (*)(id, SEL, id, id))objc_msgSend)(source, writeSel, editAction, pasteboardName);
+    diag[@"writeOK"] = @(wrote);
+    if (!wrote) {
+        diag[@"error"] = @"Source module failed to write the prepared selection to the pasteboard";
+        return diag;
+    }
+
+    if (useExplicitTime) {
+        SEL containerSel = NSSelectorFromString(@"_containerForEditOperation");
+        id container = [timeline respondsToSelector:containerSel]
+            ? ((id (*)(id, SEL))objc_msgSend)(timeline, containerSel)
+            : nil;
+        if (!container && [timeline respondsToSelector:NSSelectorFromString(@"rootItem")]) {
+            container = ((id (*)(id, SEL))objc_msgSend)(timeline, NSSelectorFromString(@"rootItem"));
+        }
+        if (!container) {
+            diag[@"error"] = @"Timeline has no container for explicit-time insertion";
+            return diag;
+        }
+        diag[@"containerClass"] = NSStringFromClass([container class]) ?: @"";
+
+        SEL addSel = NSSelectorFromString(@"_addItemsWithPasteboard:atTime:pasteMode:backtimed:useSelectedRange:trackType:container:changesUnderActionHandler:");
+        if (![timeline respondsToSelector:addSel]) {
+            diag[@"error"] = @"Timeline does not support explicit-time pasteboard insertion";
+            return diag;
+        }
+        ((void (*)(id, SEL, id, SpliceKit_CMTime, int, BOOL, BOOL, id, id, id))objc_msgSend)(
+            timeline,
+            addSel,
+            pasteboardName,
+            explicitTime,
+            (int)editKind,
+            backTimed,
+            YES,
+            trackType ?: @"all",
+            container,
+            nil);
+    } else {
+        SEL performSel = NSSelectorFromString(@"performEditAction:fromPasteboardWithName:fromAnimation:");
+        if (![timeline respondsToSelector:performSel]) {
+            diag[@"error"] = @"Timeline cannot consume pasteboard edits";
+            return diag;
+        }
+        ((void (*)(id, SEL, id, id, BOOL))objc_msgSend)(
+            timeline,
+            performSel,
+            editAction,
+            pasteboardName,
+            NO);
+    }
+
+    [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.15]];
+    diag[@"ok"] = @YES;
+    return diag;
+}
+
+static NSDictionary *SpliceKit_handleAssembleRandomClipsToBeats(NSDictionary *params) {
+    NSString *sourceHandle = [params[@"sourceHandle"] isKindOfClass:[NSString class]] ? params[@"sourceHandle"] : nil;
+    NSString *sourceProjectName = [params[@"sourceProjectName"] isKindOfClass:[NSString class]] ? params[@"sourceProjectName"] : nil;
+    NSString *clipSourceProjectName = [params[@"clipSourceProjectName"] isKindOfClass:[NSString class]] ? params[@"clipSourceProjectName"] : nil;
+    NSArray *clipHandles = [params[@"clipHandles"] isKindOfClass:[NSArray class]] ? params[@"clipHandles"] : nil;
+    NSString *eventName = [params[@"eventName"] isKindOfClass:[NSString class]] ? params[@"eventName"] : nil;
+    NSString *grid = [params[@"grid"] isKindOfClass:[NSString class]] ? [params[@"grid"] lowercaseString] : @"bar";
+    NSString *buildMode = [params[@"buildMode"] isKindOfClass:[NSString class]]
+        ? [params[@"buildMode"] lowercaseString] : @"native";
+    NSString *projectName = [params[@"projectName"] isKindOfClass:[NSString class]]
+        ? params[@"projectName"] : @"Beat Random Cut";
+    NSInteger segmentMinStep = params[@"segmentMinStep"] ? [params[@"segmentMinStep"] integerValue] : 1;
+    NSInteger segmentMaxStep = params[@"segmentMaxStep"] ? [params[@"segmentMaxStep"] integerValue] : segmentMinStep;
+    NSInteger maxSegments = params[@"maxSegments"] ? [params[@"maxSegments"] integerValue] : 0;
+    long long randomSeed = params[@"randomSeed"] ? [params[@"randomSeed"] longLongValue] : 1337;
+    BOOL allowClipReuse = params[@"allowClipReuse"] ? [params[@"allowClipReuse"] boolValue] : YES;
+    BOOL includeAudio = params[@"includeAudio"] ? [params[@"includeAudio"] boolValue] : YES;
+    BOOL targetCurrentTimeline = params[@"targetCurrentTimeline"] ? [params[@"targetCurrentTimeline"] boolValue] : NO;
+    BOOL dryRun = [params[@"dryRun"] boolValue];
+    NSDictionary *rawStepWeights = [params[@"stepWeights"] isKindOfClass:[NSDictionary class]]
+        ? params[@"stepWeights"] : nil;
+
+    if ([grid isEqualToString:@"random"]) {
+        grid = @"beat";
+    } else if ([grid isEqualToString:@"random_half"] || [grid isEqualToString:@"random_half_beat"]) {
+        grid = @"half_beat";
+    } else if ([grid isEqualToString:@"random_quarter"] || [grid isEqualToString:@"random_quarter_beat"]) {
+        grid = @"quarter_beat";
+    }
+
+    if (![@[@"beat", @"half", @"half_beat", @"quarter", @"quarter_beat", @"bar", @"section"] containsObject:grid]) {
+        return @{@"error": @"grid must be one of: beat, half_beat, quarter_beat, bar, section"};
+    }
+    if ([buildMode isEqualToString:@"xml"]) buildMode = @"fcpxml";
+    if (![@[@"native", @"fcpxml"] containsObject:buildMode]) {
+        return @{@"error": @"buildMode must be one of: native, fcpxml"};
+    }
+    if (targetCurrentTimeline && ![buildMode isEqualToString:@"native"]) {
+        return @{@"error": @"targetCurrentTimeline is only supported for native builds"};
+    }
+    if (segmentMinStep < 1) segmentMinStep = 1;
+    if (segmentMaxStep < segmentMinStep) segmentMaxStep = segmentMinStep;
+
+    NSMutableDictionary<NSNumber *, NSNumber *> *stepWeights = [NSMutableDictionary dictionary];
+    for (id rawKey in rawStepWeights) {
+        NSInteger step = [rawKey integerValue];
+        NSInteger weight = [rawStepWeights[rawKey] integerValue];
+        if (step < segmentMinStep || step > segmentMaxStep || weight <= 0) continue;
+        stepWeights[@(step)] = @(weight);
+    }
+
+    __block NSDictionary *result = nil;
+    SpliceKit_executeOnMainThread(^{
+        @try {
+            id timeline = SpliceKit_getActiveTimelineModule();
+            if (!timeline) { result = @{@"error": @"No active timeline module"}; return; }
+
+            id sequence = [timeline respondsToSelector:@selector(sequence)]
+                ? ((id (*)(id, SEL))objc_msgSend)(timeline, @selector(sequence)) : nil;
+            if (!sequence) { result = @{@"error": @"No sequence in timeline"}; return; }
+
+            id primaryObj = [sequence respondsToSelector:@selector(primaryObject)]
+                ? ((id (*)(id, SEL))objc_msgSend)(sequence, @selector(primaryObject)) : nil;
+            if (!primaryObj) { result = @{@"error": @"Cannot access primary storyline"}; return; }
+
+            SpliceKit_CMTime frameDuration = {100, 2400, 1, 0};
+            SEL frameDurationSel = NSSelectorFromString(@"frameDuration");
+            if ([sequence respondsToSelector:frameDurationSel]) {
+                SpliceKit_CMTime fd = ((SpliceKit_CMTime (*)(id, SEL))STRET_MSG)(sequence, frameDurationSel);
+                if (fd.value > 0 && fd.timescale > 0) frameDuration = fd;
+            }
+
+            NSArray *rootItems = SpliceKit_mixerArrayFromContainer(
+                ((id (*)(id, SEL))objc_msgSend)(primaryObj, @selector(containedItems))) ?: @[];
+
+            NSMutableArray<NSDictionary *> *activeVisibleEntries = [NSMutableArray array];
+            NSMutableSet<NSString *> *visited = [NSMutableSet set];
+            for (id item in rootItems) {
+                SpliceKit_collectVisibleTimelineEntries(item, primaryObj, activeVisibleEntries, visited);
+            }
+
+            NSArray *selectedItems = nil;
+            NSMutableSet<NSString *> *selectedKeys = [NSMutableSet set];
+            SEL selectedSel = NSSelectorFromString(@"selectedItems:includeItemBeforePlayheadIfLast:");
+            if ([timeline respondsToSelector:selectedSel]) {
+                id selItems = ((id (*)(id, SEL, BOOL, BOOL))objc_msgSend)(timeline, selectedSel, NO, NO);
+                selectedItems = SpliceKit_mixerArrayFromContainer(selItems);
+            } else if ([timeline respondsToSelector:@selector(selectedItems)]) {
+                selectedItems = SpliceKit_mixerArrayFromContainer(
+                    ((id (*)(id, SEL))objc_msgSend)(timeline, @selector(selectedItems)));
+            }
+            for (id selectedItem in selectedItems) {
+                NSString *pointerKey = SpliceKit_handlePointerKey(selectedItem);
+                if (pointerKey.length > 0) [selectedKeys addObject:pointerKey];
+            }
+
+            NSDictionary *sourceContext = nil;
+            NSArray<NSDictionary *> *sourceVisibleEntries = nil;
+            id sourcePrimaryObj = nil;
+            if (sourceProjectName.length > 0) {
+                sourceContext = SpliceKit_findVisibleEntryContextNamed(sourceProjectName);
+                if ([sourceContext[@"error"] isKindOfClass:[NSString class]]) {
+                    result = @{@"error": sourceContext[@"error"]};
+                    return;
+                }
+                sourceVisibleEntries = sourceContext[@"visibleEntries"];
+                sourcePrimaryObj = sourceContext[@"primaryObject"];
+                if (sourceVisibleEntries.count == 0) {
+                    result = @{@"error": [NSString stringWithFormat:@"No visible clips found in sourceProjectName \"%@\"", sourceProjectName]};
+                    return;
+                }
+            } else {
+                sourceVisibleEntries = activeVisibleEntries;
+                sourcePrimaryObj = primaryObj;
+            }
+
+            NSDictionary *sourceEntry = nil;
+            NSString *sourceKey = nil;
+            if (sourceHandle.length > 0) {
+                id sourceObj = SpliceKit_resolveHandle(sourceHandle);
+                if (!sourceObj) {
+                    result = @{@"error": [NSString stringWithFormat:@"Source handle not found: %@", sourceHandle]};
+                    return;
+                }
+                sourceKey = SpliceKit_handlePointerKey(sourceObj);
+                for (NSDictionary *entry in sourceVisibleEntries) {
+                    if ([entry[@"pointerKey"] isEqualToString:sourceKey]) {
+                        sourceEntry = entry;
+                        break;
+                    }
+                }
+                if (!sourceEntry) {
+                    result = @{@"error": sourceProjectName.length > 0
+                        ? @"Source clip handle is not visible in the requested source project"
+                        : @"Source clip is not visible in the active timeline"};
+                    return;
+                }
+            } else {
+                NSArray *orderedEntries = [sourceVisibleEntries sortedArrayUsingComparator:^NSComparisonResult(NSDictionary *lhs, NSDictionary *rhs) {
+                    return [lhs[@"start"] compare:rhs[@"start"]];
+                }];
+                if (sourceProjectName.length == 0) {
+                    for (NSDictionary *entry in orderedEntries) {
+                        if (![selectedKeys containsObject:entry[@"pointerKey"]]) continue;
+                        if (![entry[@"hasTimingMetadata"] boolValue] || ![entry[@"hasAudio"] boolValue]) continue;
+                        sourceEntry = entry;
+                        break;
+                    }
+                }
+                if (!sourceEntry) {
+                    for (NSDictionary *entry in orderedEntries) {
+                        if (![entry[@"hasTimingMetadata"] boolValue] || ![entry[@"hasAudio"] boolValue]) continue;
+                        if (![entry[@"beatGridEnabled"] boolValue]) continue;
+                        sourceEntry = entry;
+                        break;
+                    }
+                }
+                if (!sourceEntry) {
+                    for (NSDictionary *entry in orderedEntries) {
+                        if ([entry[@"hasTimingMetadata"] boolValue] && [entry[@"hasAudio"] boolValue]) {
+                            sourceEntry = entry;
+                            break;
+                        }
+                    }
+                }
+                if (!sourceEntry) {
+                    result = @{@"error": sourceProjectName.length > 0
+                        ? [NSString stringWithFormat:@"No beat-detected audio clip found in sourceProjectName \"%@\"", sourceProjectName]
+                        : @"No beat-detected audio clip found in the active timeline. Select one or pass sourceHandle."};
+                    return;
+                }
+                sourceKey = sourceEntry[@"pointerKey"];
+            }
+
+            id sourceItem = sourceEntry[@"item"];
+            if (!SpliceKit_boolForSelector(sourceItem, @"hasTimingMetadata")) {
+                result = @{@"error": @"Source clip does not have Apple timing metadata. Run beat detection on it first."};
+                return;
+            }
+            SpliceKit_CMTimeRange sourceClipRange = SpliceKit_clipRangeForItem(sourceItem);
+
+            double sourceStartSec = 0.0;
+            double sourceEndSec = 0.0;
+            double tempo = 0.0;
+            NSArray<NSNumber *> *timelineGrid = SpliceKit_translateTimingMetadataToTimeline(
+                sourceItem, sourcePrimaryObj, grid, &sourceStartSec, &sourceEndSec, &tempo);
+            double sourceDuration = sourceEndSec - sourceStartSec;
+            if (timelineGrid.count == 0 || sourceDuration <= 0.0001) {
+                result = @{@"error": @"Source clip has no usable timing metadata for the requested grid"};
+                return;
+            }
+            NSString *sourceMediaURL = SpliceKit_getMediaURLForClip(sourceItem) ?: @"";
+            if (sourceMediaURL.length == 0 && [sourceItem respondsToSelector:NSSelectorFromString(@"media")]) {
+                id sourceMedia = ((id (*)(id, SEL))objc_msgSend)(sourceItem, NSSelectorFromString(@"media"));
+                SEL originalMediaURLSel = NSSelectorFromString(@"originalMediaURL");
+                if (sourceMedia && [sourceMedia respondsToSelector:originalMediaURLSel]) {
+                    id originalMediaURL = ((id (*)(id, SEL))objc_msgSend)(sourceMedia, originalMediaURLSel);
+                    if ([originalMediaURL respondsToSelector:@selector(absoluteString)]) {
+                        sourceMediaURL = ((id (*)(id, SEL))objc_msgSend)(originalMediaURL, @selector(absoluteString)) ?: @"";
+                    }
+                }
+            }
+            NSString *sourceFallbackName = [sourceEntry[@"name"] isKindOfClass:[NSString class]]
+                ? sourceEntry[@"name"] : SpliceKit_displayNameForItem(sourceItem);
+            id sourceBrowserClip = SpliceKit_findBrowserClipMatchingMediaURL(sourceMediaURL, sourceFallbackName);
+            id sourceInsertObject = sourceBrowserClip ?: sourceItem;
+
+            NSMutableArray<NSNumber *> *boundaries = [NSMutableArray arrayWithObject:@0.0];
+            for (NSNumber *markerNum in timelineGrid) {
+                double relative = [markerNum doubleValue] - sourceStartSec;
+                if (relative > 0.0001 && relative < sourceDuration - 0.0001) {
+                    [boundaries addObject:@(relative)];
+                }
+            }
+            [boundaries addObject:@(sourceDuration)];
+            NSArray<NSNumber *> *sortedBoundaries = SpliceKit_sortedUniqueSeconds(boundaries, 0.0001);
+            if (sortedBoundaries.count < 2) {
+                result = @{@"error": @"Not enough beat boundaries found inside the source clip"};
+                return;
+            }
+
+            id libs = ((id (*)(id, SEL))objc_msgSend)(
+                objc_getClass("FFLibraryDocument"), @selector(copyActiveLibraries));
+            if (![libs isKindOfClass:[NSArray class]] || [(NSArray *)libs count] == 0) {
+                result = @{@"error": @"No active library"};
+                return;
+            }
+            id library = [(NSArray *)libs firstObject];
+            SEL eventsSel = NSSelectorFromString(@"events");
+            if (![library respondsToSelector:eventsSel]) {
+                result = @{@"error": @"Library does not respond to events"};
+                return;
+            }
+            id events = ((id (*)(id, SEL))objc_msgSend)(library, eventsSel);
+            if (![events isKindOfClass:[NSArray class]] || [(NSArray *)events count] == 0) {
+                result = @{@"error": @"No events in library"};
+                return;
+            }
+
+            NSMutableSet<NSString *> *requestedClipKeys = [NSMutableSet set];
+            for (id handleValue in clipHandles) {
+                if (![handleValue isKindOfClass:[NSString class]]) continue;
+                id clipObj = SpliceKit_resolveHandle(handleValue);
+                NSString *pointerKey = SpliceKit_handlePointerKey(clipObj);
+                if (pointerKey.length > 0) [requestedClipKeys addObject:pointerKey];
+            }
+
+            NSMutableArray<NSMutableDictionary *> *clipPool = [NSMutableArray array];
+            if (clipSourceProjectName.length > 0) {
+                NSDictionary *clipSourceContext = SpliceKit_findVisibleEntryContextNamed(clipSourceProjectName);
+                if ([clipSourceContext[@"error"] isKindOfClass:[NSString class]]) {
+                    result = @{@"error": clipSourceContext[@"error"]};
+                    return;
+                }
+
+                NSArray<NSDictionary *> *clipEntries = clipSourceContext[@"visibleEntries"];
+                if (clipEntries.count == 0) {
+                    result = @{@"error": [NSString stringWithFormat:@"No visible clips found in clipSourceProjectName \"%@\"", clipSourceProjectName]};
+                    return;
+                }
+
+                for (NSDictionary *entry in clipEntries) {
+                    id clip = entry[@"item"];
+                    NSString *pointerKey = entry[@"pointerKey"];
+                    if (pointerKey.length == 0) continue;
+                    if (requestedClipKeys.count > 0 && ![requestedClipKeys containsObject:pointerKey]) continue;
+                    if (![entry[@"hasVideo"] boolValue] || [entry[@"isAudioOnly"] boolValue]) continue;
+
+                    double durationSec = [entry[@"end"] doubleValue] - [entry[@"start"] doubleValue];
+                    if (durationSec <= 0.050) continue;
+
+                    NSString *mediaURL = SpliceKit_getMediaURLForClip(clip) ?: @"";
+                    if (mediaURL.length > 0) {
+                        if (sourceMediaURL.length > 0 && [mediaURL isEqualToString:sourceMediaURL]) continue;
+                        if (SpliceKit_mediaURLLooksAudioOnly(mediaURL)) continue;
+                    }
+
+                    // Resolve the timeline clip to its browser equivalent for native insertion.
+                    // The native edit path requires organizer-backed items, not raw
+                    // FFAnchoredMediaComponent objects from another sequence's timeline.
+                    NSString *clipDisplayName = [entry[@"name"] isKindOfClass:[NSString class]]
+                        ? entry[@"name"] : SpliceKit_displayNameForItem(clip);
+                    id browserClip = SpliceKit_findBrowserClipMatchingMediaURL(mediaURL, clipDisplayName);
+                    if (!browserClip) {
+                        // URL didn't match — media is likely inside a browser sequence.
+                        // Fall back to name-based matching against browser clips.
+                        browserClip = SpliceKit_findBrowserClipMatchingMediaURL(nil, clipDisplayName);
+                    }
+                    id poolClip = browserClip ?: clip;
+                    double poolDurationSec = durationSec;
+                    if (browserClip && [browserClip respondsToSelector:@selector(duration)]) {
+                        SpliceKit_CMTime bDur = ((SpliceKit_CMTime (*)(id, SEL))STRET_MSG)(browserClip, @selector(duration));
+                        double bDurSec = SpliceKit_cmtimeToSeconds(bDur);
+                        if (bDurSec > poolDurationSec) poolDurationSec = bDurSec;
+                    }
+
+                    NSString *handle = SpliceKit_storeHandle(poolClip);
+                    [clipPool addObject:[NSMutableDictionary dictionaryWithDictionary:@{
+                        @"clip": poolClip,
+                        @"pointerKey": pointerKey,
+                        @"handle": handle ?: @"",
+                        @"name": clipDisplayName,
+                        @"event": clipSourceProjectName ?: @"",
+                        @"durationSeconds": @(poolDurationSec),
+                        @"mediaURL": mediaURL ?: @"",
+                    }]];
+                }
+            } else {
+                for (id event in (NSArray *)events) {
+                    NSString *browserEventName = SpliceKit_displayNameForItem(event);
+                    if (eventName.length > 0 &&
+                        ![[browserEventName lowercaseString] containsString:[eventName lowercaseString]]) {
+                        continue;
+                    }
+
+                    NSArray *clips = SpliceKit_copyBrowserClipsForEvent(event);
+                    for (id clip in clips) {
+                        NSString *pointerKey = SpliceKit_handlePointerKey(clip);
+                        if (pointerKey.length == 0) continue;
+                        if (requestedClipKeys.count > 0 && ![requestedClipKeys containsObject:pointerKey]) continue;
+
+                        BOOL hasVideo = SpliceKit_boolForSelector(clip, @"hasVideo");
+                        BOOL hasContainedItems = SpliceKit_boolForSelector(clip, @"hasContainedItems");
+                        if (!hasVideo) {
+                            NSString *className = NSStringFromClass([clip class]);
+                            hasVideo = [className containsString:@"Video"] ||
+                                       [className containsString:@"Media"] ||
+                                       [className containsString:@"Asset"] ||
+                                       [className containsString:@"Clip"] ||
+                                       [className containsString:@"Sequence"] ||
+                                       hasContainedItems;
+                        }
+                        if (!hasVideo) continue;
+
+                        double durationSec = 0.0;
+                        if ([clip respondsToSelector:@selector(duration)]) {
+                            SpliceKit_CMTime duration = ((SpliceKit_CMTime (*)(id, SEL))STRET_MSG)(clip, @selector(duration));
+                            durationSec = SpliceKit_cmtimeToSeconds(duration);
+                        } else if ([clip respondsToSelector:NSSelectorFromString(@"clippedRange")]) {
+                            SpliceKit_CMTimeRange range = ((SpliceKit_CMTimeRange (*)(id, SEL))STRET_MSG)(
+                                clip, NSSelectorFromString(@"clippedRange"));
+                            durationSec = SpliceKit_cmtimeToSeconds(range.duration);
+                        } else if ([clip respondsToSelector:NSSelectorFromString(@"unclippedRange")]) {
+                            SpliceKit_CMTimeRange range = ((SpliceKit_CMTimeRange (*)(id, SEL))STRET_MSG)(
+                                clip, NSSelectorFromString(@"unclippedRange"));
+                            durationSec = SpliceKit_cmtimeToSeconds(range.duration);
+                        } else if ([clip respondsToSelector:NSSelectorFromString(@"mediaRange")]) {
+                            SpliceKit_CMTimeRange range = ((SpliceKit_CMTimeRange (*)(id, SEL))STRET_MSG)(
+                                clip, NSSelectorFromString(@"mediaRange"));
+                            durationSec = SpliceKit_cmtimeToSeconds(range.duration);
+                        }
+                        if (durationSec <= 0.050) continue;
+
+                        NSString *mediaURL = SpliceKit_getMediaURLForClip(clip) ?: @"";
+                        NSString *clipClassName = NSStringFromClass([clip class]) ?: @"";
+                        if (mediaURL.length > 0) {
+                            if (sourceMediaURL.length > 0 && [mediaURL isEqualToString:sourceMediaURL]) continue;
+                            if (SpliceKit_mediaURLLooksAudioOnly(mediaURL)) continue;
+                        } else if (hasContainedItems ||
+                                   [clipClassName containsString:@"Sequence"] ||
+                                   [clipClassName containsString:@"Project"]) {
+                            // Keep the song-cut pool on media-backed clips instead of previously generated projects.
+                            continue;
+                        }
+
+                        NSString *handle = SpliceKit_storeHandle(clip);
+                        [clipPool addObject:[NSMutableDictionary dictionaryWithDictionary:@{
+                            @"clip": clip,
+                            @"pointerKey": pointerKey,
+                            @"handle": handle ?: @"",
+                            @"name": SpliceKit_displayNameForItem(clip),
+                            @"event": browserEventName ?: @"",
+                            @"durationSeconds": @(durationSec),
+                            @"mediaURL": mediaURL ?: @"",
+                        }]];
+                    }
+                }
+            }
+            if (clipPool.count == 0) {
+                result = @{@"error": clipSourceProjectName.length > 0
+                    ? @"No eligible source clips found in the requested clipSourceProjectName"
+                    : @"No browser clips found for random beat assembly"};
+                return;
+            }
+            if (includeAudio && !sourceInsertObject && !dryRun) {
+                result = @{@"error": @"Couldn't resolve the selected beat source song for native insertion"};
+                return;
+            }
+
+            NSMutableArray<NSMutableDictionary *> *plan = [NSMutableArray array];
+            NSMutableSet<NSString *> *usedClipKeys = [NSMutableSet set];
+            NSUInteger assignedClipCount = 0;
+            NSUInteger gapCount = 0;
+            uint64_t rngState = (uint64_t)randomSeed;
+            BOOL isHalfBeatGrid = [grid isEqualToString:@"half_beat"] || [grid isEqualToString:@"half"];
+            BOOL forceNextHalfBeat = NO;
+            for (NSUInteger boundaryIndex = 0; boundaryIndex + 1 < sortedBoundaries.count;) {
+                NSInteger requestedStep;
+                if (forceNextHalfBeat) {
+                    // Second half of a half-beat pair — force step=1 so the pair
+                    // resolves on a whole-beat boundary.
+                    requestedStep = 1;
+                    forceNextHalfBeat = NO;
+                } else {
+                    requestedStep = SpliceKit_chooseRandomAssemblyStep(segmentMinStep, segmentMaxStep, stepWeights, &rngState);
+                    if (requestedStep == 1 && isHalfBeatGrid && segmentMaxStep > 1) {
+                        // Half-beats always come in pairs.
+                        forceNextHalfBeat = YES;
+                    }
+                }
+                NSUInteger maxRemaining = sortedBoundaries.count - 1 - boundaryIndex;
+                if ((NSUInteger)requestedStep > maxRemaining) requestedStep = (NSInteger)maxRemaining;
+
+                double startSec = [sortedBoundaries[boundaryIndex] doubleValue];
+                NSMutableArray<NSMutableDictionary *> *eligible = nil;
+                double segmentDuration = 0.0;
+                double endSec = startSec;
+                NSUInteger nextBoundaryIndex = NSNotFound;
+
+                for (NSInteger step = requestedStep; step >= 1; step--) {
+                    NSUInteger candidateNextIndex = MIN(sortedBoundaries.count - 1, boundaryIndex + (NSUInteger)step);
+                    if (candidateNextIndex <= boundaryIndex) continue;
+
+                    double candidateEndSec = [sortedBoundaries[candidateNextIndex] doubleValue];
+                    double candidateDuration = candidateEndSec - startSec;
+                    if (candidateDuration <= 0.0001) continue;
+
+                    NSMutableArray<NSMutableDictionary *> *candidates = [NSMutableArray array];
+                    for (NSMutableDictionary *candidate in clipPool) {
+                        if (!allowClipReuse && [usedClipKeys containsObject:candidate[@"pointerKey"]]) continue;
+                        if ([candidate[@"durationSeconds"] doubleValue] + 0.0001 < candidateDuration) continue;
+                        [candidates addObject:candidate];
+                    }
+                    if (candidates.count > 0) {
+                        eligible = candidates;
+                        segmentDuration = candidateDuration;
+                        endSec = candidateEndSec;
+                        nextBoundaryIndex = candidateNextIndex;
+                        requestedStep = step;
+                        break;
+                    }
+                }
+
+                if (!eligible || nextBoundaryIndex == NSNotFound) {
+                    NSUInteger fallbackNextIndex = MIN(sortedBoundaries.count - 1, boundaryIndex + 1);
+                    if (fallbackNextIndex <= boundaryIndex) break;
+
+                    gapCount++;
+                    [plan addObject:[NSMutableDictionary dictionaryWithDictionary:@{
+                        @"segmentIndex": @(plan.count),
+                        @"timelineStartSeconds": @(startSec),
+                        @"durationSeconds": @([sortedBoundaries[fallbackNextIndex] doubleValue] - startSec),
+                        @"clipName": [NSString stringWithFormat:@"Gap %lu", (unsigned long)(plan.count + 1)],
+                        @"status": @"gap",
+                    }]];
+                    boundaryIndex = fallbackNextIndex;
+                    if (maxSegments > 0 && (NSInteger)plan.count >= maxSegments) break;
+                    continue;
+                }
+
+                NSMutableDictionary *chosen = nil;
+                while (eligible.count > 0) {
+                    NSUInteger choiceIndex = (NSUInteger)(SpliceKit_nextRandom(&rngState) % (uint64_t)eligible.count);
+                    NSMutableDictionary *candidate = eligible[choiceIndex];
+                    NSString *mediaURL = candidate[@"mediaURL"];
+                    if (![mediaURL isKindOfClass:[NSString class]] || mediaURL.length == 0) {
+                        NSString *resolved = SpliceKit_getMediaURLForClip(candidate[@"clip"]);
+                        if (resolved.length > 0) {
+                            if (sourceMediaURL.length > 0 && [resolved isEqualToString:sourceMediaURL]) {
+                                [eligible removeObjectAtIndex:choiceIndex];
+                                continue;
+                            }
+                            if (SpliceKit_mediaURLLooksAudioOnly(resolved)) {
+                                [eligible removeObjectAtIndex:choiceIndex];
+                                continue;
+                            }
+                            candidate[@"mediaURL"] = resolved;
+                            mediaURL = resolved;
+                        }
+                    }
+
+                    if ([buildMode isEqualToString:@"fcpxml"] && mediaURL.length == 0) {
+                        [eligible removeObjectAtIndex:choiceIndex];
+                        continue;
+                    }
+
+                    chosen = candidate;
+                    break;
+                }
+
+                if (!chosen) {
+                    gapCount++;
+                    [plan addObject:[NSMutableDictionary dictionaryWithDictionary:@{
+                        @"segmentIndex": @(plan.count),
+                        @"timelineStartSeconds": @(startSec),
+                        @"durationSeconds": @(segmentDuration),
+                        @"clipName": [NSString stringWithFormat:@"Gap %lu", (unsigned long)(plan.count + 1)],
+                        @"status": @"gap",
+                    }]];
+                    boundaryIndex = nextBoundaryIndex;
+                    if (maxSegments > 0 && (NSInteger)plan.count >= maxSegments) break;
+                    continue;
+                }
+
+                if (!allowClipReuse) {
+                    [usedClipKeys addObject:chosen[@"pointerKey"]];
+                }
+
+                double clipDuration = [chosen[@"durationSeconds"] doubleValue];
+                double maxIn = MAX(0.0, clipDuration - segmentDuration);
+                double inPoint = 0.0;
+                if (maxIn > 0.0001) {
+                    double unit = (double)(SpliceKit_nextRandom(&rngState) % 1000000ULL) / 1000000.0;
+                    inPoint = unit * maxIn;
+                }
+
+                assignedClipCount++;
+                [plan addObject:[NSMutableDictionary dictionaryWithDictionary:@{
+                    @"segmentIndex": @(plan.count),
+                    @"timelineStartSeconds": @(startSec),
+                    @"durationSeconds": @(segmentDuration),
+                    @"clipHandle": chosen[@"handle"] ?: @"",
+                    @"clipName": chosen[@"name"] ?: @"Clip",
+                    @"clipEvent": chosen[@"event"] ?: @"",
+                    @"inSeconds": @(inPoint),
+                    @"outSeconds": @(inPoint + segmentDuration),
+                    @"mediaURL": chosen[@"mediaURL"] ?: @"",
+                    @"step": @(requestedStep),
+                    @"status": @"planned",
+                }]];
+                boundaryIndex = nextBoundaryIndex;
+                if (maxSegments > 0 && (NSInteger)plan.count >= maxSegments) break;
+            }
+
+            if (plan.count == 0) {
+                result = @{@"error": @"Unable to derive any assembly segments from the beat map"};
+                return;
+            }
+            if (gapCount > 0) {
+                result = @{@"error": @"Could not cover the full song length with the current clip pool at the requested pacing. Use shorter spans or provide longer video clips."};
+                return;
+            }
+
+            NSString *destinationProjectName = targetCurrentTimeline
+                ? (SpliceKit_displayNameForItem(sequence).length > 0 ? SpliceKit_displayNameForItem(sequence) : projectName)
+                : projectName;
+
+            if (dryRun) {
+                result = @{
+                    @"status": @"ok",
+                    @"dryRun": @YES,
+                    @"buildMethod": buildMode,
+                    @"grid": grid,
+                    @"projectName": destinationProjectName,
+                    @"randomSeed": @(randomSeed),
+                    @"segmentMinStep": @(segmentMinStep),
+                    @"segmentMaxStep": @(segmentMaxStep),
+                    @"allowClipReuse": @(allowClipReuse),
+                    @"targetCurrentTimeline": @(targetCurrentTimeline),
+                    @"source": @{
+                        @"handle": SpliceKit_storeHandle(sourceItem),
+                        @"name": sourceEntry[@"name"] ?: @"",
+                        @"tempo": @(tempo),
+                        @"duration": @(sourceDuration),
+                    },
+                    @"segmentCount": @(plan.count),
+                    @"assignedClipCount": @(assignedClipCount),
+                    @"gapCount": @(gapCount),
+                    @"clipPoolCount": @(clipPool.count),
+                    @"plan": plan,
+                };
+                return;
+            }
+
+            double frameSeconds = SpliceKit_secondsFromTime(frameDuration);
+            if (!isfinite(frameSeconds) || frameSeconds <= 0.000001) {
+                frameSeconds = 1.0 / 24.0;
+            }
+
+            // Quantize each segment's offset from its ORIGINAL beat boundary time
+            // to prevent cumulative rounding drift across hundreds of segments.
+            long long totalDurationFrames = 0;
+            for (NSMutableDictionary *entry in plan) {
+                double startSeconds = [entry[@"timelineStartSeconds"] doubleValue];
+                double endSeconds = startSeconds + [entry[@"durationSeconds"] doubleValue];
+                long long startFrames = MAX(0LL, llround(startSeconds / frameSeconds));
+                long long endFrames = MAX(startFrames + 1, llround(endSeconds / frameSeconds));
+                long long durationFrames = endFrames - startFrames;
+
+                entry[@"timelineOffsetFrames"] = @(startFrames);
+                entry[@"durationFrames"] = @(durationFrames);
+                totalDurationFrames = endFrames;
+
+                NSNumber *inSecondsValue = entry[@"inSeconds"];
+                if (inSecondsValue) {
+                    long long inFrames = MAX(0LL, llround([inSecondsValue doubleValue] / frameSeconds));
+                    entry[@"inFrames"] = @(inFrames);
+                }
+            }
+
+            id targetEvent = nil;
+            NSString *targetEventName = @"";
+            if (!targetCurrentTimeline) {
+                targetEvent = SpliceKit_findAssemblyEvent((NSArray *)events, eventName);
+                if (!targetEvent) {
+                    result = @{@"error": @"Couldn't find a target event for project creation"};
+                    return;
+                }
+                targetEventName = SpliceKit_displayNameForItem(targetEvent) ?: @"SpliceKit Tests";
+            }
+            NSString *songMediaURLForBuild = sourceMediaURL.length > 0
+                ? sourceMediaURL
+                : (sourceInsertObject ? (SpliceKit_getMediaURLForClip(sourceInsertObject) ?: @"") : @"");
+
+            if ([buildMode isEqualToString:@"fcpxml"]) {
+                NSString *fcpxmlError = nil;
+                NSString *xml = SpliceKit_buildRandomClipAssemblyFCPXML(
+                    plan,
+                    destinationProjectName,
+                    targetEventName,
+                    frameDuration,
+                    includeAudio ? songMediaURLForBuild : @"",
+                    totalDurationFrames,
+                    &fcpxmlError);
+                if (xml.length == 0) {
+                    result = @{@"error": fcpxmlError ?: @"Failed to build the song-cut FCPXML document"};
+                    return;
+                }
+
+                NSDictionary *importResult = SpliceKit_handleFCPXMLImport(@{
+                    @"xml": xml,
+                    @"internal": @YES,
+                }) ?: @{};
+                if ([importResult[@"error"] isKindOfClass:[NSString class]]) {
+                    result = @{@"error": importResult[@"error"]};
+                    return;
+                }
+
+                result = @{
+                    @"status": @"ok",
+                    @"dryRun": @NO,
+                    @"grid": grid,
+                    @"projectName": destinationProjectName,
+                    @"randomSeed": @(randomSeed),
+                    @"segmentMinStep": @(segmentMinStep),
+                    @"segmentMaxStep": @(segmentMaxStep),
+                    @"allowClipReuse": @(allowClipReuse),
+                    @"targetCurrentTimeline": @NO,
+                    @"source": @{
+                        @"handle": SpliceKit_storeHandle(sourceItem),
+                        @"name": sourceEntry[@"name"] ?: @"",
+                        @"tempo": @(tempo),
+                        @"duration": @(sourceDuration),
+                    },
+                    @"segmentCount": @(plan.count),
+                    @"assignedClipCount": @(assignedClipCount),
+                    @"appliedClipCount": @(assignedClipCount),
+                    @"failedSegmentCount": @0,
+                    @"omittedSegmentCount": @0,
+                    @"gapCount": @0,
+                    @"clipPoolCount": @(clipPool.count),
+                    @"buildMethod": @"fcpxml",
+                    @"projectFound": @YES,
+                    @"projectLoaded": @NO,
+                    @"fcpxmlImport": importResult,
+                    @"songAudioInserted": @(includeAudio && songMediaURLForBuild.length > 0),
+                    @"songAudioError": (includeAudio && songMediaURLForBuild.length == 0)
+                        ? @"The selected song could not be resolved to a media URL for the FCPXML build"
+                        : @"",
+                    @"projectHandle": @"",
+                    @"plan": plan,
+                };
+                return;
+            }
+
+            NSDictionary *nativeProject = targetCurrentTimeline
+                ? @{
+                    @"ok": @YES,
+                    @"loaded": @YES,
+                    @"sequence": sequence,
+                    @"sequenceHandle": SpliceKit_storeHandle(sequence) ?: @"",
+                    @"createdObjectClass": @"",
+                    @"eventName": @"",
+                    @"reusedCurrentTimeline": @YES,
+                }
+                : (SpliceKit_createNativeProjectSequence(destinationProjectName, targetEvent) ?: @{});
+            NSMutableDictionary *nativeProjectResult = [nativeProject mutableCopy];
+            [nativeProjectResult removeObjectForKey:@"sequence"];
+            id importedSequence = nativeProject[@"sequence"];
+            BOOL loadedSequence = [nativeProject[@"loaded"] boolValue];
+            id buildTimeline = targetCurrentTimeline ? timeline : nil;
+
+            if (targetCurrentTimeline) {
+                if (activeVisibleEntries.count > 0) {
+                    result = @{@"error": @"targetCurrentTimeline requires the active timeline to be empty before assembly"};
+                    return;
+                }
+            } else if (loadedSequence) {
+                for (int attempt = 0; attempt < 40; attempt++) {
+                    [[NSRunLoop currentRunLoop] runUntilDate:
+                        [NSDate dateWithTimeIntervalSinceNow:0.1]];
+                    buildTimeline = SpliceKit_getActiveTimelineModule();
+                    if (!buildTimeline) continue;
+                    id activeSequence = [buildTimeline respondsToSelector:@selector(sequence)]
+                        ? ((id (*)(id, SEL))objc_msgSend)(buildTimeline, @selector(sequence))
+                        : nil;
+                    NSString *activeName = [activeSequence respondsToSelector:@selector(displayName)]
+                        ? ((id (*)(id, SEL))objc_msgSend)(activeSequence, @selector(displayName))
+                        : nil;
+                    if (activeName.length > 0 && [activeName isEqualToString:destinationProjectName]) {
+                        break;
+                    }
+                    buildTimeline = nil;
+                }
+            }
+
+            NSUInteger omittedSegments = 0;
+            NSUInteger appliedSegments = 0;
+            NSUInteger failedSegments = 0;
+            long long builtDurationFrames = 0;
+            NSMutableDictionary *nativeErrors = [NSMutableDictionary dictionary];
+
+            if (loadedSequence && buildTimeline) {
+                for (NSMutableDictionary *entry in plan) {
+                    if ([entry[@"status"] isEqualToString:@"gap"]) {
+                        entry[@"status"] = @"omitted";
+                        entry[@"reason"] = entry[@"reason"] ?: @"No eligible browser clip was available for this beat span";
+                        omittedSegments++;
+                        continue;
+                    }
+
+                    NSString *clipHandle = [entry[@"clipHandle"] isKindOfClass:[NSString class]] ? entry[@"clipHandle"] : @"";
+                    id sourceClip = clipHandle.length > 0 ? SpliceKit_resolveHandle(clipHandle) : nil;
+                    if (!sourceClip) {
+                        entry[@"status"] = @"failed";
+                        entry[@"reason"] = @"Source clip handle could not be resolved";
+                        failedSegments++;
+                        continue;
+                    }
+
+                    SpliceKit_CMTimeRange sourceClipRange = SpliceKit_clipRangeForItem(sourceClip);
+                    int32_t segmentTimescale = sourceClipRange.start.timescale > 0
+                        ? sourceClipRange.start.timescale
+                        : (sourceClipRange.duration.timescale > 0
+                            ? sourceClipRange.duration.timescale
+                            : (frameDuration.timescale > 0 ? frameDuration.timescale : 6000));
+                    double inSeconds = [entry[@"inFrames"] longLongValue] * frameSeconds;
+                    double durationSeconds = [entry[@"durationFrames"] longLongValue] * frameSeconds;
+                    SpliceKit_CMTimeRange segmentRange = sourceClipRange;
+                    segmentRange.start = SpliceKit_addSecondsToCMTime(sourceClipRange.start, inSeconds);
+                    segmentRange.duration = SpliceKit_makeCMTimeWithTimescale(durationSeconds, segmentTimescale);
+
+                    NSDictionary *sourcePrep = SpliceKit_prepareBrowserClipSourceForInsertion(sourceClip, segmentRange, NO) ?: @{};
+                    if (![sourcePrep[@"ok"] boolValue]) {
+                        entry[@"status"] = @"failed";
+                        entry[@"reason"] = [sourcePrep[@"error"] isKindOfClass:[NSString class]]
+                            ? sourcePrep[@"error"] : @"Failed to prepare the browser clip segment";
+                        failedSegments++;
+                        continue;
+                    }
+
+                    NSDictionary *editDiag = SpliceKit_performPreparedMediaEdit(
+                        buildTimeline,
+                        2,
+                        NO,
+                        @"all",
+                        NO,
+                        SpliceKit_makeCMTimeWithTimescale(0.0, frameDuration.timescale));
+                    if (![editDiag[@"ok"] boolValue]) {
+                        entry[@"status"] = @"failed";
+                        entry[@"reason"] = [editDiag[@"error"] isKindOfClass:[NSString class]]
+                            ? editDiag[@"error"] : @"Native append edit failed";
+                        failedSegments++;
+                        continue;
+                    }
+
+                    entry[@"status"] = @"applied";
+                    entry[@"nativeAction"] = @"appendWithSelectedMedia:";
+                    builtDurationFrames += [entry[@"durationFrames"] longLongValue];
+                    appliedSegments++;
+                }
+            } else {
+                nativeErrors[@"project"] = [nativeProject[@"error"] isKindOfClass:[NSString class]]
+                    ? nativeProject[@"error"] : @"Failed to create or load the native target project";
+            }
+
+            BOOL songAudioInserted = NO;
+            NSString *songAudioError = @"";
+            NSDictionary *songAudioPrep = @{};
+            NSDictionary *songAudioEdit = @{};
+            if (loadedSequence && buildTimeline && includeAudio && sourceInsertObject && builtDurationFrames > 0) {
+                double targetSongSeconds = MIN(sourceDuration, builtDurationFrames * frameSeconds);
+                int32_t songTimescale = sourceClipRange.duration.timescale > 0
+                    ? sourceClipRange.duration.timescale
+                    : (frameDuration.timescale > 0 ? frameDuration.timescale : 6000);
+                SpliceKit_CMTimeRange songInsertRange = sourceClipRange;
+                songInsertRange.duration = SpliceKit_makeCMTimeWithTimescale(targetSongSeconds, songTimescale);
+
+                songAudioPrep = SpliceKit_prepareBrowserClipSourceForInsertion(sourceInsertObject, songInsertRange, YES) ?: @{};
+                if (![songAudioPrep[@"ok"] boolValue]) {
+                    songAudioError = [songAudioPrep[@"error"] isKindOfClass:[NSString class]]
+                        ? songAudioPrep[@"error"] : @"Could not prepare the source song for insertion";
+                } else {
+                    SpliceKit_CMTime zero = SpliceKit_makeCMTimeWithTimescale(0.0, frameDuration.timescale);
+                    songAudioEdit = SpliceKit_performPreparedMediaEdit(
+                        buildTimeline,
+                        3,
+                        NO,
+                        @"audio",
+                        YES,
+                        zero) ?: @{};
+                    songAudioInserted = [songAudioEdit[@"ok"] boolValue];
+                    if (!songAudioInserted) {
+                        songAudioError = [songAudioEdit[@"error"] isKindOfClass:[NSString class]]
+                            ? songAudioEdit[@"error"] : @"Native song connect edit failed";
+                    } else {
+                        SEL setPlayheadSel = NSSelectorFromString(@"setPlayheadTime:");
+                        if ([buildTimeline respondsToSelector:setPlayheadSel]) {
+                            ((void (*)(id, SEL, SpliceKit_CMTime))objc_msgSend)(buildTimeline, setPlayheadSel, zero);
+                        }
+                        SEL commitSel = NSSelectorFromString(@"setCommittedPlayheadTime:");
+                        if ([buildTimeline respondsToSelector:commitSel]) {
+                            ((void (*)(id, SEL, SpliceKit_CMTime))objc_msgSend)(buildTimeline, commitSel, zero);
+                        }
+                    }
+                }
+            } else if (includeAudio && !sourceInsertObject) {
+                songAudioError = @"Couldn't resolve the selected beat source song for native insertion";
+            } else if (includeAudio && builtDurationFrames <= 0) {
+                songAudioError = @"No video segments were appended, so the song was not connected";
+            }
+
+            result = @{
+                @"status": @"ok",
+                @"dryRun": @NO,
+                @"grid": grid,
+                @"projectName": destinationProjectName,
+                @"randomSeed": @(randomSeed),
+                @"segmentMinStep": @(segmentMinStep),
+                @"segmentMaxStep": @(segmentMaxStep),
+                @"allowClipReuse": @(allowClipReuse),
+                @"targetCurrentTimeline": @(targetCurrentTimeline),
+                @"source": @{
+                    @"handle": SpliceKit_storeHandle(sourceItem),
+                    @"name": sourceEntry[@"name"] ?: @"",
+                    @"tempo": @(tempo),
+                    @"duration": @(sourceDuration),
+                },
+                @"segmentCount": @(plan.count),
+                @"assignedClipCount": @(assignedClipCount),
+                @"appliedClipCount": @(appliedSegments),
+                @"failedSegmentCount": @(failedSegments),
+                @"omittedSegmentCount": @(omittedSegments),
+                @"gapCount": @0,
+                @"clipPoolCount": @(clipPool.count),
+                @"buildMethod": buildMode,
+                @"projectFound": @(importedSequence != nil),
+                @"projectLoaded": @(loadedSequence && buildTimeline != nil),
+                @"nativeProject": nativeProjectResult ?: @{},
+                @"nativeErrors": nativeErrors,
+                @"songAudioInserted": @(songAudioInserted),
+                @"songAudioError": songAudioError ?: @"",
+                @"songAudioPrep": songAudioPrep ?: @{},
+                @"songAudioEdit": songAudioEdit ?: @{},
+                @"projectHandle": importedSequence ? SpliceKit_storeHandle(importedSequence) : @"",
+                @"plan": plan,
+            };
+        } @catch (NSException *e) {
+            result = @{@"error": [NSString stringWithFormat:@"Exception: %@", e.reason]};
+        }
+    });
+
+    return result ?: @{@"error": @"Failed to assemble random clips to song beats"};
 }
 
 // ---------- 1. flexmusic.listSongs ----------
@@ -21521,6 +24195,10 @@ NSDictionary *SpliceKit_handleRequest(NSDictionary *request) {
         result = SpliceKit_handleBatchAddMarkers(params);
     } else if ([method isEqualToString:@"timeline.bladeAtTimes"]) {
         result = SpliceKit_handleBladeAtTimes(params);
+    } else if ([method isEqualToString:@"timeline.trimClipsToBeats"]) {
+        result = SpliceKit_handleTrimClipsToBeats(params);
+    } else if ([method isEqualToString:@"timeline.assembleRandomClipsToBeats"]) {
+        result = SpliceKit_handleAssembleRandomClipsToBeats(params);
     } else if ([method isEqualToString:@"timeline.batchActions"]) {
         result = SpliceKit_handleBatchActions(params);
     } else if ([method isEqualToString:@"timeline.batchExport"]) {

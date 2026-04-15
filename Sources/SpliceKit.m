@@ -22,6 +22,8 @@
 #import <signal.h>
 #import <execinfo.h>
 #import <time.h>
+#import <setjmp.h>
+#import <pthread.h>
 
 extern NSDictionary *SpliceKit_handleTimelineAction(NSDictionary *params);
 extern NSDictionary *SpliceKit_handleFCPXMLExport(NSDictionary *params);
@@ -2752,6 +2754,80 @@ static id SpliceKit_toolbar_itemForItemIdentifier(id self, SEL _cmd, NSToolbar *
 // point — you'll get nil back from objc_getClass for anything in Flexo.framework.
 //
 
+// ---------------------------------------------------------------------------
+// Safe install wrapper — catches SIGSEGV/SIGBUS during feature install so a
+// single broken swizzle doesn't bring down the whole process.
+//
+// Uses sigsetjmp/siglongjmp: set a recovery point, temporarily swap the signal
+// handler, call the install function.  If it crashes, the handler longjmps back,
+// logs which feature failed, and startup continues with the next one.
+//
+// Only used during startup on the main thread.  Thread identity is checked in
+// the handler so a stray crash on another thread still hits the normal path.
+// ---------------------------------------------------------------------------
+
+static sigjmp_buf sSafeInstallJmpBuf;
+static pthread_t  sSafeInstallThread;
+static volatile sig_atomic_t sSafeInstallActive = 0;
+
+static void SpliceKit_safeInstallHandler(int sig, siginfo_t *info, void *ctx) {
+    if (sSafeInstallActive && pthread_equal(pthread_self(), sSafeInstallThread)) {
+        sSafeInstallActive = 0;
+        siglongjmp(sSafeInstallJmpBuf, sig);
+    }
+    // Not our context — restore default and re-raise so the normal crash
+    // handler (or macOS crash reporter) picks it up.
+    signal(sig, SIG_DFL);
+    raise(sig);
+}
+
+BOOL SpliceKit_safeInstall(const char *featureName, void (^block)(void)) {
+    struct sigaction sa, prevSEGV, prevBUS;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_sigaction = SpliceKit_safeInstallHandler;
+    sa.sa_flags     = SA_SIGINFO;
+    sigemptyset(&sa.sa_mask);
+
+    sigaction(SIGSEGV, &sa, &prevSEGV);
+    sigaction(SIGBUS,  &sa, &prevBUS);
+
+    sSafeInstallThread = pthread_self();
+    sSafeInstallActive = 1;
+
+    int sig = sigsetjmp(sSafeInstallJmpBuf, 1);
+    if (sig == 0) {
+        // Normal path — attempt the install
+        @try {
+            block();
+        } @catch (NSException *e) {
+            sSafeInstallActive = 0;
+            sigaction(SIGSEGV, &prevSEGV, NULL);
+            sigaction(SIGBUS,  &prevBUS,  NULL);
+            SpliceKit_log(@"[SafeInstall] %s threw %@: %@ — feature disabled",
+                          featureName, e.name, e.reason);
+            return NO;
+        }
+        sSafeInstallActive = 0;
+        sigaction(SIGSEGV, &prevSEGV, NULL);
+        sigaction(SIGBUS,  &prevBUS,  NULL);
+        return YES;
+    } else {
+        // Crash recovery — handler did siglongjmp back here.
+        // Unblock the signal (blocked automatically during handler execution).
+        sigset_t unblock;
+        sigemptyset(&unblock);
+        sigaddset(&unblock, SIGSEGV);
+        sigaddset(&unblock, SIGBUS);
+        pthread_sigmask(SIG_UNBLOCK, &unblock, NULL);
+
+        sigaction(SIGSEGV, &prevSEGV, NULL);
+        sigaction(SIGBUS,  &prevBUS,  NULL);
+        SpliceKit_log(@"[SafeInstall] %s crashed (signal %d) — feature auto-disabled",
+                      featureName, sig);
+        return NO;
+    }
+}
+
 static void SpliceKit_appDidLaunch(void) {
     SpliceKit_log(@"================================================");
     SpliceKit_log(@"App launched. Starting control server...");
@@ -2763,8 +2839,10 @@ static void SpliceKit_appDidLaunch(void) {
     // Install focused editor routing before commands and menus start querying
     // activeEditorContainer, so the secondary timeline can participate in the
     // normal responder path.
-    SpliceKit_installDualTimeline();
-    SpliceKit_installDualTimelineCrossWindowDrag();
+    SpliceKit_safeInstall("DualTimeline", ^{
+        SpliceKit_installDualTimeline();
+        SpliceKit_installDualTimelineCrossWindowDrag();
+    });
 
     // Count total loaded classes
     unsigned int classCount = 0;
@@ -2784,7 +2862,9 @@ static void SpliceKit_appDidLaunch(void) {
 
     // Install effect-drag-as-adjustment-clip swizzle (allows dragging effects
     // to empty timeline space to create adjustment clips)
-    SpliceKit_installEffectDragAsAdjustmentClip();
+    SpliceKit_safeInstall("EffectDragAsAdjustmentClip", ^{
+        SpliceKit_installEffectDragAsAdjustmentClip();
+    });
 
     // Install viewer pinch-to-zoom if previously enabled
     if (SpliceKit_isViewerPinchZoomEnabled()) {
@@ -2847,7 +2927,9 @@ static void SpliceKit_appDidLaunch(void) {
     SpliceKit_installDebugMenuBar();
 
     // Install right-click context menu for structure block color changes
-    SpliceKit_installStructureBlockContextMenu();
+    SpliceKit_safeInstall("StructureBlockContextMenu", ^{
+        SpliceKit_installStructureBlockContextMenu();
+    });
 
     // Start the control server on a background thread
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
@@ -2855,9 +2937,12 @@ static void SpliceKit_appDidLaunch(void) {
     });
 
     // Initialize Lua scripting VM
-    SpliceKitLua_initialize();
+    SpliceKit_safeInstall("LuaVM", ^{
+        SpliceKitLua_initialize();
+    });
 
     // Load plugins from ~/Library/Application Support/SpliceKit/plugins/
+    // Native plugins load independently of Lua — don't gate on Lua success.
     SpliceKitPlugins_loadAll();
 }
 

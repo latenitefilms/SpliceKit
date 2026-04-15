@@ -62,6 +62,14 @@ NSDictionary *SpliceKit_sequenceIdentity(id sequence);
 NSDictionary *SpliceKit_loadSequenceState(id sequence);
 BOOL SpliceKit_saveSequenceState(id sequence, NSDictionary *state, NSError **error);
 
+#pragma mark - Safe Install
+
+// Execute a feature install block with crash recovery.  If the block triggers
+// SIGSEGV or SIGBUS, catches it via sigsetjmp/siglongjmp, logs the failure,
+// and returns NO so startup can continue.  Returns YES on success.
+// Only call from the main thread during startup.
+BOOL SpliceKit_safeInstall(const char *featureName, void (^block)(void));
+
 #pragma mark - Swizzling
 
 // Swap a method implementation and stash the original so we can put it back later.
@@ -185,6 +193,7 @@ NSString *SpliceKit_getDefaultSpatialConformType(void);
 // window currently has focus.
 void SpliceKit_installDualTimeline(void);
 void SpliceKit_installDualTimelineCrossWindowDrag(void);
+BOOL SpliceKit_isDualTimelineInstalled(void);
 NSString *SpliceKit_dualTimelineSecondaryIdentifier(void);
 id SpliceKit_dualTimelineFocusedEditorContainer(void);
 id SpliceKit_dualTimelinePrimaryEditorContainer(void);

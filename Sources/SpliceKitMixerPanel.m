@@ -44,6 +44,8 @@ typedef struct { SKMixer_CMTime start; SKMixer_CMTime duration; } SKMixer_CMTime
 NSMutableDictionary *sMeterLevels = nil; // roleUID -> @(peakLinear)
 
 static const char kMeterRoleUIDKey = 0; // associated object key
+static const NSInteger kSpliceKitMixerMaxFaders = 12;
+static const CGFloat kSpliceKitMixerFaderWidth = 92.0;
 
 @interface SpliceKitMeterObserver : NSObject
 @property (nonatomic, strong) NSString *roleUID;
@@ -1056,7 +1058,7 @@ static double SKMixerDisplayedPeakForUpdate(double currentPeak,
 - (void)setupPanelIfNeeded {
     if (self.panel) return;
 
-    NSRect frame = NSMakeRect(160, 140, 1180, 760);
+    NSRect frame = NSMakeRect(160, 140, 1360, 760);
     NSUInteger styleMask = NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
                            NSWindowStyleMaskResizable | NSWindowStyleMaskUtilityWindow;
 
@@ -1101,7 +1103,7 @@ static double SKMixerDisplayedPeakForUpdate(double currentPeak,
     mainStack.spacing = 6;
     [content addSubview:mainStack];
 
-    self.masterFaderView = [[SpliceKitFaderView alloc] initWithFrame:NSMakeRect(0, 0, 92, 640) index:-1];
+    self.masterFaderView = [[SpliceKitFaderView alloc] initWithFrame:NSMakeRect(0, 0, kSpliceKitMixerFaderWidth, 640) index:-1];
     __weak SpliceKitMixerPanel *weakSelf = self;
     self.masterFaderView.onDragStart = ^{
         [weakSelf beginMasterVolumeChange];
@@ -1113,7 +1115,7 @@ static double SKMixerDisplayedPeakForUpdate(double currentPeak,
         [weakSelf endMasterVolumeChange];
     };
     [mainStack addArrangedSubview:self.masterFaderView];
-    [[self.masterFaderView.widthAnchor constraintEqualToConstant:92] setActive:YES];
+    [[self.masterFaderView.widthAnchor constraintEqualToConstant:kSpliceKitMixerFaderWidth] setActive:YES];
 
     NSView *separator = [[NSView alloc] initWithFrame:NSZeroRect];
     separator.translatesAutoresizingMaskIntoConstraints = NO;
@@ -1129,11 +1131,11 @@ static double SKMixerDisplayedPeakForUpdate(double currentPeak,
     faderStack.spacing = 1;
     [mainStack addArrangedSubview:faderStack];
 
-    // Create 10 faders
+    // Create enough faders for stress fixtures with many independent audio roles.
     self.faderViews = [NSMutableArray array];
-    for (NSInteger i = 0; i < 10; i++) {
+    for (NSInteger i = 0; i < kSpliceKitMixerMaxFaders; i++) {
         SpliceKitFaderView *fv = [[SpliceKitFaderView alloc]
-            initWithFrame:NSMakeRect(0, 0, 92, 640) index:i];
+            initWithFrame:NSMakeRect(0, 0, kSpliceKitMixerFaderWidth, 640) index:i];
 
         NSInteger idx = i;
         fv.onDragStart = ^{
@@ -1160,7 +1162,7 @@ static double SKMixerDisplayedPeakForUpdate(double currentPeak,
 
         [faderStack addArrangedSubview:fv];
         [self.faderViews addObject:fv];
-        [[fv.widthAnchor constraintEqualToConstant:92] setActive:YES];
+        [[fv.widthAnchor constraintEqualToConstant:kSpliceKitMixerFaderWidth] setActive:YES];
     }
 
     // Layout — faders fill the whole window
@@ -1200,6 +1202,7 @@ static double SKMixerDisplayedPeakForUpdate(double currentPeak,
     } @catch (NSException *e) {
         SpliceKit_log(@"[Mixer] Poll exception: %@ - %@", e.name, e.reason);
         [self clearAllFaders];
+        self.isPolling = NO;
     }
 }
 
@@ -1287,7 +1290,7 @@ static double SKMixerDisplayedPeakForUpdate(double currentPeak,
     }
     [self.masterFaderView updateFromState];
 
-    for (NSInteger i = 0; i < 10; i++) {
+    for (NSInteger i = 0; i < (NSInteger)self.faderViews.count; i++) {
         SpliceKitFaderView *fv = self.faderViews[i];
         BOOL dragging = fv.state.isDragging;
 

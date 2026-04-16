@@ -28,16 +28,47 @@ ENTITLEMENTS = entitlements.plist
 SILENCE_DETECTOR = $(BUILD_DIR)/silence-detector
 STRUCTURE_ANALYZER = $(BUILD_DIR)/structure-analyzer
 MIXER_APP = $(BUILD_DIR)/SpliceKitMixer
+AUDIO_BUS_PROBE_DIR = tools/audio-bus-probe-au
+AUDIO_BUS_PROBE_COMPONENT = $(BUILD_DIR)/SpliceKitAudioBusProbe.component
+AUDIO_BUS_PROBE_BINARY = $(AUDIO_BUS_PROBE_COMPONENT)/Contents/MacOS/SpliceKitAudioBusProbe
+AUDIO_BUS_PROBE_INFO = $(AUDIO_BUS_PROBE_DIR)/Info.plist
+AUDIO_BUS_PROBE_SOURCE = $(AUDIO_BUS_PROBE_DIR)/SpliceKitAudioBusProbe.c
+AUDIO_BUS_PROBE_INSTALL_DIR = $(HOME)/Library/Audio/Plug-Ins/Components
 TOOLS_DIR = $(HOME)/Applications/SpliceKit/tools
 PARAKEET_PKG_DIR = patcher/SpliceKitPatcher.app/Contents/Resources/tools/parakeet-transcriber
 PARAKEET_RELEASE_BIN = $(PARAKEET_PKG_DIR)/.build/release/parakeet-transcriber
 PARAKEET_DEBUG_BIN = $(PARAKEET_PKG_DIR)/.build/debug/parakeet-transcriber
 
-.PHONY: all clean deploy launch tools
+.PHONY: all clean deploy launch tools audio-bus-probe install-audio-bus-probe uninstall-audio-bus-probe
 
 all: $(OUTPUT)
 
 tools: $(SILENCE_DETECTOR) $(STRUCTURE_ANALYZER) $(MIXER_APP)
+
+audio-bus-probe: $(AUDIO_BUS_PROBE_BINARY)
+	@echo "Built: $(AUDIO_BUS_PROBE_COMPONENT)"
+
+$(AUDIO_BUS_PROBE_BINARY): $(AUDIO_BUS_PROBE_SOURCE) $(AUDIO_BUS_PROBE_INFO) | $(BUILD_DIR)
+	@mkdir -p "$(AUDIO_BUS_PROBE_COMPONENT)/Contents/MacOS"
+	@cp "$(AUDIO_BUS_PROBE_INFO)" "$(AUDIO_BUS_PROBE_COMPONENT)/Contents/Info.plist"
+	$(CC) $(ARCHS) $(MIN_VERSION) -std=c11 -O2 -Wall -Wextra -Wno-deprecated-declarations \
+		-fvisibility=hidden -dynamiclib \
+		-framework AudioToolbox -framework AudioUnit -framework CoreAudio -framework CoreFoundation -framework CoreServices \
+		"$(AUDIO_BUS_PROBE_SOURCE)" -o "$(AUDIO_BUS_PROBE_BINARY)"
+	@codesign --force --sign - "$(AUDIO_BUS_PROBE_COMPONENT)" >/dev/null
+
+install-audio-bus-probe: audio-bus-probe
+	@mkdir -p "$(AUDIO_BUS_PROBE_INSTALL_DIR)"
+	@rm -rf "$(AUDIO_BUS_PROBE_INSTALL_DIR)/SpliceKitAudioBusProbe.component"
+	@cp -R "$(AUDIO_BUS_PROBE_COMPONENT)" "$(AUDIO_BUS_PROBE_INSTALL_DIR)/SpliceKitAudioBusProbe.component"
+	@codesign --force --sign - "$(AUDIO_BUS_PROBE_INSTALL_DIR)/SpliceKitAudioBusProbe.component" >/dev/null
+	@killall -9 AudioComponentRegistrar >/dev/null 2>&1 || true
+	@echo "Installed: $(AUDIO_BUS_PROBE_INSTALL_DIR)/SpliceKitAudioBusProbe.component"
+
+uninstall-audio-bus-probe:
+	@rm -rf "$(AUDIO_BUS_PROBE_INSTALL_DIR)/SpliceKitAudioBusProbe.component"
+	@killall -9 AudioComponentRegistrar >/dev/null 2>&1 || true
+	@echo "Uninstalled: $(AUDIO_BUS_PROBE_INSTALL_DIR)/SpliceKitAudioBusProbe.component"
 
 $(BUILD_DIR):
 	@mkdir -p $(BUILD_DIR)

@@ -84,9 +84,9 @@ static NSDictionary *SpliceKit_removeAllKeyframesFromEffectStack(id effectStack,
 static NSArray *SpliceKit_mixerArrayFromContainer(id value);
 static BOOL SpliceKit_mixerIsCollectionLike(id item);
 static BOOL SpliceKit_mixerIsSkippableItem(id item);
-static void SpliceKit_mixerReconcileManagedBusEffects(NSArray<NSDictionary *> *allClips);
-static NSArray<NSDictionary *> *SpliceKit_mixerManagedBusEffectSummariesForRole(NSString *role);
-static void SpliceKit_mixerAdoptExistingBusEffectsForRole(NSString *role, NSArray<NSDictionary *> *busTargets);
+static void SpliceKit_mixerReconcileManagedBusEffects(NSArray<NSDictionary *> *allClips, NSString *scopeKey);
+static NSArray<NSDictionary *> *SpliceKit_mixerManagedBusEffectSummariesForRole(NSString *role, NSString *scopeKey);
+static void SpliceKit_mixerAdoptExistingBusEffectsForRole(NSString *role, NSString *scopeKey, NSArray<NSDictionary *> *busTargets);
 static NSInteger SpliceKit_mixerIndexOfEffectInStack(id effectStack, id effect);
 static id SpliceKit_mixerFirstManagedEffectInstance(NSMutableDictionary *entry,
                                                     id *outStack,
@@ -15310,6 +15310,18 @@ static NSArray<NSDictionary *> *SpliceKit_mixerBusTargetsForRoleObjects(NSArray 
 static NSMutableDictionary<NSString *, NSMutableArray<NSMutableDictionary *> *> *sMixerManagedBusEffects = nil;
 static BOOL sMixerManagedBusReconciling = NO;
 
+static NSString *SpliceKit_mixerManagedBusScopeKey(id sequence, id rootObject) {
+    NSString *sequenceKey = SpliceKit_handlePointerKey(sequence) ?: @"";
+    NSString *rootKey = SpliceKit_handlePointerKey(rootObject) ?: @"";
+    if (sequenceKey.length == 0 && rootKey.length == 0) return @"";
+    return [NSString stringWithFormat:@"seq:%@|root:%@", sequenceKey, rootKey.length > 0 ? rootKey : sequenceKey];
+}
+
+static BOOL SpliceKit_mixerManagedBusEntryMatchesScope(NSDictionary *entry, NSString *scopeKey) {
+    NSString *entryScope = [entry[@"scopeKey"] isKindOfClass:[NSString class]] ? entry[@"scopeKey"] : @"";
+    return entryScope.length > 0 && scopeKey.length > 0 && [entryScope isEqualToString:scopeKey];
+}
+
 static NSMutableDictionary<NSString *, NSMutableArray<NSMutableDictionary *> *> *SpliceKit_mixerManagedBusRegistry(void) {
     if (!sMixerManagedBusEffects) sMixerManagedBusEffects = [NSMutableDictionary dictionary];
     return sMixerManagedBusEffects;
@@ -15324,6 +15336,53 @@ static NSMutableArray<NSMutableDictionary *> *SpliceKit_mixerManagedBusEntriesFo
         registry[role] = entries;
     }
     return entries;
+}
+
+static NSArray<NSMutableDictionary *> *SpliceKit_mixerManagedBusEntriesForRoleInScope(NSString *role, NSString *scopeKey) {
+    NSMutableArray *entries = SpliceKit_mixerManagedBusEntriesForRole(role, NO);
+    if (entries.count == 0 || scopeKey.length == 0) return @[];
+
+    NSMutableArray *scoped = [NSMutableArray array];
+    for (NSMutableDictionary *entry in [entries copy]) {
+        if (SpliceKit_mixerManagedBusEntryMatchesScope(entry, scopeKey)) {
+            [scoped addObject:entry];
+        }
+    }
+    return scoped;
+}
+
+static BOOL SpliceKit_mixerManagedBusRegistryHasEntriesForScope(NSString *scopeKey) {
+    if (scopeKey.length == 0 || sMixerManagedBusEffects.count == 0) return NO;
+    for (NSString *role in [[sMixerManagedBusEffects allKeys] copy]) {
+        if (SpliceKit_mixerManagedBusEntriesForRoleInScope(role, scopeKey).count > 0) {
+            return YES;
+        }
+    }
+    return NO;
+}
+
+static NSArray<NSString *> *SpliceKit_mixerManagedBusRolesForScope(NSString *scopeKey) {
+    if (scopeKey.length == 0 || sMixerManagedBusEffects.count == 0) return @[];
+    NSMutableArray<NSString *> *roles = [NSMutableArray array];
+    for (NSString *role in [[[sMixerManagedBusEffects allKeys] copy] sortedArrayUsingSelector:@selector(localizedCaseInsensitiveCompare:)]) {
+        if (SpliceKit_mixerManagedBusEntriesForRoleInScope(role, scopeKey).count > 0) {
+            [roles addObject:role];
+        }
+    }
+    return roles;
+}
+
+static void SpliceKit_mixerAddManagedBusRolesToRoleOrder(NSMutableOrderedSet *roleOrder, NSString *scopeKey) {
+    if (!roleOrder || scopeKey.length == 0) return;
+    for (NSString *role in SpliceKit_mixerManagedBusRolesForScope(scopeKey)) {
+        if (role.length > 0) [roleOrder addObject:role];
+    }
+}
+
+static void SpliceKit_mixerPruneManagedBusRole(NSString *role) {
+    if (role.length == 0 || !sMixerManagedBusEffects) return;
+    NSMutableArray *entries = sMixerManagedBusEffects[role];
+    if (entries.count == 0) [sMixerManagedBusEffects removeObjectForKey:role];
 }
 
 static NSString *SpliceKit_mixerEffectStringValue(id effect, NSString *selectorName) {
@@ -15350,7 +15409,9 @@ static BOOL SpliceKit_mixerEffectMatchesManagedEntry(id effect, NSDictionary *en
     return entryName.length > 0 && name.length > 0 && [entryName isEqualToString:name];
 }
 
-static NSMutableDictionary *SpliceKit_mixerNewManagedBusEntry(NSString *role, NSDictionary *effect) {
+static NSMutableDictionary *SpliceKit_mixerNewManagedBusEntry(NSString *role,
+                                                              NSString *scopeKey,
+                                                              NSDictionary *effect) {
     NSString *effectID = [effect[@"effectID"] isKindOfClass:[NSString class]] ? effect[@"effectID"] : @"";
     NSString *name = [effect[@"name"] isKindOfClass:[NSString class]] ? effect[@"name"] : effectID;
     if (name.length == 0) name = @"Effect";
@@ -15358,6 +15419,7 @@ static NSMutableDictionary *SpliceKit_mixerNewManagedBusEntry(NSString *role, NS
     NSMutableDictionary *entry = [@{
         @"busEffectID": [[NSUUID UUID] UUIDString],
         @"role": role ?: @"",
+        @"scopeKey": scopeKey ?: @"",
         @"effectID": effectID ?: @"",
         @"name": name,
         @"enabled": @YES,
@@ -15495,6 +15557,14 @@ static BOOL SpliceKit_mixerSetEffectEnabledInStack(id effect, id effectStack, BO
     if (![effect respondsToSelector:setEnabledSel]) return NO;
 
     @try {
+        SEL enabledSel = NSSelectorFromString(@"enabled");
+        if ([effect respondsToSelector:enabledSel]) {
+            BOOL currentEnabled = ((BOOL (*)(id, SEL))objc_msgSend)(effect, enabledSel);
+            if (currentEnabled == enabled) return YES;
+        }
+    } @catch (NSException *e) {}
+
+    @try {
         SEL beginSel = NSSelectorFromString(@"actionBegin:animationHint:deferUpdates:");
         if ([effectStack respondsToSelector:beginSel]) {
             ((void (*)(id, SEL, id, id, BOOL))objc_msgSend)(
@@ -15541,6 +15611,17 @@ static id SpliceKit_mixerCopyEffectSelectorValue(id effect, NSString *selectorNa
     return nil;
 }
 
+static BOOL SpliceKit_mixerObjectsDiffer(id current, id next) {
+    if (current == next) return NO;
+    if (!current || !next) return YES;
+    @try {
+        if ([current respondsToSelector:@selector(isEqual:)]) {
+            return ![current isEqual:next];
+        }
+    } @catch (NSException *e) {}
+    return YES;
+}
+
 static NSDictionary *SpliceKit_mixerAudioEffectStateSnapshot(id effect) {
     if (!effect) return nil;
     NSMutableDictionary *snapshot = [NSMutableDictionary dictionary];
@@ -15558,8 +15639,11 @@ static BOOL SpliceKit_mixerApplyAudioEffectStateSnapshot(id effect, id effectSta
         id effectState = snapshot[@"effectState"];
         SEL setEffectStateSel = NSSelectorFromString(@"setEffectState:");
         if (effectState && [effect respondsToSelector:setEffectStateSel]) {
-            ((void (*)(id, SEL, id))objc_msgSend)(effect, setEffectStateSel, effectState);
-            changed = YES;
+            id current = SpliceKit_mixerCopyEffectSelectorValue(effect, @"effectState");
+            if (SpliceKit_mixerObjectsDiffer(current, effectState)) {
+                ((void (*)(id, SEL, id))objc_msgSend)(effect, setEffectStateSel, effectState);
+                changed = YES;
+            }
         }
     } @catch (NSException *e) {}
 
@@ -15567,8 +15651,11 @@ static BOOL SpliceKit_mixerApplyAudioEffectStateSnapshot(id effect, id effectSta
         id parameterInfoMap = snapshot[@"parameterInfoMap"];
         SEL setParameterInfoMapSel = NSSelectorFromString(@"setParameterInfoMap:");
         if (parameterInfoMap && [effect respondsToSelector:setParameterInfoMapSel]) {
-            ((void (*)(id, SEL, id))objc_msgSend)(effect, setParameterInfoMapSel, parameterInfoMap);
-            changed = YES;
+            id current = SpliceKit_mixerCopyEffectSelectorValue(effect, @"parameterInfoMap");
+            if (SpliceKit_mixerObjectsDiffer(current, parameterInfoMap)) {
+                ((void (*)(id, SEL, id))objc_msgSend)(effect, setParameterInfoMapSel, parameterInfoMap);
+                changed = YES;
+            }
         }
     } @catch (NSException *e) {}
 
@@ -15658,6 +15745,28 @@ static void SpliceKit_mixerUpdateObjectAfterBusEffectMutation(id object) {
     }
 }
 
+static id SpliceKit_mixerFindManagedEffectOnObject(NSMutableDictionary *entry,
+                                                   id object,
+                                                   id *outStack,
+                                                   NSInteger *outEffectIndex) {
+    if (!entry || !object) return nil;
+    id effectStack = SpliceKit_mixerBusEffectStackForObject(object);
+    if (!effectStack) return nil;
+
+    NSArray *effects = SpliceKit_mixerEffectsInStack(effectStack);
+    for (NSUInteger idx = 0; idx < effects.count; idx++) {
+        id effect = effects[idx];
+        if (!SpliceKit_mixerEffectMatchesManagedEntry(effect, entry)) continue;
+
+        SpliceKit_mixerRememberManagedInstance(entry, object, effectStack, effect);
+        if (outStack) *outStack = effectStack;
+        if (outEffectIndex) *outEffectIndex = (NSInteger)idx;
+        return effect;
+    }
+
+    return nil;
+}
+
 static id SpliceKit_mixerTrackedEffectForObject(NSMutableDictionary *entry,
                                                 id object,
                                                 id *outStack,
@@ -15688,7 +15797,7 @@ static id SpliceKit_mixerTrackedEffectForObject(NSMutableDictionary *entry,
         [instances removeObject:instance];
     }
 
-    return nil;
+    return SpliceKit_mixerFindManagedEffectOnObject(entry, object, outStack, outEffectIndex);
 }
 
 static id SpliceKit_mixerFirstManagedEffectInstance(NSMutableDictionary *entry,
@@ -15711,9 +15820,61 @@ static id SpliceKit_mixerFirstManagedEffectInstance(NSMutableDictionary *entry,
             if (outEffectIndex) *outEffectIndex = effectIndex;
             return effect;
         }
+        NSString *objectHandle = [instance[@"objectHandle"] isKindOfClass:[NSString class]] ? instance[@"objectHandle"] : @"";
+        id object = objectHandle.length > 0 ? SpliceKit_resolveHandle(objectHandle) : nil;
+        id recovered = SpliceKit_mixerFindManagedEffectOnObject(entry, object, outStack, outEffectIndex);
+        if (recovered) return recovered;
         [instances removeObject:instance];
     }
     return nil;
+}
+
+static NSSet<NSString *> *SpliceKit_mixerObjectKeysForBusTargets(NSArray<NSDictionary *> *busTargets) {
+    NSMutableSet<NSString *> *keys = [NSMutableSet set];
+    for (NSDictionary *target in busTargets) {
+        NSString *objectKey = SpliceKit_handlePointerKey(target[@"object"]) ?: @"";
+        if (objectKey.length > 0) [keys addObject:objectKey];
+    }
+    return keys;
+}
+
+static NSSet<NSString *> *SpliceKit_mixerObjectKeysForManagedEntry(NSDictionary *entry) {
+    NSMutableSet<NSString *> *keys = [NSMutableSet set];
+    NSArray *instances = [entry[@"instances"] isKindOfClass:[NSArray class]] ? entry[@"instances"] : @[];
+    for (NSDictionary *instance in instances) {
+        NSString *objectKey = [instance[@"objectKey"] isKindOfClass:[NSString class]] ? instance[@"objectKey"] : @"";
+        if (objectKey.length > 0) [keys addObject:objectKey];
+    }
+    return keys;
+}
+
+static BOOL SpliceKit_mixerManagedBusRoleNeedsReconcile(NSString *role,
+                                                        NSArray<NSDictionary *> *allClips,
+                                                        NSString *scopeKey) {
+    NSArray<NSMutableDictionary *> *entries = SpliceKit_mixerManagedBusEntriesForRoleInScope(role, scopeKey);
+    if (entries.count == 0) return NO;
+
+    NSArray *roleObjects = SpliceKit_mixerObjectsForRole(allClips, role);
+    NSArray<NSDictionary *> *busTargets = SpliceKit_mixerBusTargetsForRoleObjects(roleObjects, NO);
+    NSSet<NSString *> *currentObjectKeys = SpliceKit_mixerObjectKeysForBusTargets(busTargets);
+
+    for (NSDictionary *entry in entries) {
+        NSSet<NSString *> *trackedObjectKeys = SpliceKit_mixerObjectKeysForManagedEntry(entry);
+        if (![trackedObjectKeys isEqualToSet:currentObjectKeys]) {
+            return YES;
+        }
+    }
+    return NO;
+}
+
+static BOOL SpliceKit_mixerManagedBusNeedsReconcile(NSArray<NSDictionary *> *allClips, NSString *scopeKey) {
+    if (!SpliceKit_mixerManagedBusRegistryHasEntriesForScope(scopeKey)) return NO;
+    for (NSString *role in SpliceKit_mixerManagedBusRolesForScope(scopeKey)) {
+        if (SpliceKit_mixerManagedBusRoleNeedsReconcile(role, allClips, scopeKey)) {
+            return YES;
+        }
+    }
+    return NO;
 }
 
 static NSMutableDictionary *SpliceKit_mixerManagedBusEntryForID(NSString *busEffectID,
@@ -15735,8 +15896,41 @@ static NSMutableDictionary *SpliceKit_mixerManagedBusEntryForID(NSString *busEff
     return nil;
 }
 
-static NSArray<NSDictionary *> *SpliceKit_mixerManagedBusEffectSummariesForRole(NSString *role) {
+static BOOL SpliceKit_mixerBuildRoleSnapshot(id timeline,
+                                             id *outSequence,
+                                             id *outRootObject,
+                                             NSMutableArray **outAllClips,
+                                             NSMutableOrderedSet **outRoleOrder,
+                                             NSString **outError);
+
+static NSMutableDictionary *SpliceKit_mixerManagedBusEntryForRoleDisplayIndex(NSString *role,
+                                                                               NSInteger displayIndex,
+                                                                               NSUInteger *outEntryIndex) {
+    if (role.length == 0 || displayIndex < 0) return nil;
+
+    id timeline = SpliceKit_getActiveTimelineModule();
+    id sequence = nil;
+    id rootObject = nil;
+    NSMutableArray *allClips = nil;
+    NSMutableOrderedSet *roleOrder = nil;
+    NSString *snapshotError = nil;
+    if (!SpliceKit_mixerBuildRoleSnapshot(timeline, &sequence, &rootObject, &allClips, &roleOrder, &snapshotError)) {
+        return nil;
+    }
+
+    NSString *scopeKey = SpliceKit_mixerManagedBusScopeKey(sequence, rootObject);
+    NSArray<NSMutableDictionary *> *scopedEntries = SpliceKit_mixerManagedBusEntriesForRoleInScope(role, scopeKey);
+    if ((NSUInteger)displayIndex >= scopedEntries.count) return nil;
+
+    NSMutableDictionary *entry = scopedEntries[(NSUInteger)displayIndex];
     NSMutableArray *entries = SpliceKit_mixerManagedBusEntriesForRole(role, NO);
+    NSUInteger actualIndex = [entries indexOfObjectIdenticalTo:entry];
+    if (outEntryIndex) *outEntryIndex = actualIndex == NSNotFound ? (NSUInteger)displayIndex : actualIndex;
+    return entry;
+}
+
+static NSArray<NSDictionary *> *SpliceKit_mixerManagedBusEffectSummariesForRole(NSString *role, NSString *scopeKey) {
+    NSArray<NSMutableDictionary *> *entries = SpliceKit_mixerManagedBusEntriesForRoleInScope(role, scopeKey);
     if (entries.count == 0) return @[];
 
     NSMutableArray *summaries = [NSMutableArray arrayWithCapacity:entries.count];
@@ -15762,6 +15956,7 @@ static NSArray<NSDictionary *> *SpliceKit_mixerManagedBusEffectSummariesForRole(
         summary[@"busEffectID"] = [entry[@"busEffectID"] isKindOfClass:[NSString class]] ? entry[@"busEffectID"] : @"";
         summary[@"managedBus"] = @YES;
         summary[@"role"] = role ?: @"";
+        summary[@"scopeKey"] = scopeKey ?: @"";
         summary[@"targetName"] = @"Role Bus";
         if (stack) summary[@"effectStackHandle"] = SpliceKit_storeHandle(stack) ?: @"";
         [summaries addObject:summary];
@@ -15769,9 +15964,11 @@ static NSArray<NSDictionary *> *SpliceKit_mixerManagedBusEffectSummariesForRole(
     return summaries;
 }
 
-static void SpliceKit_mixerAdoptExistingBusEffectsForRole(NSString *role, NSArray<NSDictionary *> *busTargets) {
+static void SpliceKit_mixerAdoptExistingBusEffectsForRole(NSString *role,
+                                                          NSString *scopeKey,
+                                                          NSArray<NSDictionary *> *busTargets) {
     if (role.length == 0 || busTargets.count == 0) return;
-    if (SpliceKit_mixerManagedBusEntriesForRole(role, NO).count > 0) return;
+    if (SpliceKit_mixerManagedBusEntriesForRoleInScope(role, scopeKey).count > 0) return;
 
     NSMutableDictionary<NSString *, NSMutableDictionary *> *entryBySlot = [NSMutableDictionary dictionary];
     for (NSDictionary *target in busTargets) {
@@ -15789,7 +15986,7 @@ static void SpliceKit_mixerAdoptExistingBusEffectsForRole(NSString *role, NSArra
 
             NSMutableDictionary *entry = entryBySlot[slotKey];
             if (!entry) {
-                entry = SpliceKit_mixerNewManagedBusEntry(role, effectSummary);
+                entry = SpliceKit_mixerNewManagedBusEntry(role, scopeKey, effectSummary);
                 entry[@"enabled"] = effectSummary[@"enabled"] ?: @YES;
                 entry[@"adopted"] = @YES;
                 entryBySlot[slotKey] = entry;
@@ -15805,15 +16002,15 @@ static void SpliceKit_mixerAdoptExistingBusEffectsForRole(NSString *role, NSArra
             [entries removeObject:entry];
         }
     }
-    if (entries.count == 0) [sMixerManagedBusEffects removeObjectForKey:role];
+    SpliceKit_mixerPruneManagedBusRole(role);
 }
 
-static void SpliceKit_mixerReconcileManagedBusEffects(NSArray<NSDictionary *> *allClips) {
-    if (sMixerManagedBusReconciling || sMixerManagedBusEffects.count == 0) return;
+static void SpliceKit_mixerReconcileManagedBusEffects(NSArray<NSDictionary *> *allClips, NSString *scopeKey) {
+    if (sMixerManagedBusReconciling || !SpliceKit_mixerManagedBusRegistryHasEntriesForScope(scopeKey)) return;
     sMixerManagedBusReconciling = YES;
     @try {
         for (NSString *role in [[sMixerManagedBusEffects allKeys] copy]) {
-            NSMutableArray<NSMutableDictionary *> *entries = sMixerManagedBusEffects[role];
+            NSArray<NSMutableDictionary *> *entries = SpliceKit_mixerManagedBusEntriesForRoleInScope(role, scopeKey);
             NSArray *roleObjects = SpliceKit_mixerObjectsForRole(allClips, role);
             NSArray<NSDictionary *> *busTargets = SpliceKit_mixerBusTargetsForRoleObjects(roleObjects, NO);
 
@@ -15842,12 +16039,22 @@ static void SpliceKit_mixerReconcileManagedBusEffects(NSArray<NSDictionary *> *a
                     id effect = effectHandle.length > 0 ? SpliceKit_resolveHandle(effectHandle) : nil;
                     id stack = stackHandle.length > 0 ? SpliceKit_resolveHandle(stackHandle) : nil;
                     NSInteger effectIndex = SpliceKit_mixerIndexOfEffectInStack(stack, effect);
+                    id object = objectHandle.length > 0 ? SpliceKit_resolveHandle(objectHandle) : nil;
+                    if ((!stack || effectIndex == NSNotFound) && object) {
+                        effect = SpliceKit_mixerFindManagedEffectOnObject(entry, object, &stack, &effectIndex);
+                    }
                     if (stack && effectIndex != NSNotFound) {
                         SpliceKit_mixerRemoveEffectFromStackAtIndex(stack, effectIndex);
                     }
-                    id object = objectHandle.length > 0 ? SpliceKit_resolveHandle(objectHandle) : nil;
                     SpliceKit_mixerUpdateObjectAfterBusEffectMutation(object);
-                    [instances removeObject:instance];
+                    for (NSDictionary *candidate in [instances copy]) {
+                        NSString *candidateObjectKey = [candidate[@"objectKey"] isKindOfClass:[NSString class]]
+                            ? candidate[@"objectKey"]
+                            : @"";
+                        if (candidateObjectKey.length == 0 || [candidateObjectKey isEqualToString:objectKey]) {
+                            [instances removeObject:candidate];
+                        }
+                    }
                 }
 
                 NSString *effectID = [entry[@"effectID"] isKindOfClass:[NSString class]] ? entry[@"effectID"] : @"";
@@ -15875,12 +16082,9 @@ static void SpliceKit_mixerReconcileManagedBusEffects(NSArray<NSDictionary *> *a
                     SpliceKit_mixerCaptureManagedInstanceAfterApply(entry, object, beforeCount);
                     SpliceKit_mixerUpdateObjectAfterBusEffectMutation(object);
                 }
-                SpliceKit_mixerSyncManagedBusEntryState(entry);
             }
 
-            if (entries.count == 0) {
-                [sMixerManagedBusEffects removeObjectForKey:role];
-            }
+            SpliceKit_mixerPruneManagedBusRole(role);
         }
     } @catch (NSException *e) {
         SpliceKit_log(@"[Mixer] Managed bus reconcile exception: %@", e.reason);
@@ -16224,14 +16428,23 @@ NSDictionary *SpliceKit_handleMixerGetState(NSDictionary *params) {
             BOOL soloActive = (soloedObjects.count > 0);
             NSSet *disabledAudioRoleUIDs = SpliceKit_mixerDisabledAudioRoleUIDsForRootObject(primaryObj, sequence);
 
+            NSNumber *maxFadersParam = [params[@"maxFaders"] isKindOfClass:[NSNumber class]] ? params[@"maxFaders"] : nil;
+            NSUInteger maxFaders = maxFadersParam ? [maxFadersParam unsignedIntegerValue] : 12;
+            if (maxFaders < 1) maxFaders = 1;
+            if (maxFaders > 64) maxFaders = 64;
+
             // Step 3: For each role, find the clip at the playhead and build fader data
             NSMutableArray *faders = [NSMutableArray array];
             NSMutableArray *indexed = [NSMutableArray array];
             NSInteger faderIdx = 0;
-            SpliceKit_mixerReconcileManagedBusEffects(allClips);
+            NSString *scopeKey = SpliceKit_mixerManagedBusScopeKey(sequence, primaryObj);
+            if (SpliceKit_mixerManagedBusNeedsReconcile(allClips, scopeKey)) {
+                SpliceKit_mixerReconcileManagedBusEffects(allClips, scopeKey);
+            }
+            SpliceKit_mixerAddManagedBusRolesToRoleOrder(roleOrder, scopeKey);
 
             for (NSString *role in roleOrder) {
-                if (faderIdx >= 10) break;
+                if ((NSUInteger)faderIdx >= maxFaders) break;
 
                 // Get the role color from the first clip with this role
                 NSString *roleColor = @"";
@@ -16264,35 +16477,34 @@ NSDictionary *SpliceKit_handleMixerGetState(NSDictionary *params) {
                 fader[@"role"] = role;
                 if (roleColor.length > 0) fader[@"roleColor"] = roleColor;
 
-	                NSArray *roleObjects = SpliceKit_mixerObjectsForRole(allClips, role);
-	                BOOL roleSoloed = SpliceKit_mixerSetIntersectsObjects(soloedObjects, roleObjects);
-	                fader[@"soloed"] = @(roleSoloed);
-	                fader[@"soloActive"] = @(soloActive);
-	                fader[@"soloMuted"] = @(soloActive && !roleSoloed);
-	                fader[@"soloObjectCount"] = @(roleObjects.count);
+                NSArray *roleObjects = SpliceKit_mixerObjectsForRole(allClips, role);
+                BOOL roleSoloed = SpliceKit_mixerSetIntersectsObjects(soloedObjects, roleObjects);
+                fader[@"soloed"] = @(roleSoloed);
+                fader[@"soloActive"] = @(soloActive);
+                fader[@"soloMuted"] = @(soloActive && !roleSoloed);
+                fader[@"soloObjectCount"] = @(roleObjects.count);
 
-	                NSArray<NSDictionary *> *busTargets = SpliceKit_mixerBusTargetsForRoleObjects(roleObjects, NO);
-	                fader[@"busKind"] = busTargets.count > 0 ? @"collection" : @"none";
-	                fader[@"busObjectCount"] = @(busTargets.count);
-                if (busTargets.count > 0) {
-                    SpliceKit_mixerAdoptExistingBusEffectsForRole(role, busTargets);
-                    NSArray<NSDictionary *> *managedBusEffects = SpliceKit_mixerManagedBusEffectSummariesForRole(role);
-                    if (managedBusEffects.count > 0) {
-                        NSMutableArray *managedNames = [NSMutableArray arrayWithCapacity:managedBusEffects.count];
-                        for (NSDictionary *effect in managedBusEffects) {
-                            NSString *effectName = [effect[@"name"] isKindOfClass:[NSString class]] ? effect[@"name"] : @"";
-                            if (effectName.length > 0) [managedNames addObject:effectName];
-                        }
-                        NSDictionary *firstBusSummary = SpliceKit_mixerBusTargetSummary(busTargets.firstObject[@"object"],
-                                                                                       busTargets.firstObject[@"effectStack"]);
-                        fader[@"busKind"] = @"managedRole";
-                        fader[@"busHandle"] = firstBusSummary[@"objectHandle"] ?: @"";
-                        fader[@"busClass"] = @"SpliceKitRoleBus";
-                        fader[@"busEffectStackHandle"] = firstBusSummary[@"effectStackHandle"] ?: @"";
-                        fader[@"busEffectCount"] = @(managedBusEffects.count);
-                        fader[@"busEffectNames"] = managedNames;
-                        fader[@"busEffects"] = managedBusEffects;
-                    } else {
+                NSArray<NSDictionary *> *busTargets = SpliceKit_mixerBusTargetsForRoleObjects(roleObjects, NO);
+                fader[@"busKind"] = busTargets.count > 0 ? @"collection" : @"none";
+                fader[@"busObjectCount"] = @(busTargets.count);
+                NSArray<NSDictionary *> *managedBusEffects = SpliceKit_mixerManagedBusEffectSummariesForRole(role, scopeKey);
+                if (managedBusEffects.count > 0) {
+                    NSMutableArray *managedNames = [NSMutableArray arrayWithCapacity:managedBusEffects.count];
+                    for (NSDictionary *effect in managedBusEffects) {
+                        NSString *effectName = [effect[@"name"] isKindOfClass:[NSString class]] ? effect[@"name"] : @"";
+                        if (effectName.length > 0) [managedNames addObject:effectName];
+                    }
+                    NSDictionary *firstBusSummary = busTargets.count > 0
+                        ? SpliceKit_mixerBusTargetSummary(busTargets.firstObject[@"object"], busTargets.firstObject[@"effectStack"])
+                        : @{};
+                    fader[@"busKind"] = @"managedRole";
+                    fader[@"busHandle"] = firstBusSummary[@"objectHandle"] ?: @"";
+                    fader[@"busClass"] = @"SpliceKitRoleBus";
+                    fader[@"busEffectStackHandle"] = firstBusSummary[@"effectStackHandle"] ?: @"";
+                    fader[@"busEffectCount"] = @(managedBusEffects.count);
+                    fader[@"busEffectNames"] = managedNames;
+                    fader[@"busEffects"] = managedBusEffects;
+                } else if (busTargets.count > 0) {
                     NSMutableArray *allEffectNames = [NSMutableArray array];
                     NSMutableArray *allEffects = [NSMutableArray array];
                     NSDictionary *firstBusSummary = nil;
@@ -16325,14 +16537,13 @@ NSDictionary *SpliceKit_handleMixerGetState(NSDictionary *params) {
                     fader[@"busEffectCount"] = @(allEffects.count);
                     fader[@"busEffectNames"] = allEffectNames;
                     fader[@"busEffects"] = allEffects;
-                    }
                 } else {
                     fader[@"busEffectCount"] = @0;
                     fader[@"busEffectNames"] = @[];
                     fader[@"busEffects"] = @[];
                 }
 
-	                NSArray<NSString *> *roleUIDs = SpliceKit_mixerRoleUIDsForRole(allClips, role);
+                NSArray<NSString *> *roleUIDs = SpliceKit_mixerRoleUIDsForRole(allClips, role);
                 NSUInteger mutedUIDCount = SpliceKit_mixerCountDisabledRoleUIDs(roleUIDs, disabledAudioRoleUIDs);
                 fader[@"muted"] = @(roleUIDs.count > 0 && mutedUIDCount == roleUIDs.count);
                 fader[@"muteMixed"] = @(mutedUIDCount > 0 && mutedUIDCount < roleUIDs.count);
@@ -16639,6 +16850,7 @@ NSDictionary *SpliceKit_handleMixerGetState(NSDictionary *params) {
                 @"frameRate": @(frameRate),
                 @"faders": indexed,
                 @"count": @(indexed.count),
+                @"maxFaders": @(maxFaders),
                 @"totalRoles": @(roleOrder.count),
                 @"roles": [roleOrder array],
                 @"soloActive": @(soloActive),
@@ -16670,6 +16882,7 @@ NSDictionary *SpliceKit_handleMixerGetState(NSDictionary *params) {
 
             NSMutableDictionary *debugPayload = [@{
                 @"buildStamp": [NSString stringWithFormat:@"%s %s", __DATE__, __TIME__],
+                @"maxFaders": @(maxFaders),
                 @"handleCount": @(sHandleMap.count),
                 @"resolvedClipCount": @(allClips.count),
                 @"resolvedClipPreview": resolvedClipPreview,
@@ -17019,7 +17232,8 @@ NSDictionary *SpliceKit_handleMixerApplyBusEffect(NSDictionary *params) {
                 return;
             }
 
-            NSMutableDictionary *managedEntry = SpliceKit_mixerNewManagedBusEntry(role, effect);
+            NSString *scopeKey = SpliceKit_mixerManagedBusScopeKey(sequence, rootObject);
+            NSMutableDictionary *managedEntry = SpliceKit_mixerNewManagedBusEntry(role, scopeKey, effect);
             NSMutableDictionary<NSString *, NSNumber *> *beforeCountsByObject = [NSMutableDictionary dictionary];
             for (NSDictionary *target in busTargets) {
                 id object = target[@"object"];
@@ -17187,6 +17401,50 @@ static BOOL SpliceKit_mixerBusTargetsFromParams(NSDictionary *params,
     return YES;
 }
 
+static NSArray<NSDictionary *> *SpliceKit_mixerCurrentBusTargetsForManagedEntry(NSMutableDictionary *entry,
+                                                                                NSString *role,
+                                                                                BOOL allowObjectFallback,
+                                                                                NSString **outError) {
+    if (!entry || role.length == 0) {
+        if (outError) *outError = @"Managed bus effect is missing its role";
+        return nil;
+    }
+
+    id timeline = SpliceKit_getActiveTimelineModule();
+    id sequence = nil;
+    id rootObject = nil;
+    NSMutableArray *allClips = nil;
+    NSMutableOrderedSet *roleOrder = nil;
+    NSString *snapshotError = nil;
+    if (!SpliceKit_mixerBuildRoleSnapshot(timeline, &sequence, &rootObject, &allClips, &roleOrder, &snapshotError)) {
+        if (outError) *outError = snapshotError ?: @"Unable to inspect mixer roles";
+        return nil;
+    }
+
+    NSString *entryScope = [entry[@"scopeKey"] isKindOfClass:[NSString class]] ? entry[@"scopeKey"] : @"";
+    NSString *currentScope = SpliceKit_mixerManagedBusScopeKey(sequence, rootObject);
+    if (entryScope.length > 0 && currentScope.length > 0 && ![entryScope isEqualToString:currentScope]) {
+        if (outError) *outError = @"Managed bus effect belongs to a different timeline";
+        return nil;
+    }
+
+    NSArray *roleObjects = SpliceKit_mixerObjectsForRole(allClips, role);
+    if (roleObjects.count == 0) {
+        if (outError) *outError = @"No timeline objects found for this managed bus role";
+        return nil;
+    }
+
+    NSArray<NSDictionary *> *busTargets = SpliceKit_mixerBusTargetsForRoleObjects(roleObjects, allowObjectFallback);
+    if (busTargets.count == 0) {
+        if (outError) *outError = allowObjectFallback
+            ? @"No audio effect stack found for this managed bus role"
+            : @"No collection-backed bus found for this managed bus role";
+        return nil;
+    }
+
+    return busTargets;
+}
+
 NSDictionary *SpliceKit_handleMixerSetBusEffectEnabled(NSDictionary *params) {
     NSNumber *effectIndexNumber = [params[@"effectIndex"] isKindOfClass:[NSNumber class]] ? params[@"effectIndex"] : nil;
     NSString *busEffectID = [params[@"busEffectID"] isKindOfClass:[NSString class]] ? params[@"busEffectID"] : @"";
@@ -17217,17 +17475,22 @@ NSDictionary *SpliceKit_handleMixerSetBusEffectEnabled(NSDictionary *params) {
 
                 entry[@"enabled"] = @(enabled);
                 NSMutableArray *updated = [NSMutableArray array];
-                NSMutableArray *instances = [entry[@"instances"] isKindOfClass:[NSMutableArray class]]
-                    ? entry[@"instances"]
-                    : nil;
-                for (NSDictionary *instance in [instances copy]) {
-                    NSString *effectHandle = [instance[@"effectHandle"] isKindOfClass:[NSString class]] ? instance[@"effectHandle"] : @"";
-                    NSString *stackHandle = [instance[@"effectStackHandle"] isKindOfClass:[NSString class]] ? instance[@"effectStackHandle"] : @"";
-                    id effect = effectHandle.length > 0 ? SpliceKit_resolveHandle(effectHandle) : nil;
-                    id stack = stackHandle.length > 0 ? SpliceKit_resolveHandle(stackHandle) : nil;
+                NSString *managedTargetError = nil;
+                NSArray<NSDictionary *> *managedTargets = SpliceKit_mixerCurrentBusTargetsForManagedEntry(
+                    entry, managedRole, allowObjectFallback, &managedTargetError);
+                if (!managedTargets) {
+                    result = @{@"error": managedTargetError ?: @"Unable to resolve managed bus targets"};
+                    return;
+                }
+
+                for (NSDictionary *target in managedTargets) {
+                    id object = target[@"object"];
+                    id stack = nil;
+                    NSInteger trackedIndex = NSNotFound;
+                    id effect = SpliceKit_mixerTrackedEffectForObject(entry, object, &stack, &trackedIndex);
                     if (!effect || !stack) continue;
                     if (SpliceKit_mixerSetEffectEnabledInStack(effect, stack, enabled)) {
-                        [updated addObject:SpliceKit_mixerBusTargetSummary(nil, stack)];
+                        [updated addObject:SpliceKit_mixerBusTargetSummary(object, stack)];
                     }
                 }
 
@@ -17249,43 +17512,10 @@ NSDictionary *SpliceKit_handleMixerSetBusEffectEnabled(NSDictionary *params) {
                     return;
                 }
 
-                @try {
-                    SEL beginSel = NSSelectorFromString(@"actionBegin:animationHint:deferUpdates:");
-                    if ([handleStack respondsToSelector:beginSel]) {
-                        ((void (*)(id, SEL, id, id, BOOL))objc_msgSend)(
-                            handleStack, beginSel, enabled ? @"Enable Audio Effect" : @"Disable Audio Effect", nil, NO);
-                    }
-                } @catch (NSException *e) {}
-
-                SEL setEnabledSel = NSSelectorFromString(@"setEnabled:");
-                if (![handleEffect respondsToSelector:setEnabledSel]) {
+                if (!SpliceKit_mixerSetEffectEnabledInStack(handleEffect, handleStack, enabled)) {
                     result = @{@"error": @"Resolved effect does not support enabling/disabling"};
                     return;
                 }
-                ((void (*)(id, SEL, BOOL))objc_msgSend)(handleEffect, setEnabledSel, enabled);
-
-                @try {
-                    SEL respondSel = NSSelectorFromString(@"_respondToEffectActivationOrEnabledStateChange");
-                    if ([handleEffect respondsToSelector:respondSel]) {
-                        ((void (*)(id, SEL))objc_msgSend)(handleEffect, respondSel);
-                    }
-                } @catch (NSException *e) {}
-
-                @try {
-                    SEL postSel = NSSelectorFromString(@"postEffectsChangedNotification");
-                    if ([handleStack respondsToSelector:postSel]) {
-                        ((void (*)(id, SEL))objc_msgSend)(handleStack, postSel);
-                    }
-                } @catch (NSException *e) {}
-
-                @try {
-                    SEL endSel = NSSelectorFromString(@"actionEnd:save:error:");
-                    if ([handleStack respondsToSelector:endSel]) {
-                        id err = nil;
-                        ((BOOL (*)(id, SEL, id, BOOL, id *))objc_msgSend)(
-                            handleStack, endSel, enabled ? @"Enable Audio Effect" : @"Disable Audio Effect", YES, &err);
-                    }
-                } @catch (NSException *e) {}
 
                 result = @{
                     @"ok": @YES,
@@ -17304,48 +17534,51 @@ NSDictionary *SpliceKit_handleMixerSetBusEffectEnabled(NSDictionary *params) {
                 return;
             }
 
+            NSUInteger managedIndex = NSNotFound;
+            NSMutableDictionary *managedEntry = SpliceKit_mixerManagedBusEntryForRoleDisplayIndex(role, effectIndex, &managedIndex);
+            if (managedEntry) {
+                managedEntry[@"enabled"] = @(enabled);
+                NSMutableArray *updated = [NSMutableArray array];
+                NSString *managedTargetError = nil;
+                NSArray<NSDictionary *> *managedTargets = SpliceKit_mixerCurrentBusTargetsForManagedEntry(
+                    managedEntry, role, allowObjectFallback, &managedTargetError);
+                if (!managedTargets) {
+                    result = @{@"error": managedTargetError ?: @"Unable to resolve managed bus targets"};
+                    return;
+                }
+
+                for (NSDictionary *target in managedTargets) {
+                    id object = target[@"object"];
+                    id stack = nil;
+                    NSInteger trackedIndex = NSNotFound;
+                    id effect = SpliceKit_mixerTrackedEffectForObject(managedEntry, object, &stack, &trackedIndex);
+                    if (!effect || !stack) continue;
+                    if (SpliceKit_mixerSetEffectEnabledInStack(effect, stack, enabled)) {
+                        [updated addObject:SpliceKit_mixerBusTargetSummary(object, stack)];
+                    }
+                }
+
+                result = @{
+                    @"ok": @YES,
+                    @"role": role ?: @"",
+                    @"index": managedIndex == NSNotFound ? @(-1) : @(managedIndex),
+                    @"busEffectID": [managedEntry[@"busEffectID"] isKindOfClass:[NSString class]] ? managedEntry[@"busEffectID"] : @"",
+                    @"enabled": @(enabled),
+                    @"busObjectCount": @(updated.count),
+                    @"targets": updated,
+                };
+                return;
+            }
+
             NSMutableArray *updated = [NSMutableArray array];
             for (NSDictionary *target in busTargets) {
                 id stack = target[@"effectStack"];
                 id effect = SpliceKit_mixerEffectAtIndex(stack, effectIndex);
                 if (!stack || !effect) continue;
 
-                @try {
-                    SEL beginSel = NSSelectorFromString(@"actionBegin:animationHint:deferUpdates:");
-                    if ([stack respondsToSelector:beginSel]) {
-                        ((void (*)(id, SEL, id, id, BOOL))objc_msgSend)(
-                            stack, beginSel, enabled ? @"Enable Audio Effect" : @"Disable Audio Effect", nil, NO);
-                    }
-                } @catch (NSException *e) {}
-
-                SEL setEnabledSel = NSSelectorFromString(@"setEnabled:");
-                if (![effect respondsToSelector:setEnabledSel]) continue;
-                ((void (*)(id, SEL, BOOL))objc_msgSend)(effect, setEnabledSel, enabled);
-
-                @try {
-                    SEL respondSel = NSSelectorFromString(@"_respondToEffectActivationOrEnabledStateChange");
-                    if ([effect respondsToSelector:respondSel]) {
-                        ((void (*)(id, SEL))objc_msgSend)(effect, respondSel);
-                    }
-                } @catch (NSException *e) {}
-
-                @try {
-                    SEL postSel = NSSelectorFromString(@"postEffectsChangedNotification");
-                    if ([stack respondsToSelector:postSel]) {
-                        ((void (*)(id, SEL))objc_msgSend)(stack, postSel);
-                    }
-                } @catch (NSException *e) {}
-
-                @try {
-                    SEL endSel = NSSelectorFromString(@"actionEnd:save:error:");
-                    if ([stack respondsToSelector:endSel]) {
-                        id err = nil;
-                        ((BOOL (*)(id, SEL, id, BOOL, id *))objc_msgSend)(
-                            stack, endSel, enabled ? @"Enable Audio Effect" : @"Disable Audio Effect", YES, &err);
-                    }
-                } @catch (NSException *e) {}
-
-                [updated addObject:SpliceKit_mixerBusTargetSummary(target[@"object"], stack)];
+                if (SpliceKit_mixerSetEffectEnabledInStack(effect, stack, enabled)) {
+                    [updated addObject:SpliceKit_mixerBusTargetSummary(target[@"object"], stack)];
+                }
             }
 
             if (updated.count == 0) {
@@ -17396,26 +17629,29 @@ NSDictionary *SpliceKit_handleMixerRemoveBusEffect(NSDictionary *params) {
                 }
 
                 NSMutableArray *updated = [NSMutableArray array];
-                NSMutableArray *instances = [entry[@"instances"] isKindOfClass:[NSMutableArray class]]
-                    ? entry[@"instances"]
-                    : nil;
-                for (NSDictionary *instance in [instances copy]) {
-                    NSString *effectHandle = [instance[@"effectHandle"] isKindOfClass:[NSString class]] ? instance[@"effectHandle"] : @"";
-                    NSString *stackHandle = [instance[@"effectStackHandle"] isKindOfClass:[NSString class]] ? instance[@"effectStackHandle"] : @"";
-                    NSString *objectHandle = [instance[@"objectHandle"] isKindOfClass:[NSString class]] ? instance[@"objectHandle"] : @"";
-                    id effect = effectHandle.length > 0 ? SpliceKit_resolveHandle(effectHandle) : nil;
-                    id stack = stackHandle.length > 0 ? SpliceKit_resolveHandle(stackHandle) : nil;
-                    NSInteger trackedIndex = SpliceKit_mixerIndexOfEffectInStack(stack, effect);
-                    if (stack && trackedIndex != NSNotFound && SpliceKit_mixerRemoveEffectFromStackAtIndex(stack, trackedIndex)) {
-                        [updated addObject:SpliceKit_mixerBusTargetSummary(nil, stack)];
+                NSString *managedTargetError = nil;
+                NSArray<NSDictionary *> *managedTargets = SpliceKit_mixerCurrentBusTargetsForManagedEntry(
+                    entry, managedRole, allowObjectFallback, &managedTargetError);
+                if (!managedTargets) {
+                    result = @{@"error": managedTargetError ?: @"Unable to resolve managed bus targets"};
+                    return;
+                }
+
+                for (NSDictionary *target in managedTargets) {
+                    id object = target[@"object"];
+                    id stack = nil;
+                    NSInteger trackedIndex = NSNotFound;
+                    id effect = SpliceKit_mixerTrackedEffectForObject(entry, object, &stack, &trackedIndex);
+                    if (stack && effect && trackedIndex != NSNotFound &&
+                        SpliceKit_mixerRemoveEffectFromStackAtIndex(stack, trackedIndex)) {
+                        [updated addObject:SpliceKit_mixerBusTargetSummary(object, stack)];
                     }
-                    id object = objectHandle.length > 0 ? SpliceKit_resolveHandle(objectHandle) : nil;
                     SpliceKit_mixerUpdateObjectAfterBusEffectMutation(object);
                 }
 
                 NSMutableArray *entries = SpliceKit_mixerManagedBusEntriesForRole(managedRole, NO);
                 [entries removeObject:entry];
-                if (entries.count == 0) [sMixerManagedBusEffects removeObjectForKey:managedRole];
+                SpliceKit_mixerPruneManagedBusRole(managedRole);
 
                 result = @{
                     @"ok": @YES,
@@ -17438,37 +17674,10 @@ NSDictionary *SpliceKit_handleMixerRemoveBusEffect(NSDictionary *params) {
                     return;
                 }
 
-                BOOL ok = NO;
-                @try {
-                    SEL opRemoveSel = NSSelectorFromString(@"operationRemoveEffectAtIndex:error:");
-                    if ([handleStack respondsToSelector:opRemoveSel]) {
-                        id err = nil;
-                        ok = ((BOOL (*)(id, SEL, NSUInteger, id *))objc_msgSend)(
-                            handleStack, opRemoveSel, (NSUInteger)handleEffectIndex, &err);
-                    }
-                } @catch (NSException *e) {}
-
-                if (!ok) {
-                    @try {
-                        SEL removeSel = NSSelectorFromString(@"removeEffectAtIndex:");
-                        if ([handleStack respondsToSelector:removeSel]) {
-                            ((void (*)(id, SEL, NSUInteger))objc_msgSend)(handleStack, removeSel, (NSUInteger)handleEffectIndex);
-                            ok = YES;
-                        }
-                    } @catch (NSException *e) {}
-                }
-
-                if (!ok) {
+                if (!SpliceKit_mixerRemoveEffectFromStackAtIndex(handleStack, handleEffectIndex)) {
                     result = @{@"error": @"Failed to remove resolved mixer bus effect"};
                     return;
                 }
-
-                @try {
-                    SEL postSel = NSSelectorFromString(@"postEffectsChangedNotification");
-                    if ([handleStack respondsToSelector:postSel]) {
-                        ((void (*)(id, SEL))objc_msgSend)(handleStack, postSel);
-                    }
-                } @catch (NSException *e) {}
 
                 result = @{
                     @"ok": @YES,
@@ -17484,42 +17693,54 @@ NSDictionary *SpliceKit_handleMixerRemoveBusEffect(NSDictionary *params) {
                 return;
             }
 
+            NSUInteger managedIndex = NSNotFound;
+            NSMutableDictionary *managedEntry = SpliceKit_mixerManagedBusEntryForRoleDisplayIndex(role, effectIndex, &managedIndex);
+            if (managedEntry) {
+                NSMutableArray *updated = [NSMutableArray array];
+                NSString *managedTargetError = nil;
+                NSArray<NSDictionary *> *managedTargets = SpliceKit_mixerCurrentBusTargetsForManagedEntry(
+                    managedEntry, role, allowObjectFallback, &managedTargetError);
+                if (!managedTargets) {
+                    result = @{@"error": managedTargetError ?: @"Unable to resolve managed bus targets"};
+                    return;
+                }
+
+                for (NSDictionary *target in managedTargets) {
+                    id object = target[@"object"];
+                    id stack = nil;
+                    NSInteger trackedIndex = NSNotFound;
+                    id effect = SpliceKit_mixerTrackedEffectForObject(managedEntry, object, &stack, &trackedIndex);
+                    if (stack && effect && trackedIndex != NSNotFound &&
+                        SpliceKit_mixerRemoveEffectFromStackAtIndex(stack, trackedIndex)) {
+                        [updated addObject:SpliceKit_mixerBusTargetSummary(object, stack)];
+                    }
+                    SpliceKit_mixerUpdateObjectAfterBusEffectMutation(object);
+                }
+
+                NSMutableArray *entries = SpliceKit_mixerManagedBusEntriesForRole(role, NO);
+                [entries removeObject:managedEntry];
+                SpliceKit_mixerPruneManagedBusRole(role);
+
+                result = @{
+                    @"ok": @YES,
+                    @"role": role ?: @"",
+                    @"index": managedIndex == NSNotFound ? @(-1) : @(managedIndex),
+                    @"busEffectID": [managedEntry[@"busEffectID"] isKindOfClass:[NSString class]] ? managedEntry[@"busEffectID"] : @"",
+                    @"busObjectCount": @(updated.count),
+                    @"targets": updated,
+                };
+                return;
+            }
+
             NSMutableArray *updated = [NSMutableArray array];
             for (NSDictionary *target in busTargets) {
                 id stack = target[@"effectStack"];
                 id effect = SpliceKit_mixerEffectAtIndex(stack, effectIndex);
                 if (!stack || !effect) continue;
 
-                BOOL ok = NO;
-                @try {
-                    SEL opRemoveSel = NSSelectorFromString(@"operationRemoveEffectAtIndex:error:");
-                    if ([stack respondsToSelector:opRemoveSel]) {
-                        id err = nil;
-                        ok = ((BOOL (*)(id, SEL, NSUInteger, id *))objc_msgSend)(
-                            stack, opRemoveSel, (NSUInteger)effectIndex, &err);
-                    }
-                } @catch (NSException *e) {}
-
-                if (!ok) {
-                    @try {
-                        SEL removeSel = NSSelectorFromString(@"removeEffectAtIndex:");
-                        if ([stack respondsToSelector:removeSel]) {
-                            ((void (*)(id, SEL, NSUInteger))objc_msgSend)(stack, removeSel, (NSUInteger)effectIndex);
-                            ok = YES;
-                        }
-                    } @catch (NSException *e) {}
+                if (SpliceKit_mixerRemoveEffectFromStackAtIndex(stack, effectIndex)) {
+                    [updated addObject:SpliceKit_mixerBusTargetSummary(target[@"object"], stack)];
                 }
-
-                if (!ok) continue;
-
-                @try {
-                    SEL postSel = NSSelectorFromString(@"postEffectsChangedNotification");
-                    if ([stack respondsToSelector:postSel]) {
-                        ((void (*)(id, SEL))objc_msgSend)(stack, postSel);
-                    }
-                } @catch (NSException *e) {}
-
-                [updated addObject:SpliceKit_mixerBusTargetSummary(target[@"object"], stack)];
             }
 
             if (updated.count == 0) {
@@ -17581,17 +17802,44 @@ NSDictionary *SpliceKit_handleMixerOpenBusEffect(NSDictionary *params) {
                     return;
                 }
                 role = managedRole;
-                effect = SpliceKit_mixerFirstManagedEffectInstance(entry, &sourceStack, &resolvedEffectIndex);
+                NSString *managedTargetError = nil;
+                NSArray<NSDictionary *> *managedTargets = SpliceKit_mixerCurrentBusTargetsForManagedEntry(
+                    entry, managedRole, allowObjectFallback, &managedTargetError);
+                if (!managedTargets) {
+                    result = @{@"error": managedTargetError ?: @"Unable to resolve managed bus targets"};
+                    return;
+                }
+                for (NSDictionary *target in managedTargets) {
+                    effect = SpliceKit_mixerTrackedEffectForObject(entry, target[@"object"], &sourceStack, &resolvedEffectIndex);
+                    if (effect) break;
+                }
             } else {
                 if (!SpliceKit_mixerBusTargetsFromParams(params, allowObjectFallback, &role, &index, &busTargets, &error)) {
                     result = @{@"error": error ?: @"Unable to resolve mixer bus"};
                     return;
                 }
 
-                for (NSDictionary *target in busTargets) {
-                    sourceStack = target[@"effectStack"];
-                    effect = SpliceKit_mixerEffectAtIndex(sourceStack, effectIndex);
-                    if (effect) break;
+                NSUInteger managedIndex = NSNotFound;
+                NSMutableDictionary *managedEntry = SpliceKit_mixerManagedBusEntryForRoleDisplayIndex(role, effectIndex, &managedIndex);
+                if (managedEntry) {
+                    NSString *managedTargetError = nil;
+                    NSArray<NSDictionary *> *managedTargets = SpliceKit_mixerCurrentBusTargetsForManagedEntry(
+                        managedEntry, role, allowObjectFallback, &managedTargetError);
+                    if (!managedTargets) {
+                        result = @{@"error": managedTargetError ?: @"Unable to resolve managed bus targets"};
+                        return;
+                    }
+                    for (NSDictionary *target in managedTargets) {
+                        effect = SpliceKit_mixerTrackedEffectForObject(managedEntry, target[@"object"], &sourceStack, &resolvedEffectIndex);
+                        if (effect) break;
+                    }
+                    index = managedIndex == NSNotFound ? NSNotFound : (NSInteger)managedIndex;
+                } else {
+                    for (NSDictionary *target in busTargets) {
+                        sourceStack = target[@"effectStack"];
+                        effect = SpliceKit_mixerEffectAtIndex(sourceStack, effectIndex);
+                        if (effect) break;
+                    }
                 }
             }
             if (!effect) {

@@ -3242,7 +3242,7 @@ def assign_role(type: str, role: str) -> str:
 def mixer_get_state() -> str:
     """Get current mixer state: all clips overlapping the playhead with their volumes.
 
-    Returns up to 10 faders, sorted by lane (highest/topmost clip = fader 0).
+    Returns up to 12 faders, sorted by lane (highest/topmost clip = fader 0).
     Each fader includes clipHandle, volumeChannelHandle, effectStackHandle,
     volumeDB, volumeLinear, lane, role, and clip name.
     """

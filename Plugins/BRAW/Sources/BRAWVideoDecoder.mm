@@ -575,48 +575,6 @@ static CFDictionaryRef CreatePixelBufferAttributes(CFAllocatorRef allocator, con
     return attributes;
 }
 
-static bool WaitForDecode(DecodeContext &context)
-{
-    std::unique_lock<std::mutex> lock(context.mutex);
-    return context.cv.wait_for(lock, std::chrono::seconds(30), [&] { return context.finished; });
-}
-
-static bool DecodeFrameToBytes(BRAWVideoDecoder *decoder, uint32_t frameIndex, DecodeContext &context)
-{
-#if !SPLICEKIT_BRAW_SDK_AVAILABLE
-    return false;
-#else
-    decoder->callback.Begin(&context);
-    IBlackmagicRawJob *readJob = nullptr;
-    HRESULT hr = decoder->clip->CreateJobReadFrame(frameIndex, &readJob);
-    if (hr != S_OK || !readJob) {
-        decoder->callback.End();
-        context.error = [[NSString stringWithFormat:@"CreateJobReadFrame failed %@", DescribeHRESULT(hr)] UTF8String];
-        return false;
-    }
-
-    hr = readJob->Submit();
-    if (hr != S_OK) {
-        readJob->Release();
-        decoder->callback.End();
-        context.error = [[NSString stringWithFormat:@"Read job submit failed %@", DescribeHRESULT(hr)] UTF8String];
-        return false;
-    }
-
-    decoder->codec->FlushJobs();
-    bool decoded = WaitForDecode(context);
-    // Only detach the context from the callback after we've finished waiting
-    // for it. This way a late-arriving callback either already fired with a
-    // live context or finds a null context and exits early.
-    decoder->callback.End();
-    if (!decoded) {
-        context.error = "decode timed out";
-        return false;
-    }
-    return context.processResult == S_OK && !context.bytes.empty();
-#endif
-}
-
 static bool ExtractFrameIndex(CMSampleBufferRef sampleBuffer, uint32_t &frameIndexOut)
 {
     if (!sampleBuffer || CMSampleBufferGetNumSamples(sampleBuffer) < 1) {
@@ -680,26 +638,6 @@ static CVPixelBufferRef CreatePixelBuffer(BRAWVideoDecoder *decoder)
         return nullptr;
     }
     return pixelBuffer;
-}
-
-static bool CopyBytesIntoPixelBuffer(CVPixelBufferRef pixelBuffer, const DecodeContext &context)
-{
-    if (!pixelBuffer || context.bytes.empty() || !context.width || !context.height) {
-        return false;
-    }
-
-    CVPixelBufferLockBaseAddress(pixelBuffer, 0);
-    uint8_t *destination = static_cast<uint8_t *>(CVPixelBufferGetBaseAddress(pixelBuffer));
-    size_t destinationBytesPerRow = CVPixelBufferGetBytesPerRow(pixelBuffer);
-    size_t sourceBytesPerRow = context.resourceSizeBytes && context.height
-        ? context.resourceSizeBytes / context.height
-        : (size_t)context.width * 4;
-    const uint8_t *source = context.bytes.data();
-    for (uint32_t row = 0; row < context.height; row++) {
-        memcpy(destination + row * destinationBytesPerRow, source + row * sourceBytesPerRow, std::min(destinationBytesPerRow, sourceBytesPerRow));
-    }
-    CVPixelBufferUnlockBaseAddress(pixelBuffer, 0);
-    return true;
 }
 
 // The decoder bundle is built with -fvisibility=hidden and links cleanly, so it

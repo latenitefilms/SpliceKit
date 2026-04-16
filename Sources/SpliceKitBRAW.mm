@@ -230,6 +230,7 @@ static BOOL SpliceKitBRAWIsClipPath(NSString *path) {
 }
 
 static NSString *const kSpliceKitBRAWUTI = @"com.blackmagic-design.braw-movie";
+static NSString *const kSpliceKitBRAW2UTI = @"com.blackmagic-design.braw2-movie";
 static const FourCharCode kSpliceKitBRAWCodecType = 'braw';
 
 static NSArray<NSString *> *SpliceKitBRAWUniqueStrings(NSArray *base, NSArray<NSString *> *extras) {
@@ -562,7 +563,11 @@ static id SpliceKitBRAWProviderFigUTIs(id self, SEL _cmd) {
     id base = sSpliceKitBRAWOriginalProviderFigUTIsIMP
         ? ((id (*)(id, SEL))sSpliceKitBRAWOriginalProviderFigUTIsIMP)(self, _cmd)
         : nil;
-    return [SpliceKitBRAWUniqueStrings(base, @[kSpliceKitBRAWUTI]) copy];
+    // Advertise both BRAW UTIs so the provider-level recognition matches what
+    // the UTType conformance hook (at line ~633) already claims. Without braw2
+    // here, clips authored on newer Blackmagic cameras can hit the provider
+    // lookup as "unknown" even though downstream UTType checks accept them.
+    return [SpliceKitBRAWUniqueStrings(base, @[kSpliceKitBRAWUTI, kSpliceKitBRAW2UTI]) copy];
 }
 
 static BOOL SpliceKitBRAWRegisterProviderShimPhase(NSString *phase, NSMutableDictionary *details) {
@@ -2438,9 +2443,18 @@ SPLICEKIT_BRAW_EXTERN_C BOOL SpliceKitBRAW_DecodeFrameIntoPixelBuffer(
             path, frameIndex, scaleHint, destPixelBuffer, &w, &h);
     });
     NSTimeInterval elapsedMs = ([NSDate timeIntervalSinceReferenceDate] - t0) * 1000.0;
-    SpliceKitBRAWTrace([NSString stringWithFormat:
-        @"[host-decode] into-PB frame=%u %.2fms result=%@",
-        frameIndex, elapsedMs, result ? @"ok" : @"fail"]);
+
+    // Only log when there's something actionable: a failure, or a genuinely
+    // slow frame. The 40 ms 24fps budget is noisy because FCP's frame
+    // prefetcher often queues multiple decodes — the serial BRAW work queue
+    // forces later frames to wait on earlier ones, so "elapsed" reflects
+    // queue wait time, not decode time. 80 ms is the threshold where actual
+    // viewer stutter becomes visible.
+    if (!result || elapsedMs > 80.0) {
+        SpliceKitBRAWTrace([NSString stringWithFormat:
+            @"[host-decode] into-PB frame=%u %.2fms result=%@",
+            frameIndex, elapsedMs, result ? @"ok" : @"fail"]);
+    }
     *outWidth = w;
     *outHeight = h;
     return result;

@@ -964,7 +964,6 @@ static OSStatus EmitDecodedFrame_FromHostBytes(BRAWVideoDecoder *decoder,
 static OSStatus DecodeFrame(VTVideoDecoderRef decoderRef, VTVideoDecoderFrame frame, CMSampleBufferRef sampleBuffer, VTDecodeFrameFlags, VTDecodeInfoFlags *infoFlagsOut)
 {
     BRAWVideoDecoder *decoder = DecoderFromRef(decoderRef);
-    Log(@"decoder", @"DecodeFrame enter decoder=%p", decoder);
     if (!decoder || !sampleBuffer) {
         return paramErr;
     }

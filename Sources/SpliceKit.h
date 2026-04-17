@@ -139,6 +139,16 @@ BOOL SpliceKit_isViewerPinchZoomEnabled(void);
 // Adds a right-click "Favorite" option in the effect browser.
 void SpliceKit_installEffectFavoritesSwizzle(void);
 
+// Caches -[FFBKEffectLibraryFolder items] per folder and
+// +[FFEffect userVisibleEffectIDs] at class scope to fix jerky scrolling
+// in the Effects browser's category sidebar on installs with many effects.
+// Without the cache, every row vended during scroll re-filters the full
+// effect registry (~10k string compares per frame at 1954 effects).
+void SpliceKit_installSidebarCoalesceLiveScroll(void);
+void SpliceKit_removeSidebarCoalesceLiveScroll(void);
+void SpliceKit_setSidebarCoalesceLiveScrollEnabled(BOOL enabled);
+BOOL SpliceKit_isSidebarCoalesceLiveScrollEnabled(void);
+
 // Swizzles pasteAnchored: and paste: to handle FCPXML on the pasteboard.
 // When FCPXML is detected, imports it into a temp project, converts to native
 // clipboard format, and then lets the original paste proceed. Includes caching,

@@ -9089,6 +9089,7 @@ static NSDictionary *SpliceKit_handleOptionsGet(NSDictionary *params) {
         @"defaultSpatialConformType": SpliceKit_getDefaultSpatialConformType(),
         @"aiEngine": @([SpliceKitCommandPalette sharedPalette].aiEngine),
         @"gemmaModel": [SpliceKitCommandPalette sharedPalette].gemmaModel ?: @"unsloth/gemma-4-E4B-it-UD-MLX-4bit",
+        @"sidebarCoalesceLiveScroll": @(SpliceKit_isSidebarCoalesceLiveScrollEnabled()),
     };
 }
 
@@ -9167,6 +9168,12 @@ static NSDictionary *SpliceKit_handleOptionsSet(NSDictionary *params) {
         [SpliceKitCommandPalette sharedPalette].gemmaModel = value;
         [[NSUserDefaults standardUserDefaults] setObject:value forKey:@"SpliceKitGemmaModel"];
         return @{@"status": @"ok", @"gemmaModel": value};
+    } else if ([option isEqualToString:@"sidebarCoalesceLiveScroll"]) {
+        NSNumber *enabled = params[@"enabled"];
+        if (!enabled) return @{@"error": @"'enabled' parameter required (true/false)"};
+        SpliceKit_setSidebarCoalesceLiveScrollEnabled([enabled boolValue]);
+        return @{@"status": @"ok",
+                 @"sidebarCoalesceLiveScroll": @(SpliceKit_isSidebarCoalesceLiveScrollEnabled())};
     }
 
     return @{@"error": [NSString stringWithFormat:@"Unknown option: %@", option]};

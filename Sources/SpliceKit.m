@@ -3178,6 +3178,14 @@ static void SpliceKit_appDidLaunch(void) {
     // Install effect browser favorites context menu (always on)
     SpliceKit_installEffectFavoritesSwizzle();
 
+    // Debounce FFSidebarModule KVO churn on the Effects sidebar's category
+    // list during live scroll (fixes scrolling jerks with many effects).
+    if (SpliceKit_isSidebarCoalesceLiveScrollEnabled()) {
+        SpliceKit_safeInstall("SidebarCoalesceLiveScroll", ^{
+            SpliceKit_installSidebarCoalesceLiveScroll();
+        });
+    }
+
     // Latch skim state off the methods FCP actually calls so the mixer can
     // meter live skims even when isToolSkimming stays false.
     SpliceKit_installMixerSkimHooks();

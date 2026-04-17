@@ -28,3 +28,4 @@ SpliceKitLua.m
 SpliceKitLuaPanel.m
 SpliceKitPlugins.m
 SpliceKitMixerPanel.m
+SpliceKitSidebarCoalesce.m

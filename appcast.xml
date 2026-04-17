@@ -6,6 +6,22 @@
     <description>SpliceKit Patcher release updates</description>
     <language>en</language>
     <item>
+      <title>SpliceKit v3.2.02</title>
+      <sparkle:version>3.2.02</sparkle:version>
+      <sparkle:shortVersionString>3.2.02</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+      <pubDate>Fri, 17 Apr 2026 21:56:59 +0000</pubDate>
+      <description><![CDATA[
+        <h2>What's New in 3.2.02</h2>
+        <p>Fix jerky Effects browser category sidebar scroll on installs with many effects. Every row vended during scroll was re-filtering the full effect registry with ~10k locale-aware string comparisons per frame (via FFBKEffectLibraryFolder.items → FFEffect.userVisibleEffectIDs → bsearch); those results are now cached per-folder and invalidated on effect-registry notifications.</p>
+      ]]></description>
+      <enclosure
+        url="https://github.com/elliotttate/SpliceKit/releases/download/v3.2.02/SpliceKit-v3.2.02.dmg"
+        sparkle:edSignature="j9U3/9VYLZqXsOfURiB9LbK+BkY1csyVM/7RhY1bFz0pBRF9qApfeL/dzf1iWC4CZe7RklFxHfRV9MqoSzu1AA=="
+        length="19482659"
+        type="application/octet-stream" />
+    </item>
+    <item>
       <title>SpliceKit v3.2.01</title>
       <sparkle:version>3.2.01</sparkle:version>
       <sparkle:shortVersionString>3.2.01</sparkle:shortVersionString>

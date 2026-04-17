@@ -6,6 +6,22 @@
     <description>SpliceKit Patcher release updates</description>
     <language>en</language>
     <item>
+      <title>SpliceKit v3.2.01</title>
+      <sparkle:version>3.2.01</sparkle:version>
+      <sparkle:shortVersionString>3.2.01</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+      <pubDate>Fri, 17 Apr 2026 21:09:23 +0000</pubDate>
+      <description><![CDATA[
+        <h2>What's New in 3.2.01</h2>
+        <p>**Native Blackmagic BRAW Color Grading.** New BRAW Settings inspector menu modeled after FCP's ProRes RAW panel — Gamma / Gamut / Color Science Gen, ISO / Color Temp / Tint / Exposure / Analog Gain, full tone curve (Saturation, Contrast, Midpoint, Highlights, Shadows, Black Level, White Level), Highlight Recovery, Gamut Compression, and 3D LUT Mode. Open it from the Info inspector by clicking 'Modify BRAW…' on any selected .braw clip. **Fixed playback for several BRAW files** that were silently dropping persisted color settings on library reopen — the in-process decoder now primes its settings cache from the asset's persisted dict during render setup, so adjustments apply on the first frame after relaunch instead of only after touching a slider. Also fixed a thumbnail-thread race that could crash FCP on rapid slider drags.</p>
+      ]]></description>
+      <enclosure
+        url="https://github.com/elliotttate/SpliceKit/releases/download/v3.2.01/SpliceKit-v3.2.01.dmg"
+        sparkle:edSignature="JCjGXVGJjb3Chxt+Ayd8LsHlwPaaHBuP6ZR1w107oXvwmtlc+UqQjokZeX2tLZOS6uGFmtvsuzVXhGLFh+WXDg=="
+        length="19475951"
+        type="application/octet-stream" />
+    </item>
+    <item>
       <title>SpliceKit v3.1.151</title>
       <sparkle:version>3.1.151</sparkle:version>
       <sparkle:shortVersionString>3.1.151</sparkle:shortVersionString>

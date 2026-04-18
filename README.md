@@ -25,6 +25,8 @@
 
 Hit **Cmd+Shift+P** inside the patched FCP. Fuzzy-search 100+ built-in editing actions — blade, trim, color, speed, markers, effects, transitions, export — or type plain English and let **Apple Intelligence** (on-device, private) figure out what you meant.
 
+[![Command Palette Demo](https://img.youtube.com/vi/Q4GjHmmUISw/maxresdefault.jpg)](https://youtu.be/Q4GjHmmUISw)
+
 #### Try saying…
 
 - *"add markers every 5 seconds"*

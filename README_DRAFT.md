@@ -15,9 +15,13 @@
 
 ## The Three Pillars
 
-### 1. The Command Palette — one keystroke to anything
+### 🎹 1. The Command Palette
 
-Hit **Cmd+Shift+P** inside the patched FCP. Fuzzy-search 100+ built-in editing actions (blade, trim, color, speed, markers, effects, transitions, export — all of them), or type plain English and let **Apple Intelligence** (on-device, private) figure out what you meant:
+*One keystroke to anything.*
+
+Hit **Cmd+Shift+P** inside the patched FCP. Fuzzy-search 100+ built-in editing actions — blade, trim, color, speed, markers, effects, transitions, export — or type plain English and let **Apple Intelligence** (on-device, private) figure out what you meant.
+
+#### Try saying…
 
 - *"add markers every 5 seconds"*
 - *"slow this clip to half speed"*
@@ -25,41 +29,57 @@ Hit **Cmd+Shift+P** inside the patched FCP. Fuzzy-search 100+ built-in editing a
 - *"remove all the silences"*
 - *"add a cross dissolve"*
 
-No more menu hunting. No more memorizing shortcuts. No cloud.
+> No more menu hunting. No more memorizing shortcuts. No cloud.
 
-### 2. The MCP Server — Claude (or any other LLM) can drive your editor, and teach it new tricks
+---
 
-SpliceKit ships with an MCP server that exposes ~200 tools covering every major FCP subsystem. Point Claude Code, Claude Desktop, or any MCP-compatible AI client at it and you can say things like:
+### 🤖 2. The MCP Server
+
+*Claude (or any other LLM) can drive your editor — and teach it new tricks.*
+
+SpliceKit ships with an MCP server that exposes ~200 tools covering every major FCP subsystem. Point **Claude Code**, **Claude Desktop**, or any MCP-compatible AI client at it and you can say things like:
 
 - *"cut this 40-minute interview down to its best moments"*
 - *"remove the silences from this podcast, add captions, and export"*
 - *"assemble a rough cut from these clips, synced to the beat of this song"*
 
-It's not a chat wrapper around keyboard shortcuts — the MCP talks to FCP's internal ObjC runtime directly, so it can read timeline state, inspect clips, blade, retime, color-correct, apply effects, and render without ever touching the UI.
+It's not a chat wrapper around keyboard shortcuts. The MCP talks to FCP's internal ObjC runtime directly — so it can read timeline state, inspect clips, blade, retime, color-correct, apply effects, and render without ever touching the UI.
 
-**And here's where it gets interesting: the MCP gets better the more you use it.**
+#### The editor that gets smarter every week
 
-The first time you ask for something complicated, Claude (or any other LLM) might be a little clumsy. It's improvising — stitching together the primitives it has, trial-and-error against your timeline, occasionally picking the long way around.
+The first time you ask for something complicated, the AI might be a little clumsy. It's improvising — stitching together primitives, trial-and-error against your timeline, occasionally picking the long way around.
 
-When that happens, tell Claude (or any other LLM) to *build the ability*. With full access to the SpliceKit framework, Claude (or any other LLM) can write a new plugin, register a new MCP tool, and wire it straight into your editor. What started as a ten-step improvisation becomes a single high-level command. Next time you ask for it — or the hundredth time after that — it's instant, reliable, and shared with everyone else who installs the same plugin.
+When that happens, don't settle for the workaround. **Tell it to build the ability.**
 
-Every clumsy first attempt is a prompt to turn that workflow into a first-class feature. The toolset compounds. The editor you use six months from now is smarter than the one you installed today — and most of that improvement won't have come from the SpliceKit team. It'll come from you, and from the community shipping plugins back.
+| Step | What happens |
+|---|---|
+| **1. Ask** | You request something complex. The LLM improvises with the primitives it has. |
+| **2. Build** | You say "make this a real command." Claude writes a plugin, registers a new MCP tool, and wires it into your editor. |
+| **3. Reuse** | Next time — or the hundredth time after that — it's instant, reliable, and shared with everyone running the same plugin. |
 
-### 3. The Plugin Framework — everything is a plugin
+> Every clumsy first attempt is a prompt to turn that workflow into a first-class feature. The editor you use six months from now is smarter than the one you installed today — and most of that improvement won't come from the SpliceKit team. It'll come from you, and from the community shipping plugins back.
 
-SpliceKit isn't a feature list. It's a platform. Once the SpliceKit dylib is loaded into Final Cut Pro, the entire ObjC runtime (78,000+ classes including all private APIs) is open for plugins to use.
+---
 
-Plugins can:
+### 🧩 3. The Plugin Framework
+
+*Everything is a plugin.*
+
+SpliceKit isn't a feature list — it's a platform. Once the SpliceKit dylib is loaded into Final Cut Pro, the entire ObjC runtime (78,000+ classes, including all private APIs) is open for plugins to use.
+
+#### What a plugin can do
 
 - Add new panels and windows inside FCP
-- Add buttons to the toolbar, menu, or Enhancements menu
+- Put buttons on the toolbar, menu, or Enhancements menu
 - Register commands in the Command Palette
 - Expose new tools over the MCP server
-- Hook into timeline events, selection changes, playback
+- Hook into timeline events, selection changes, and playback
 - Ship custom Motion templates, FxPlug effects, and Workflow Extensions
-- Be written in Objective-C/C++, Swift, Lua, or Python
+- Be written in Objective-C / C++, Swift, Lua, or Python
 
-And — maybe the most important part — **you can ask an AI to build one**. Describe what you want the plugin to do, hand the spec to Claude, and it can write it against the SpliceKit framework. The project ships with full API reference docs specifically designed for AI consumption.
+#### And you can ask an AI to build one
+
+Describe what you want. Hand the spec to Claude. It writes the plugin against the SpliceKit framework — the project ships full API reference docs designed for AI consumption.
 
 ---
 

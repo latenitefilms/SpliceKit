@@ -58,3 +58,6 @@ out/
 # Local dev artifacts (not part of any release)
 .playwright-mcp/
 edit-helper.yml
+
+# Claude Code per-project memory (never commit)
+.claude/

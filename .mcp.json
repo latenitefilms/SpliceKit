@@ -1,7 +1,7 @@
 {
   "mcpServers": {
     "splicekit": {
-      "command": "python3",
+      "command": "/Users/briantate/.venvs/splicekit-mcp/bin/python",
       "args": ["/Users/briantate/Documents/GitHub/SpliceKit/mcp/server.py"]
     }
   }

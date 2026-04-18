@@ -9,7 +9,7 @@ struct WizardView: View {
             Divider()
             rightColumn
         }
-        .frame(width: 640, height: 440)
+        .frame(width: 740, height: 470)
         .preferredColorScheme(.dark)
     }
 

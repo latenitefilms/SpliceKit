@@ -87,6 +87,8 @@ class PatcherModel: ObservableObject {
     @Published var bridgeConnected = false
     @Published var isUpdateMode = false
     @Published var currentPanel: WizardPanel = .welcome
+    @Published var isSharingCrashLog = false
+    @Published var crashShareMessage: String?
 
     private var launchedFCPProcess: Process?
     private var launchMonitorTask: Task<Void, Never>?
@@ -295,6 +297,136 @@ class PatcherModel: ObservableObject {
         if connected != bridgeConnected {
             bridgeConnected = connected
         }
+    }
+
+    /// Bundle the newest Final Cut Pro crash report together with SpliceKit's
+    /// own patcher and runtime logs into a single filebin.net bin, then copy
+    /// the shareable bin URL to the clipboard. Used by the "Share Logs" button
+    /// on the status panel so users can hand one link to support.
+    func shareLatestCrashLog() {
+        guard !isSharingCrashLog else { return }
+        isSharingCrashLog = true
+        crashShareMessage = "Uploading logs..."
+        errorMessage = nil
+
+        Task {
+            let result = await uploadSupportLogs()
+            await MainActor.run {
+                self.isSharingCrashLog = false
+                switch result {
+                case .success(let shareURL):
+                    let pb = NSPasteboard.general
+                    pb.clearContents()
+                    pb.setString(shareURL, forType: .string)
+                    self.crashShareMessage = "Copied to clipboard: \(shareURL)"
+                case .failure(let error):
+                    self.crashShareMessage = nil
+                    self.errorMessage = "Log share failed: \(error.localizedDescription)"
+                }
+            }
+        }
+    }
+
+    private nonisolated func uploadSupportLogs() async -> Result<String, Error> {
+        var files: [(url: URL, name: String)] = []
+
+        if let crashURL = latestFCPCrashReportURL() {
+            files.append((crashURL, crashURL.lastPathComponent))
+        }
+
+        let logsDir = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Logs/SpliceKit")
+        let logNames = ["splicekit.log", "splicekit.previous.log",
+                        "patcher.log", "patcher.previous.log"]
+        for name in logNames {
+            let url = logsDir.appendingPathComponent(name)
+            if FileManager.default.fileExists(atPath: url.path) {
+                files.append((url, name))
+            }
+        }
+
+        guard !files.isEmpty else {
+            return .failure(PatchError.msg("No crash report or SpliceKit logs found to share."))
+        }
+
+        let bin = randomBinID()
+        var uploadedCount = 0
+        var lastError: Error?
+
+        for file in files {
+            let data: Data
+            do {
+                data = try Data(contentsOf: file.url)
+            } catch {
+                lastError = error
+                continue
+            }
+            let encoded = file.name.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? file.name
+            guard let uploadURL = URL(string: "https://filebin.net/\(bin)/\(encoded)") else {
+                continue
+            }
+            var request = URLRequest(url: uploadURL)
+            request.httpMethod = "POST"
+            request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
+            request.setValue(file.name, forHTTPHeaderField: "Filename")
+            request.timeoutInterval = 120
+            do {
+                let (_, response) = try await URLSession.shared.upload(for: request, from: data)
+                guard let http = response as? HTTPURLResponse else {
+                    lastError = PatchError.msg("Invalid response from filebin.net.")
+                    continue
+                }
+                guard (200...299).contains(http.statusCode) else {
+                    lastError = PatchError.msg("filebin.net returned HTTP \(http.statusCode) for \(file.name).")
+                    continue
+                }
+                uploadedCount += 1
+            } catch {
+                lastError = error
+            }
+        }
+
+        if uploadedCount == 0 {
+            return .failure(lastError ?? PatchError.msg("Upload failed."))
+        }
+        return .success("https://filebin.net/\(bin)")
+    }
+
+    private nonisolated func latestFCPCrashReportURL() -> URL? {
+        let fm = FileManager.default
+        let directories = [
+            fm.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/DiagnosticReports"),
+            URL(fileURLWithPath: "/Library/Logs/DiagnosticReports")
+        ]
+
+        var newest: (url: URL, modified: Date)?
+        for directory in directories {
+            guard let urls = try? fm.contentsOfDirectory(
+                at: directory,
+                includingPropertiesForKeys: [.contentModificationDateKey],
+                options: [.skipsHiddenFiles]
+            ) else { continue }
+
+            for url in urls {
+                let filename = url.lastPathComponent
+                guard filename.hasPrefix("Final Cut Pro"),
+                      ["ips", "crash", "txt"].contains(url.pathExtension.lowercased()),
+                      let modified = fileModificationDate(at: url) else {
+                    continue
+                }
+                if newest == nil || modified > newest!.modified {
+                    newest = (url, modified)
+                }
+            }
+        }
+        return newest?.url
+    }
+
+    private nonisolated func randomBinID() -> String {
+        let alphabet = Array("abcdefghijklmnopqrstuvwxyz0123456789")
+        var id = "splicekit-"
+        for _ in 0..<16 { id.append(alphabet.randomElement()!) }
+        return id
     }
 
     func patch() {

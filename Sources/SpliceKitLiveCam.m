@@ -10,6 +10,8 @@
 #import <VideoToolbox/VideoToolbox.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
+#import <mach/mach.h>
+#import <mach/mach_time.h>
 
 extern NSDictionary *SpliceKit_handleRequest(NSDictionary *request);
 
@@ -203,19 +205,16 @@ static NSString * const kSpliceKitLiveCamMetalSource =
 @"[[ stitchable ]] half4 maskRefine(coreimage::sampler_h mask, coreimage::sampler_h guide, float radius, float colorSigma) {\n"
 @"    float2 mc = mask.coord();\n"
 @"    float2 gc = guide.coord();\n"
-@"    float2 mStep = mask.size().zw * radius;\n"
-@"    float2 gStep = guide.size().zw * radius;\n"
 @"    half3 centerRGB = guide.sample(gc).rgb;\n"
 @"    half centerA = mask.sample(mc).r;\n"
 @"    float invSigma = 1.0 / max(colorSigma * colorSigma, 1e-4);\n"
 @"    float wSum = 0.0;\n"
 @"    float aSum = 0.0;\n"
-@"    for (int dy = -2; dy <= 2; dy++) {\n"
-@"        for (int dx = -2; dx <= 2; dx++) {\n"
-@"            float2 oM = float2(float(dx), float(dy)) * mStep;\n"
-@"            float2 oG = float2(float(dx), float(dy)) * gStep;\n"
-@"            half3 sRGB = guide.sample(gc + oG).rgb;\n"
-@"            half sA = mask.sample(mc + oM).r;\n"
+@"    for (int dy = -1; dy <= 1; dy++) {\n"
+@"        for (int dx = -1; dx <= 1; dx++) {\n"
+@"            float2 off = float2(float(dx), float(dy)) * radius;\n"
+@"            half3 sRGB = guide.sample(gc + off).rgb;\n"
+@"            half sA = mask.sample(mc + off).r;\n"
 @"            half3 d = sRGB - centerRGB;\n"
 @"            float colorD = float(dot(d, d));\n"
 @"            float spatialD = float(dx * dx + dy * dy) * 0.18;\n"
@@ -231,13 +230,12 @@ static NSString * const kSpliceKitLiveCamMetalSource =
 @"// negative = dilate (grow mask). Output is mixed with original by amount magnitude.\n"
 @"[[ stitchable ]] half4 maskChoke(coreimage::sampler_h mask, float amount) {\n"
 @"    float2 c = mask.coord();\n"
-@"    float2 px = mask.size().zw;\n"
 @"    float radius = abs(amount) * 6.0;\n"
 @"    half center = mask.sample(c).r;\n"
 @"    half acc = center;\n"
 @"    for (int i = 0; i < 8; i++) {\n"
 @"        float a = float(i) * 0.7853981633974483;\n"
-@"        float2 o = float2(cos(a), sin(a)) * radius * px;\n"
+@"        float2 o = float2(cos(a), sin(a)) * radius;\n"
 @"        half s = mask.sample(c + o).r;\n"
 @"        acc = (amount >= 0.0) ? min(acc, s) : max(acc, s);\n"
 @"    }\n"
@@ -272,6 +270,35 @@ static NSString * const kSpliceKitLiveCamMetalSource =
 
 static NSString *SpliceKitLiveCamString(id value) {
     return [value isKindOfClass:[NSString class]] ? value : @"";
+}
+
+// Resident memory footprint of the current process in MB. Used by perf logging
+// to surface mask-chain accumulation (which isn't heap-allocated itself but
+// keeps CIContext intermediates + Metal textures resident).
+static double SpliceKitLiveCamResidentMB(void) {
+    task_vm_info_data_t info;
+    mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
+    kern_return_t kr = task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&info, &count);
+    if (kr != KERN_SUCCESS) return -1.0;
+    return (double)info.phys_footprint / (1024.0 * 1024.0);
+}
+
+// Cheap estimate of how deep a CIImage's filter graph is. CIImage.description
+// walks the whole operator tree and prints each node on its own line, so line
+// count scales roughly linearly with chain depth. This isn't exact but is
+// sufficient to tell "fresh image" (a handful of lines) from "accumulated 200-
+// frame chain" (hundreds of lines).
+static NSUInteger SpliceKitLiveCamCIImageChainDepth(CIImage *image) {
+    if (!image) return 0;
+    NSString *desc = image.description;
+    if (desc.length == 0) return 0;
+    NSUInteger lines = 1;
+    const char *bytes = desc.UTF8String;
+    if (!bytes) return 1;
+    for (const char *p = bytes; *p; p++) {
+        if (*p == '\n') lines++;
+    }
+    return lines;
 }
 
 static NSString *SpliceKitLiveCamTrimmedString(id value) {
@@ -984,6 +1011,7 @@ typedef NS_ENUM(NSInteger, SpliceKitLiveCamSegmentationQuality) {
                     preserveAlpha:(BOOL)preserveAlpha;
 - (CIImage *)imageByCompositingOverPreviewCheckerboard:(CIImage *)alphaImage;
 - (void)resetMaskHistory;
+@property (nonatomic, strong, readonly) CIImage *previousMaskForBlend;
 @end
 
 @interface SpliceKitLiveCamRenderer ()
@@ -1071,9 +1099,22 @@ typedef NS_ENUM(NSInteger, SpliceKitLiveCamSegmentationQuality) {
 - (CIImage *)applyColorKernelNamed:(NSString *)name
                            toImage:(CIImage *)image
                          arguments:(NSArray<id> *)arguments {
-    CIColorKernel *kernel = (CIColorKernel *)self.kernels[name];
-    if (![kernel isKindOfClass:[CIColorKernel class]]) return image;
-    return [kernel applyWithExtent:image.extent arguments:arguments] ?: image;
+    // Despite the "Color" name, the method also handles general CIKernels so
+    // stitchable Metal shaders that sample neighbor pixels (rgbSplit, glitch,
+    // scanline, maskRefine, maskChoke) are not silently skipped.
+    CIKernel *kernel = self.kernels[name];
+    if (!kernel) return image;
+    CIImage *result = nil;
+    if ([kernel isKindOfClass:[CIColorKernel class]]) {
+        result = [(CIColorKernel *)kernel applyWithExtent:image.extent arguments:arguments];
+    } else {
+        result = [kernel applyWithExtent:image.extent
+                             roiCallback:^CGRect(int index, CGRect destRect) {
+                                 return CGRectInset(destRect, -12.0, -12.0);
+                             }
+                               arguments:arguments];
+    }
+    return result ?: image;
 }
 
 - (CIImage *)noiseImageForExtent:(CGRect)extent alpha:(CGFloat)alpha monochrome:(BOOL)monochrome {
@@ -1247,6 +1288,10 @@ typedef NS_ENUM(NSInteger, SpliceKitLiveCamSegmentationQuality) {
 }
 
 - (void)resetMaskHistory {
+    NSUInteger depth = SpliceKitLiveCamCIImageChainDepth(self.previousMaskForBlend);
+    if (depth > 5) {
+        SpliceKit_log(@"[LiveCamPerf] resetMaskHistory: dropped mask chain depth=%lu", (unsigned long)depth);
+    }
     self.previousMaskForBlend = nil;
 }
 
@@ -1275,9 +1320,16 @@ typedef NS_ENUM(NSInteger, SpliceKitLiveCamSegmentationQuality) {
 - (CIImage *)applyColorKernelNamed:(NSString *)name
                           toExtent:(CGRect)extent
                          arguments:(NSArray<id> *)arguments {
-    CIColorKernel *kernel = (CIColorKernel *)self.kernels[name];
-    if (![kernel isKindOfClass:[CIColorKernel class]]) return nil;
-    return [kernel applyWithExtent:extent arguments:arguments];
+    CIKernel *kernel = self.kernels[name];
+    if (!kernel) return nil;
+    if ([kernel isKindOfClass:[CIColorKernel class]]) {
+        return [(CIColorKernel *)kernel applyWithExtent:extent arguments:arguments];
+    }
+    return [kernel applyWithExtent:extent
+                       roiCallback:^CGRect(int index, CGRect destRect) {
+                           return CGRectInset(destRect, -16.0, -16.0);
+                       }
+                         arguments:arguments];
 }
 
 - (CIImage *)refinedMaskFor:(CIImage *)rawMask
@@ -1288,15 +1340,17 @@ typedef NS_ENUM(NSInteger, SpliceKitLiveCamSegmentationQuality) {
     CIImage *mask = [self imageFittedForCanvas:rawMask canvasSize:extent.size fill:YES];
     mask = [mask imageByCroppingToRect:extent];
 
-    // Edge-aware refinement snaps the soft Vision boundary to color edges in the
-    // guide image — the single biggest visual win for the halo problem.
-    if (params.refinement > 0.02) {
-        CGFloat radius = 1.0 + params.refinement * 2.5;
-        CGFloat sigma = 0.10 + (1.0 - params.refinement) * 0.35;
-        CIImage *refined = [self applyColorKernelNamed:@"maskRefine"
-                                              toExtent:extent
-                                             arguments:@[mask, guideImage, @(radius), @(sigma)]];
-        if (refined) mask = [refined imageByCroppingToRect:extent];
+    // Signed morphology on the mask: positive dilates (grows the cutout so more
+    // of the subject is kept), negative erodes (shrinks it so edge halo goes
+    // away). Matches FCP's own Background Remover "Contour" parameter semantics
+    // and uses Apple's Metal-backed CIMorphology filters.
+    if (fabs(params.refinement) > 0.02) {
+        CGFloat radius = fabs(params.refinement) * 8.0;
+        NSString *filterName = (params.refinement > 0) ? @"CIMorphologyMaximum" : @"CIMorphologyMinimum";
+        CIImage *shaped = SpliceKitLiveCamApplyFilter(mask, filterName, @{
+            kCIInputRadiusKey: @(radius),
+        });
+        if (shaped) mask = [shaped imageByCroppingToRect:extent];
     }
 
     // Choke before feathering so the gaussian softens the *new* boundary.
@@ -1599,6 +1653,7 @@ typedef NS_ENUM(NSInteger, SpliceKitLiveCamSegmentationQuality) {
 @property (nonatomic, strong) NSTextField *presetLabel;
 @property (nonatomic, strong) NSTextField *elapsedLabel;
 @property (nonatomic, strong) NSTextField *sessionLabel;
+@property (nonatomic, strong) NSButton *permissionButton;
 @property (nonatomic, strong) NSTextField *lookDescriptionLabel;
 @property (nonatomic, strong) NSTextField *destinationHintLabel;
 @property (nonatomic, strong) NSTextField *backgroundInfoLabel;
@@ -1685,6 +1740,11 @@ typedef NS_ENUM(NSInteger, SpliceKitLiveCamSegmentationQuality) {
 @property (nonatomic, strong) NSDate *recordingStartDate;
 @property (nonatomic, assign) NSUInteger droppedVideoFrames;
 @property (nonatomic, assign) NSUInteger droppedAudioFrames;
+@property (nonatomic, assign) NSUInteger perfFrameCount;
+@property (nonatomic, assign) double perfFrameMsSum;
+@property (nonatomic, assign) double perfFrameMsMax;
+@property (nonatomic, assign) NSUInteger perfPrevMaskChainDepth;
+@property (nonatomic, assign) NSTimeInterval perfLastLogTime;
 @property (nonatomic, assign) double smoothedAudioLevel;
 @property (nonatomic, assign) BOOL systemBlurSupported;
 @property (nonatomic, assign) BOOL systemBlurActive;
@@ -2119,6 +2179,14 @@ typedef NS_ENUM(NSInteger, SpliceKitLiveCamSegmentationQuality) {
     self.sessionLabel.alignment = NSTextAlignmentRight;
     self.sessionLabel.maximumNumberOfLines = 1;
 
+    self.permissionButton = [NSButton buttonWithTitle:@"Allow Camera…"
+                                               target:self
+                                               action:@selector(permissionButtonClicked:)];
+    self.permissionButton.translatesAutoresizingMaskIntoConstraints = NO;
+    self.permissionButton.bezelStyle = NSBezelStyleRounded;
+    self.permissionButton.font = [NSFont systemFontOfSize:11 weight:NSFontWeightMedium];
+    self.permissionButton.hidden = YES;
+
     NSStackView *titleCluster = [NSStackView stackViewWithViews:@[titleIconView, titleLabel]];
     titleCluster.translatesAutoresizingMaskIntoConstraints = NO;
     titleCluster.orientation = NSUserInterfaceLayoutOrientationHorizontal;
@@ -2129,6 +2197,7 @@ typedef NS_ENUM(NSInteger, SpliceKitLiveCamSegmentationQuality) {
     NSView *header = [[NSView alloc] initWithFrame:NSZeroRect];
     header.translatesAutoresizingMaskIntoConstraints = NO;
     [header addSubview:titleCluster];
+    [header addSubview:self.permissionButton];
     [header addSubview:self.sessionLabel];
 
     NSView *previewContainer = [[NSView alloc] initWithFrame:NSZeroRect];
@@ -2198,7 +2267,7 @@ typedef NS_ENUM(NSInteger, SpliceKitLiveCamSegmentationQuality) {
 
     self.backgroundEdgeSlider = [self configuredSliderWithValue:0.25 minValue:0.0 maxValue:1.0];
     // Defaults are tuned to clean up the typical Vision overcut without manual tweaking.
-    self.backgroundRefinementSlider = [self configuredSliderWithValue:0.55 minValue:0.0 maxValue:1.0];
+    self.backgroundRefinementSlider = [self configuredSliderWithValue:0.0 minValue:-1.0 maxValue:1.0];
     self.backgroundChokeSlider = [self configuredSliderWithValue:0.20 minValue:-1.0 maxValue:1.0];
     self.backgroundSpillSlider = [self configuredSliderWithValue:0.55 minValue:0.0 maxValue:1.0];
     self.backgroundWrapSlider = [self configuredSliderWithValue:0.0 minValue:0.0 maxValue:1.0];
@@ -2643,6 +2712,10 @@ typedef NS_ENUM(NSInteger, SpliceKitLiveCamSegmentationQuality) {
         [self.sessionLabel.centerYAnchor constraintEqualToAnchor:titleCluster.centerYAnchor],
         [self.sessionLabel.leadingAnchor constraintGreaterThanOrEqualToAnchor:titleCluster.trailingAnchor constant:24.0],
 
+        [self.permissionButton.centerYAnchor constraintEqualToAnchor:self.sessionLabel.centerYAnchor],
+        [self.permissionButton.trailingAnchor constraintEqualToAnchor:self.sessionLabel.leadingAnchor constant:-8.0],
+        [self.permissionButton.leadingAnchor constraintGreaterThanOrEqualToAnchor:titleCluster.trailingAnchor constant:16.0],
+
         // Scroll view fills the rest of the panel.
         [scrollView.leadingAnchor constraintEqualToAnchor:background.leadingAnchor],
         [scrollView.trailingAnchor constraintEqualToAnchor:background.trailingAnchor],
@@ -2938,7 +3011,9 @@ typedef NS_ENUM(NSInteger, SpliceKitLiveCamSegmentationQuality) {
     self.backgroundRefinementSlider.enabled = greenScreen;
     self.backgroundChokeSlider.enabled = greenScreen;
     self.backgroundSpillSlider.enabled = greenScreen;
-    self.backgroundWrapSlider.enabled = greenScreen;
+    // Light wrap is a no-op in transparent mode (no background color to bleed).
+    BOOL transparentKey = [[self selectedBackgroundColorKey] isEqualToString:@"transparent"];
+    self.backgroundWrapSlider.enabled = greenScreen && !transparentKey;
     self.backgroundQualityPopup.enabled = greenScreen;
 
     if (blur) {
@@ -3175,11 +3250,20 @@ typedef NS_ENUM(NSInteger, SpliceKitLiveCamSegmentationQuality) {
         self.cameraAuthorized = videoGranted || videoStatus == AVAuthorizationStatusAuthorized;
         self.microphoneAuthorized = audioGranted || audioStatus == AVAuthorizationStatusAuthorized;
         if (!self.cameraAuthorized) {
-            [self updateStatus:@"Camera permission is required for LiveCam. Enable camera access for Final Cut Pro, then reopen LiveCam."];
+            AVAuthorizationStatus currentVideoStatus = [AVCaptureDevice authorizationStatusForMediaType:AVMediaTypeVideo];
+            BOOL needsSystemSettings = (currentVideoStatus == AVAuthorizationStatusDenied ||
+                                         currentVideoStatus == AVAuthorizationStatusRestricted);
+            self.permissionButton.title = needsSystemSettings ? @"Open System Settings…" : @"Allow Camera…";
+            self.permissionButton.hidden = NO;
+            NSString *detail = needsSystemSettings
+                ? @"Camera permission is off. Click Open System Settings… to turn on camera access for Final Cut Pro."
+                : @"Camera permission is required for LiveCam. Click Allow Camera… to grant access.";
+            [self updateStatus:detail];
             [self updateSessionLabel:@"Camera permission denied"];
             [self updateControlsForState];
             return;
         }
+        self.permissionButton.hidden = YES;
 
         if (!self.microphoneAuthorized) {
             [self updateStatus:@"Microphone access is off, so LiveCam will preview video only until microphone permission is granted."];
@@ -3187,6 +3271,16 @@ typedef NS_ENUM(NSInteger, SpliceKitLiveCamSegmentationQuality) {
 
         [self reconfigurePreviewSession];
     });
+}
+
+- (void)permissionButtonClicked:(id)sender {
+    AVAuthorizationStatus videoStatus = [AVCaptureDevice authorizationStatusForMediaType:AVMediaTypeVideo];
+    if (videoStatus == AVAuthorizationStatusNotDetermined) {
+        [self requestPermissionsAndStartPreviewIfPossible];
+        return;
+    }
+    NSURL *url = [NSURL URLWithString:@"x-apple.systempreferences:com.apple.preference.security?Privacy_Camera"];
+    [[NSWorkspace sharedWorkspace] openURL:url];
 }
 
 - (AVCaptureDevice *)selectedVideoDevice {
@@ -4229,6 +4323,8 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         CVImageBufferRef imageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer);
         if (!imageBuffer) return;
 
+        uint64_t frameStartTicks = mach_absolute_time();
+
         CIImage *source = [CIImage imageWithCVPixelBuffer:imageBuffer];
         if (!source) return;
 
@@ -4286,6 +4382,41 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
         if (self.recordingActive) {
             [self appendVideoFrame:rendered atTime:pts];
+        }
+
+        // Perf instrumentation: accumulate per-frame render time and log a
+        // summary every ~2 seconds with the current CIImage graph depth of
+        // the retained previous-mask (which is the primary suspect for the
+        // "slower over time, snaps back after mode toggle" behavior) and
+        // process RSS. Remove once the slowdown is root-caused and fixed.
+        static mach_timebase_info_data_t timebase = {0, 0};
+        if (timebase.denom == 0) mach_timebase_info(&timebase);
+        double frameMs = ((mach_absolute_time() - frameStartTicks) * timebase.numer / (double)timebase.denom) / 1.0e6;
+        self.perfFrameCount += 1;
+        self.perfFrameMsSum += frameMs;
+        if (frameMs > self.perfFrameMsMax) self.perfFrameMsMax = frameMs;
+        NSTimeInterval now = CACurrentMediaTime();
+        if (self.perfLastLogTime == 0) self.perfLastLogTime = now;
+        if (now - self.perfLastLogTime >= 2.0 && self.perfFrameCount > 0) {
+            double avgMs = self.perfFrameMsSum / self.perfFrameCount;
+            NSUInteger chainDepth = SpliceKitLiveCamCIImageChainDepth(self.renderer.previousMaskForBlend);
+            double rssMB = SpliceKitLiveCamResidentMB();
+            SpliceKit_log(@"[LiveCamPerf] frames=%lu avg=%.1fms max=%.1fms maskGraph=%lu lines rss=%.1fMB bg=%ld refinement=%.2f choke=%.2f edge=%.2f spill=%.2f wrap=%.2f",
+                          (unsigned long)self.perfFrameCount,
+                          avgMs,
+                          self.perfFrameMsMax,
+                          (unsigned long)chainDepth,
+                          rssMB,
+                          (long)backgroundMode,
+                          self.backgroundRefinementSlider.doubleValue,
+                          self.backgroundChokeSlider.doubleValue,
+                          self.backgroundEdgeSlider.doubleValue,
+                          self.backgroundSpillSlider.doubleValue,
+                          self.backgroundWrapSlider.doubleValue);
+            self.perfFrameCount = 0;
+            self.perfFrameMsSum = 0;
+            self.perfFrameMsMax = 0;
+            self.perfLastLogTime = now;
         }
     } else if (output == self.audioOutput) {
         [self handleAudioMeterFromSampleBuffer:sampleBuffer];

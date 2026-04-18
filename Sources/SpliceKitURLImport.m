@@ -28,9 +28,35 @@ static NSString * const SpliceKitURLImportStateFailed = @"failed";
 static NSString * const SpliceKitURLImportStateCancelled = @"cancelled";
 
 static NSString *SpliceKitURLImportStringFromData(NSData *data);
+static NSArray *SpliceKitURLImportArrayFromContainer(id value);
 
 static NSString *SpliceKitURLImportString(id value) {
     return [value isKindOfClass:[NSString class]] ? value : @"";
+}
+
+static NSArray *SpliceKitURLImportArrayFromContainer(id value) {
+    if (!value || value == (id)kCFNull) return @[];
+    if ([value isKindOfClass:[NSArray class]]) return value;
+
+    SEL allObjectsSel = NSSelectorFromString(@"allObjects");
+    if ([value respondsToSelector:allObjectsSel]) {
+        id allObjects = ((id (*)(id, SEL))objc_msgSend)(value, allObjectsSel);
+        if ([allObjects isKindOfClass:[NSArray class]]) return allObjects;
+    }
+
+    SEL countSel = @selector(count);
+    SEL objectAtIndexSel = @selector(objectAtIndex:);
+    if ([value respondsToSelector:countSel] && [value respondsToSelector:objectAtIndexSel]) {
+        NSUInteger count = ((NSUInteger (*)(id, SEL))objc_msgSend)(value, countSel);
+        NSMutableArray *items = [NSMutableArray arrayWithCapacity:count];
+        for (NSUInteger i = 0; i < count; i++) {
+            id item = ((id (*)(id, SEL, NSUInteger))objc_msgSend)(value, objectAtIndexSel, i);
+            if (item) [items addObject:item];
+        }
+        return items;
+    }
+
+    return @[];
 }
 
 static NSString *SpliceKitURLImportDiagnosticString(id value) {
@@ -126,7 +152,7 @@ static BOOL SpliceKitURLImportIsDirectMediaExtension(NSString *extension) {
     static NSSet<NSString *> *allowed = nil;
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
-        allowed = [NSSet setWithArray:@[@"mp4", @"mov", @"m4v", @"webm"]];
+        allowed = [NSSet setWithArray:@[@"mp4", @"mov", @"m4v", @"webm", @"mkv"]];
     });
     return [allowed containsObject:[extension lowercaseString]];
 }
@@ -152,6 +178,53 @@ static NSString *SpliceKitURLImportSharedBaseDirectory(void) {
 static NSString *SpliceKitURLImportSharedDownloadsDirectory(void) {
     return SpliceKitURLImportEnsureDirectory([SpliceKitURLImportSharedBaseDirectory()
         stringByAppendingPathComponent:@"downloads"]);
+}
+
+static NSString *SpliceKitURLImportSharedNormalizedDirectory(void) {
+    return SpliceKitURLImportEnsureDirectory([SpliceKitURLImportSharedBaseDirectory()
+        stringByAppendingPathComponent:@"normalized"]);
+}
+
+static BOOL SpliceKitURLImportPathIsWithinDirectory(NSString *path, NSString *directory) {
+    NSString *standardPath = [SpliceKitURLImportTrimmedString(path) stringByStandardizingPath];
+    NSString *standardDirectory = [SpliceKitURLImportTrimmedString(directory) stringByStandardizingPath];
+    if (standardPath.length == 0 || standardDirectory.length == 0) return NO;
+    if ([standardPath isEqualToString:standardDirectory]) return YES;
+    NSString *prefix = [standardDirectory hasSuffix:@"/"]
+        ? standardDirectory
+        : [standardDirectory stringByAppendingString:@"/"];
+    return [standardPath hasPrefix:prefix];
+}
+
+static NSArray<NSString *> *SpliceKitURLImportUniqueStrings(id base, NSArray<NSString *> *extras) {
+    NSMutableOrderedSet<NSString *> *values = [NSMutableOrderedSet orderedSet];
+    for (id item in SpliceKitURLImportArrayFromContainer(base)) {
+        if ([item isKindOfClass:[NSString class]] && ((NSString *)item).length > 0) {
+            [values addObject:item];
+        }
+    }
+    for (NSString *item in extras) {
+        if (item.length > 0) {
+            [values addObject:item];
+        }
+    }
+    return values.array ?: @[];
+}
+
+static NSString *SpliceKitURLImportUniquePathForFilename(NSString *filename, NSString *directory) {
+    NSString *base = [[filename stringByDeletingPathExtension] copy];
+    NSString *ext = [[filename pathExtension] lowercaseString];
+    NSString *candidate = filename;
+    NSInteger suffix = 1;
+
+    while ([[NSFileManager defaultManager] fileExistsAtPath:[directory stringByAppendingPathComponent:candidate]]) {
+        candidate = ext.length > 0
+            ? [NSString stringWithFormat:@"%@-%ld.%@", base, (long)suffix, ext]
+            : [NSString stringWithFormat:@"%@-%ld", base, (long)suffix];
+        suffix++;
+    }
+
+    return [directory stringByAppendingPathComponent:candidate];
 }
 
 static void SpliceKitURLImportAddExecutableCandidate(NSMutableOrderedSet<NSString *> *candidates,
@@ -263,6 +336,124 @@ static NSString *SpliceKitURLImportFFmpegPath(void) {
     return SpliceKitURLImportDependencyPath(@"ffmpeg", @"SPLICEKIT_FFMPEG_PATH");
 }
 
+static NSString *SpliceKitURLImportFFprobePath(void) {
+    return SpliceKitURLImportDependencyPath(@"ffprobe", @"SPLICEKIT_FFPROBE_PATH");
+}
+
+static FourCharCode SpliceKitURLImportTrackCodecType(AVAssetTrack *track) {
+    if (!track) return 0;
+    NSArray *formatDescriptions = track.formatDescriptions;
+    id firstDescription = formatDescriptions.firstObject;
+    if (!firstDescription) return 0;
+    return CMFormatDescriptionGetMediaSubType((CMFormatDescriptionRef)firstDescription);
+}
+
+static FourCharCode SpliceKitURLImportVideoCodecType(AVAssetTrack *videoTrack) {
+    return SpliceKitURLImportTrackCodecType(videoTrack);
+}
+
+static FourCharCode SpliceKitURLImportAudioCodecType(AVAssetTrack *audioTrack) {
+    return SpliceKitURLImportTrackCodecType(audioTrack);
+}
+
+static NSString *SpliceKitURLImportFourCCString(FourCharCode code) {
+    if (code == 0) return @"";
+    char chars[5] = {
+        (char)((code >> 24) & 0xFF),
+        (char)((code >> 16) & 0xFF),
+        (char)((code >> 8) & 0xFF),
+        (char)(code & 0xFF),
+        0
+    };
+    return [NSString stringWithUTF8String:chars] ?: @"";
+}
+
+static BOOL SpliceKitURLImportCanonicalFrameTimingForRate(double fps,
+                                                          int *outTimescale,
+                                                          int *outFrameTicks) {
+    if (!(fps > 0.0) || !isfinite(fps)) return NO;
+
+    struct {
+        double fps;
+        int timescale;
+        int frameTicks;
+    } knownRates[] = {
+        { 24000.0 / 1001.0, 24000, 1001 },
+        { 24.0,             24000, 1000 },
+        { 25.0,             25000, 1000 },
+        { 30000.0 / 1001.0, 30000, 1001 },
+        { 30.0,             30000, 1000 },
+        { 50.0,             50000, 1000 },
+        { 60000.0 / 1001.0, 60000, 1001 },
+        { 60.0,             60000, 1000 },
+    };
+
+    for (size_t i = 0; i < sizeof(knownRates) / sizeof(knownRates[0]); ++i) {
+        if (fabs(fps - knownRates[i].fps) <= 0.05) {
+            if (outTimescale) *outTimescale = knownRates[i].timescale;
+            if (outFrameTicks) *outFrameTicks = knownRates[i].frameTicks;
+            return YES;
+        }
+    }
+
+    int timescale = (int)lrint(fps * 1000.0);
+    if (timescale <= 0) return NO;
+    if (outTimescale) *outTimescale = timescale;
+    if (outFrameTicks) *outFrameTicks = 1000;
+    return YES;
+}
+
+static BOOL SpliceKitURLImportCanonicalFrameTimingForTrack(AVAssetTrack *videoTrack,
+                                                           int *outTimescale,
+                                                           int *outFrameTicks) {
+    if (!videoTrack) return NO;
+    if (SpliceKitURLImportCanonicalFrameTimingForRate(videoTrack.nominalFrameRate,
+                                                      outTimescale,
+                                                      outFrameTicks)) {
+        return YES;
+    }
+
+    CMTime minFrameDuration = videoTrack.minFrameDuration;
+    if (CMTIME_IS_VALID(minFrameDuration) && !CMTIME_IS_INDEFINITE(minFrameDuration) &&
+        minFrameDuration.value > 0 && minFrameDuration.timescale > 0) {
+        double fps = (double)minFrameDuration.timescale / (double)minFrameDuration.value;
+        return SpliceKitURLImportCanonicalFrameTimingForRate(fps, outTimescale, outFrameTicks);
+    }
+    return NO;
+}
+
+static BOOL SpliceKitURLImportCMTimeMatchesRational(CMTime time, int value, int timescale) {
+    if (!CMTIME_IS_VALID(time) || CMTIME_IS_INDEFINITE(time) ||
+        time.value <= 0 || time.timescale <= 0 ||
+        value <= 0 || timescale <= 0) {
+        return NO;
+    }
+    return (int64_t)time.value * (int64_t)timescale == (int64_t)value * (int64_t)time.timescale;
+}
+
+static BOOL SpliceKitURLImportNormalizationModeUsesStreamCopy(NSString *mode) {
+    NSString *normalized = SpliceKitURLImportTrimmedString(mode);
+    return [normalized isEqualToString:@"rewrite_timestamps"] ||
+           [normalized isEqualToString:@"remux_copy"] ||
+           [normalized isEqualToString:@"remux_copy_rewrite_timestamps"];
+}
+
+static BOOL SpliceKitURLImportNormalizationModeNeedsTimestampRewrite(NSString *mode) {
+    NSString *normalized = SpliceKitURLImportTrimmedString(mode);
+    return [normalized isEqualToString:@"rewrite_timestamps"] ||
+           [normalized isEqualToString:@"remux_copy_rewrite_timestamps"];
+}
+
+static NSString *SpliceKitURLImportOutputExtensionForNormalizationMode(NSString *mode) {
+    NSString *normalized = SpliceKitURLImportTrimmedString(mode);
+    if ([normalized isEqualToString:@"rewrite_timestamps"] ||
+        [normalized isEqualToString:@"remux_copy"] ||
+        [normalized isEqualToString:@"remux_copy_rewrite_timestamps"]) {
+        return @"mp4";
+    }
+    return @"mov";
+}
+
 static NSString *SpliceKitURLImportProviderDependencyMessage(NSString *provider,
                                                             NSString *ytDLP,
                                                             NSString *ffmpeg) {
@@ -284,6 +475,92 @@ static NSString *SpliceKitURLImportStringFromData(NSData *data) {
     if (string.length > 0) return string;
     string = [[NSString alloc] initWithData:data encoding:NSISOLatin1StringEncoding];
     return string ?: @"";
+}
+
+static double SpliceKitURLImportParseFractionString(NSString *value) {
+    NSString *trimmed = SpliceKitURLImportTrimmedString(value);
+    if (trimmed.length == 0) return 0.0;
+
+    NSRange slashRange = [trimmed rangeOfString:@"/"];
+    if (slashRange.location != NSNotFound) {
+        NSString *numeratorString = [trimmed substringToIndex:slashRange.location];
+        NSString *denominatorString = [trimmed substringFromIndex:(slashRange.location + 1)];
+        double numerator = numeratorString.doubleValue;
+        double denominator = denominatorString.doubleValue;
+        if (numerator > 0.0 && denominator > 0.0 && isfinite(numerator) && isfinite(denominator)) {
+            return numerator / denominator;
+        }
+        return 0.0;
+    }
+
+    double scalar = trimmed.doubleValue;
+    return (scalar > 0.0 && isfinite(scalar)) ? scalar : 0.0;
+}
+
+static NSString *SpliceKitURLImportCMTimeStringFromSeconds(double seconds, NSString *fallback) {
+    if (!(seconds >= 0.0) || !isfinite(seconds)) return fallback ?: @"2400/2400s";
+    int32_t timescale = 1000;
+    int64_t value = llround(seconds * (double)timescale);
+    if (value < 0) value = 0;
+    return [NSString stringWithFormat:@"%lld/%ds", value, timescale];
+}
+
+static NSDictionary *SpliceKitURLImportFFprobeJSONForPath(NSString *path, NSString **outError) {
+    NSString *ffprobe = SpliceKitURLImportFFprobePath();
+    if (ffprobe.length == 0) {
+        if (outError) {
+            *outError = @"SpliceKit could not find ffprobe to inspect this Matroska/WebM source. Run `make url-import-tools` or put ffprobe in ~/Applications/SpliceKit/tools/.";
+        }
+        return nil;
+    }
+
+    NSTask *task = [[NSTask alloc] init];
+    task.executableURL = [NSURL fileURLWithPath:ffprobe];
+    task.arguments = @[
+        @"-v", @"error",
+        @"-show_streams",
+        @"-show_format",
+        @"-print_format", @"json",
+        path,
+    ];
+
+    NSPipe *pipe = [NSPipe pipe];
+    task.standardOutput = pipe;
+    task.standardError = pipe;
+
+    NSError *launchError = nil;
+    if (![task launchAndReturnError:&launchError]) {
+        if (outError) {
+            *outError = launchError.localizedDescription ?: @"Could not launch ffprobe to inspect the source media.";
+        }
+        return nil;
+    }
+
+    NSData *data = [[pipe fileHandleForReading] readDataToEndOfFile];
+    [task waitUntilExit];
+    NSString *output = SpliceKitURLImportTrimmedString(SpliceKitURLImportStringFromData(data));
+    if (task.terminationStatus != 0) {
+        if (outError) {
+            *outError = output.length > 0 ? output : @"ffprobe failed while inspecting the source media.";
+        }
+        return nil;
+    }
+
+    if (output.length == 0) {
+        if (outError) *outError = @"ffprobe returned no metadata for the source media.";
+        return nil;
+    }
+
+    NSData *jsonData = [output dataUsingEncoding:NSUTF8StringEncoding];
+    NSError *jsonError = nil;
+    id object = [NSJSONSerialization JSONObjectWithData:jsonData options:0 error:&jsonError];
+    if (![object isKindOfClass:[NSDictionary class]]) {
+        if (outError) {
+            *outError = jsonError.localizedDescription ?: @"ffprobe returned malformed JSON.";
+        }
+        return nil;
+    }
+    return (NSDictionary *)object;
 }
 
 static NSDictionary *SpliceKitURLImportProviderMetadata(NSString *ytDLP,
@@ -785,6 +1062,7 @@ static void SpliceKitURLImportResolveProviderURL(NSString *provider,
 - (NSDictionary *)startImportWithParams:(NSDictionary *)params waitForCompletion:(BOOL)wait;
 - (NSDictionary *)statusForJobID:(NSString *)jobID;
 - (NSDictionary *)cancelJobID:(NSString *)jobID;
+- (NSDictionary *)inspectMediaAtPath:(NSString *)path;
 @end
 
 @implementation SpliceKitURLImportService
@@ -842,12 +1120,7 @@ static void SpliceKitURLImportResolveProviderURL(NSString *provider,
 }
 
 - (NSString *)normalizedDirectory {
-    NSString *path = [[self baseDirectory] stringByAppendingPathComponent:@"normalized"];
-    [[NSFileManager defaultManager] createDirectoryAtPath:path
-                              withIntermediateDirectories:YES
-                                               attributes:nil
-                                                    error:nil];
-    return path;
+    return SpliceKitURLImportSharedNormalizedDirectory();
 }
 
 - (void)updateJob:(SpliceKitURLImportJob *)job
@@ -993,19 +1266,7 @@ static void SpliceKitURLImportResolveProviderURL(NSString *provider,
 }
 
 - (NSString *)pathForFilename:(NSString *)filename directory:(NSString *)directory {
-    NSString *base = [[filename stringByDeletingPathExtension] copy];
-    NSString *ext = [[filename pathExtension] lowercaseString];
-    NSString *candidate = filename;
-    NSInteger suffix = 1;
-
-    while ([[NSFileManager defaultManager] fileExistsAtPath:[directory stringByAppendingPathComponent:candidate]]) {
-        candidate = ext.length > 0
-            ? [NSString stringWithFormat:@"%@-%ld.%@", base, (long)suffix, ext]
-            : [NSString stringWithFormat:@"%@-%ld", base, (long)suffix];
-        suffix++;
-    }
-
-    return [directory stringByAppendingPathComponent:candidate];
+    return SpliceKitURLImportUniquePathForFilename(filename, directory);
 }
 
 - (NSString *)filenameForJob:(SpliceKitURLImportJob *)job response:(NSURLResponse *)response {
@@ -1034,6 +1295,96 @@ static void SpliceKitURLImportResolveProviderURL(NSString *provider,
 
     SpliceKit_log(@"[URLImport] Inspecting media at %@", safePath);
 
+    NSString *ext = [[safePath pathExtension] lowercaseString];
+    BOOL isMP4Family = [@[@"mp4", @"mov", @"m4v"] containsObject:ext];
+    BOOL isMatroskaFamily = [@[@"mkv", @"webm"] containsObject:ext];
+    if (isMatroskaFamily) {
+        NSString *probeError = nil;
+        NSDictionary *probe = SpliceKitURLImportFFprobeJSONForPath(safePath, &probeError);
+        if (![probe isKindOfClass:[NSDictionary class]]) {
+            return @{@"error": probeError ?: @"SpliceKit could not inspect this Matroska/WebM source."};
+        }
+
+        NSArray *streams = [probe[@"streams"] isKindOfClass:[NSArray class]] ? probe[@"streams"] : @[];
+        NSDictionary *format = [probe[@"format"] isKindOfClass:[NSDictionary class]] ? probe[@"format"] : @{};
+        NSDictionary *videoStream = nil;
+        NSDictionary *audioStream = nil;
+        for (id item in streams) {
+            if (![item isKindOfClass:[NSDictionary class]]) continue;
+            NSDictionary *stream = (NSDictionary *)item;
+            NSString *codecType = SpliceKitURLImportTrimmedString(stream[@"codec_type"]).lowercaseString;
+            if (!videoStream && [codecType isEqualToString:@"video"]) {
+                videoStream = stream;
+            } else if (!audioStream && [codecType isEqualToString:@"audio"]) {
+                audioStream = stream;
+            }
+        }
+
+        if (!videoStream && !audioStream) {
+            return @{@"error": @"Matroska/WebM source has no readable audio or video streams."};
+        }
+
+        NSString *videoCodecName = SpliceKitURLImportTrimmedString(videoStream[@"codec_name"]).lowercaseString;
+        NSString *audioCodecName = SpliceKitURLImportTrimmedString(audioStream[@"codec_name"]).lowercaseString;
+        BOOL audioIsAACOrAbsent = (audioStream == nil) || [audioCodecName containsString:@"aac"];
+        BOOL canStreamCopyToMP4 = ([videoCodecName isEqualToString:@"vp9"] ||
+                                   [videoCodecName isEqualToString:@"vp8"]) &&
+                                  audioIsAACOrAbsent;
+
+        double fps = SpliceKitURLImportParseFractionString(videoStream[@"avg_frame_rate"]);
+        if (!(fps > 0.0)) {
+            fps = SpliceKitURLImportParseFractionString(videoStream[@"r_frame_rate"]);
+        }
+
+        int canonicalTimescale = 0;
+        int canonicalFrameTicks = 0;
+        BOOL hasCanonicalTiming = SpliceKitURLImportCanonicalFrameTimingForRate(fps,
+                                                                                &canonicalTimescale,
+                                                                                &canonicalFrameTicks);
+        BOOL frameTimingLooksCanonical = hasCanonicalTiming &&
+            fabs(fps - ((double)canonicalTimescale / (double)canonicalFrameTicks)) <= 0.05;
+
+        NSString *duration = SpliceKitURLImportCMTimeStringFromSeconds([format[@"duration"] doubleValue],
+                                                                       @"2400/2400s");
+        NSString *frameDuration = hasCanonicalTiming
+            ? [NSString stringWithFormat:@"%d/%ds", canonicalFrameTicks, canonicalTimescale]
+            : @"100/2400s";
+
+        NSMutableDictionary *info = [NSMutableDictionary dictionary];
+        info[@"duration"] = duration;
+        info[@"width"] = @([videoStream[@"width"] intValue] ?: 1920);
+        info[@"height"] = @([videoStream[@"height"] intValue] ?: 1080);
+        info[@"frameDuration"] = frameDuration;
+        info[@"hasVideo"] = @(videoStream != nil);
+        info[@"hasAudio"] = @(audioStream != nil);
+        info[@"audioRate"] = @([audioStream[@"sample_rate"] intValue]);
+        info[@"videoCodec"] = videoCodecName ?: @"";
+        if (audioCodecName.length > 0) info[@"audioCodec"] = audioCodecName;
+        if (canonicalTimescale > 0) info[@"canonicalFrameTimescale"] = @(canonicalTimescale);
+        if (canonicalFrameTicks > 0) info[@"canonicalFrameTicks"] = @(canonicalFrameTicks);
+        info[@"frameTimingLooksCanonical"] = @(frameTimingLooksCanonical);
+        info[@"canStreamCopyToMP4"] = @(canStreamCopyToMP4);
+
+        if (canStreamCopyToMP4) {
+            info[@"requiresNormalization"] = @YES;
+            // Matroska + VP9/VP8: ALWAYS rewrite timestamps to canonical CFR
+            // rather than trusting avg_frame_rate to be representative.
+            // MKV packets are typically millisecond-quantized, so individual
+            // frame deltas alternate (42ms, 41ms, 42ms, ...) even when the
+            // average looks like a clean 24000/1001. If we just stream-copy
+            // those timestamps into MP4 (time_base ends up 1/16000), FCP
+            // plays back with visible pacing artifacts. The setts bsf gives
+            // us a proper 24000/1001 time_base with uniform deltas.
+            info[@"normalizationMode"] = hasCanonicalTiming
+                ? @"remux_copy_rewrite_timestamps"
+                : @"remux_copy";
+        } else {
+            info[@"requiresNormalization"] = @YES;
+            info[@"normalizationMode"] = @"transcode";
+        }
+        return info;
+    }
+
     NSURL *url = [NSURL fileURLWithPath:safePath];
     AVURLAsset *asset = [AVURLAsset URLAssetWithURL:url options:nil];
     NSArray<AVAssetTrack *> *videoTracks = [asset tracksWithMediaType:AVMediaTypeVideo];
@@ -1046,12 +1397,25 @@ static void SpliceKitURLImportResolveProviderURL(NSString *provider,
 
     AVAssetTrack *videoTrack = videoTracks.firstObject;
     AVAssetTrack *audioTrack = audioTracks.firstObject;
-    NSString *ext = [[safePath pathExtension] lowercaseString];
-    BOOL requiresNormalization = !([@[@"mp4", @"mov", @"m4v"] containsObject:ext]);
+    BOOL requiresNormalization = !isMP4Family;
+    NSString *normalizationMode = requiresNormalization ? @"transcode" : @"none";
 
     int width = 1920;
     int height = 1080;
     NSString *frameDuration = @"100/2400s";
+    FourCharCode videoCodecType = SpliceKitURLImportVideoCodecType(videoTrack);
+    NSString *videoCodec = SpliceKitURLImportFourCCString(videoCodecType);
+    FourCharCode audioCodecType = SpliceKitURLImportAudioCodecType(audioTrack);
+    NSString *audioCodec = SpliceKitURLImportFourCCString(audioCodecType);
+    int canonicalTimescale = 0;
+    int canonicalFrameTicks = 0;
+    BOOL frameTimingLooksCanonical = NO;
+    NSString *audioCodecLower = audioCodec.lowercaseString ?: @"";
+    BOOL audioIsAACOrAbsent = (audioTrack == nil) ||
+        [audioCodecLower containsString:@"aac"] ||
+        [audioCodecLower isEqualToString:@"mp4a"];
+    BOOL canStreamCopyToMP4 = (videoCodecType == 'vp09' || videoCodecType == 'vp08') &&
+        audioIsAACOrAbsent;
 
     if (videoTrack) {
         CGSize size = CGSizeApplyAffineTransform(videoTrack.naturalSize, videoTrack.preferredTransform);
@@ -1071,6 +1435,27 @@ static void SpliceKitURLImportResolveProviderURL(NSString *provider,
                 frameDuration = [NSString stringWithFormat:@"%d/%ds", value, timescale];
             }
         }
+
+        if (SpliceKitURLImportCanonicalFrameTimingForTrack(videoTrack,
+                                                           &canonicalTimescale,
+                                                           &canonicalFrameTicks) &&
+            (videoCodecType == 'vp09' || videoCodecType == 'vp08')) {
+            frameDuration = [NSString stringWithFormat:@"%d/%ds",
+                             canonicalFrameTicks,
+                             canonicalTimescale];
+            frameTimingLooksCanonical = SpliceKitURLImportCMTimeMatchesRational(minFrameDuration,
+                                                                                canonicalFrameTicks,
+                                                                                canonicalTimescale);
+            if (isMatroskaFamily && canStreamCopyToMP4) {
+                requiresNormalization = YES;
+                normalizationMode = frameTimingLooksCanonical
+                    ? @"remux_copy"
+                    : @"remux_copy_rewrite_timestamps";
+            } else if (isMP4Family && !frameTimingLooksCanonical) {
+                requiresNormalization = YES;
+                normalizationMode = @"rewrite_timestamps";
+            }
+        }
     }
 
     NSMutableDictionary *info = [NSMutableDictionary dictionary];
@@ -1082,6 +1467,13 @@ static void SpliceKitURLImportResolveProviderURL(NSString *provider,
     info[@"hasAudio"] = @(audioTrack != nil);
     info[@"audioRate"] = @(audioTrack ? 48000 : 0);
     info[@"requiresNormalization"] = @(requiresNormalization);
+    info[@"normalizationMode"] = normalizationMode;
+    if (videoCodec.length > 0) info[@"videoCodec"] = videoCodec;
+    if (audioCodec.length > 0) info[@"audioCodec"] = audioCodec;
+    if (canonicalTimescale > 0) info[@"canonicalFrameTimescale"] = @(canonicalTimescale);
+    if (canonicalFrameTicks > 0) info[@"canonicalFrameTicks"] = @(canonicalFrameTicks);
+    info[@"frameTimingLooksCanonical"] = @(frameTimingLooksCanonical);
+    info[@"canStreamCopyToMP4"] = @(canStreamCopyToMP4);
     return info;
 }
 
@@ -1411,9 +1803,173 @@ static void SpliceKitURLImportResolveProviderURL(NSString *provider,
     }
 
     BOOL requiresNormalization = [mediaInfo[@"requiresNormalization"] boolValue];
+    NSString *normalizationMode = SpliceKitURLImportTrimmedString(mediaInfo[@"normalizationMode"]);
     if (!requiresNormalization) {
         job.normalizedPath = sourcePath;
         [self importJobIntoFinalCut:job mediaInfo:mediaInfo];
+        return;
+    }
+
+    if (SpliceKitURLImportNormalizationModeUsesStreamCopy(normalizationMode)) {
+        NSString *ffmpeg = SpliceKitURLImportFFmpegPath();
+        if (ffmpeg.length == 0) {
+            NSString *operationLabel = [normalizationMode isEqualToString:@"remux_copy"] ||
+                                       [normalizationMode isEqualToString:@"remux_copy_rewrite_timestamps"]
+                ? @"stream-copy remuxing"
+                : @"VP9 timestamp normalization";
+            [self finishJob:job
+                    success:NO
+                      state:SpliceKitURLImportStateFailed
+                    message:[NSString stringWithFormat:@"%@ requires ffmpeg.",
+                             [operationLabel capitalizedString]]
+                      error:@"SpliceKit could not find ffmpeg to normalize this media without transcoding. Run `make url-import-tools` or put ffmpeg in ~/Applications/SpliceKit/tools/."];
+            return;
+        }
+
+        BOOL needsTimestampRewrite = SpliceKitURLImportNormalizationModeNeedsTimestampRewrite(normalizationMode);
+        NSNumber *timescaleValue = mediaInfo[@"canonicalFrameTimescale"];
+        NSNumber *frameTicksValue = mediaInfo[@"canonicalFrameTicks"];
+        int canonicalTimescale = timescaleValue.intValue;
+        int canonicalFrameTicks = frameTicksValue.intValue;
+        if (needsTimestampRewrite && (canonicalTimescale <= 0 || canonicalFrameTicks <= 0)) {
+            [self finishJob:job
+                    success:NO
+                      state:SpliceKitURLImportStateFailed
+                    message:@"VP9 timestamp normalization could not determine a stable frame rate."
+                      error:@"SpliceKit could not derive a canonical CFR time base for this VP9 source."];
+            return;
+        }
+
+        NSString *progressMessage = nil;
+        if ([normalizationMode isEqualToString:@"remux_copy_rewrite_timestamps"]) {
+            progressMessage = @"Remuxing into MP4 and rewriting VP9 timestamps for Final Cut Pro...";
+        } else if ([normalizationMode isEqualToString:@"remux_copy"]) {
+            progressMessage = @"Remuxing into MP4 for Final Cut Pro...";
+        } else {
+            progressMessage = @"Rewriting VP9 timestamps for smoother Final Cut playback...";
+        }
+        [self updateJob:job state:SpliceKitURLImportStateNormalizing
+                message:progressMessage
+               progress:0.82];
+
+        NSString *outputExtension = SpliceKitURLImportOutputExtensionForNormalizationMode(normalizationMode);
+        NSString *outputName = [NSString stringWithFormat:@"%@.%@",
+            SpliceKitURLImportSanitizeFilename(job.clipName ?: @"Imported Clip"),
+            outputExtension];
+        NSString *outputPath = [self pathForFilename:outputName directory:[self normalizedDirectory]];
+        [[NSFileManager defaultManager] removeItemAtPath:outputPath error:nil];
+
+        NSTask *task = [[NSTask alloc] init];
+        task.executableURL = [NSURL fileURLWithPath:ffmpeg];
+        NSMutableArray *arguments = [NSMutableArray arrayWithArray:@[
+            @"-hide_banner",
+            @"-y",
+            @"-i", sourcePath,
+            @"-map", @"0",
+            @"-c", @"copy",
+        ]];
+        if (needsTimestampRewrite) {
+            NSString *settsArg = [NSString stringWithFormat:
+                @"setts=pts=N*%d:dts=N*%d:duration=%d:time_base=1/%d",
+                canonicalFrameTicks,
+                canonicalFrameTicks,
+                canonicalFrameTicks,
+                canonicalTimescale];
+            [arguments addObjectsFromArray:@[@"-bsf:v", settsArg]];
+        }
+        [arguments addObjectsFromArray:@[@"-movflags", @"+faststart", outputPath]];
+        task.arguments = arguments;
+
+        NSPipe *pipe = [NSPipe pipe];
+        task.standardOutput = pipe;
+        task.standardError = pipe;
+
+        NSMutableString *logBuffer = [NSMutableString string];
+        NSFileHandle *readHandle = [pipe fileHandleForReading];
+        readHandle.readabilityHandler = ^(NSFileHandle *handle) {
+            NSData *data = [handle availableData];
+            if (data.length == 0) return;
+            NSString *chunk = SpliceKitURLImportStringFromData(data);
+            if (chunk.length == 0) return;
+            @synchronized (logBuffer) {
+                [logBuffer appendString:chunk];
+            }
+        };
+
+        task.terminationHandler = ^(__unused NSTask *finishedTask) {
+            readHandle.readabilityHandler = nil;
+            NSData *tail = [readHandle readDataToEndOfFile];
+            if (tail.length > 0) {
+                NSString *tailString = SpliceKitURLImportStringFromData(tail);
+                @synchronized (logBuffer) {
+                    [logBuffer appendString:tailString ?: @""];
+                }
+            }
+
+            @synchronized (job) {
+                if (job.resolverTask == task) job.resolverTask = nil;
+            }
+
+            if (job.cancelled) {
+                [self finishJob:job
+                        success:NO
+                          state:SpliceKitURLImportStateCancelled
+                        message:@"URL import was cancelled during media normalization."
+                          error:nil];
+                return;
+            }
+
+            NSString *fullLog = nil;
+            @synchronized (logBuffer) {
+                fullLog = [logBuffer copy];
+            }
+            NSString *trimmedLog = SpliceKitURLImportTrimmedString(fullLog);
+
+            if (task.terminationStatus != 0) {
+                [self finishJob:job
+                        success:NO
+                          state:SpliceKitURLImportStateFailed
+                        message:@"Media normalization failed."
+                          error:(trimmedLog.length > 0 ? trimmedLog : @"ffmpeg failed while normalizing the source media.")];
+                return;
+            }
+
+            NSDictionary *rewrittenInfo = [self inspectMediaAtPath:outputPath];
+            if (rewrittenInfo[@"error"]) {
+                [self finishJob:job
+                        success:NO
+                          state:SpliceKitURLImportStateFailed
+                        message:@"Normalized media could not be inspected."
+                          error:rewrittenInfo[@"error"]];
+                return;
+            }
+
+            dispatch_async(self.stateQueue, ^{
+                job.normalizedPath = outputPath;
+                job.updatedAt = [NSDate date];
+            });
+
+            NSMutableDictionary *normalizedInfo = [rewrittenInfo mutableCopy];
+            normalizedInfo[@"requiresNormalization"] = @NO;
+            normalizedInfo[@"normalizationMode"] = @"none";
+            [self importJobIntoFinalCut:job mediaInfo:normalizedInfo];
+        };
+
+        NSError *launchError = nil;
+        @synchronized (job) {
+            job.resolverTask = task;
+        }
+        if (![task launchAndReturnError:&launchError]) {
+            @synchronized (job) {
+                if (job.resolverTask == task) job.resolverTask = nil;
+            }
+            [self finishJob:job
+                    success:NO
+                      state:SpliceKitURLImportStateFailed
+                    message:@"Media normalization could not start."
+                      error:(launchError.localizedDescription ?: @"Could not launch ffmpeg for stream-copy normalization.")];
+            return;
+        }
         return;
     }
 
@@ -1510,7 +2066,7 @@ static void SpliceKitURLImportResolveProviderURL(NSString *provider,
     id<SpliceKitURLResolver> resolver = [self resolverForURL:url];
     if (!resolver) {
         return [self validationError:
-            @"Unsupported URL source. This build supports direct .mp4/.mov/.m4v/.webm links plus YouTube and Vimeo URLs through yt-dlp."];
+            @"Unsupported URL source. This build supports direct .mp4/.mov/.m4v/.webm/.mkv links plus YouTube and Vimeo URLs through yt-dlp."];
     }
 
     SpliceKitURLImportJob *job = [[SpliceKitURLImportJob alloc] init];
@@ -1741,6 +2297,814 @@ didCompleteWithError:(NSError *)error {
 
 @end
 
+static id (*sSpliceKitURLImportOriginalNewClipFromURLManageFileType)(id, SEL, id, int) = NULL;
+static id (*sSpliceKitURLImportOriginalFFFileImporterImportToEvent)(id, SEL, id, int, BOOL, BOOL, id *) = NULL;
+static id (*sSpliceKitURLImportOriginalFFFileImporterImportFileURLs)(id, SEL, id, id, id, int, BOOL, BOOL, id, id, id) = NULL;
+static BOOL (*sSpliceKitURLImportOriginalFFFileImporterValidateURLs)(id, SEL, id, id, id, BOOL, id, BOOL, id *, id) = NULL;
+static void (*sSpliceKitURLImportOriginalFFFileImporterScanURLForFiles)(id, SEL, id, id, id, id, id, id, void *) = NULL;
+static NSDragOperation (*sSpliceKitURLImportOriginalTLKTimelineViewDraggingEntered)(id, SEL, id) = NULL;
+static char (*sSpliceKitURLImportOriginalTLKTimelineViewPerformDragOperation)(id, SEL, id) = NULL;
+static IMP sSpliceKitURLImportOriginalProviderFigExtensionsIMP = NULL;
+static IMP sSpliceKitURLImportOriginalProviderFigUTIsIMP = NULL;
+static BOOL sSpliceKitURLImportVP9ImportHookInstalled = NO;
+static BOOL sSpliceKitURLImportProviderShimInstalled = NO;
+
+static NSDictionary *SpliceKitURLImportRewriteVP9TimestampsSynchronously(NSString *sourcePath,
+                                                                         NSString *clipName,
+                                                                         NSDictionary *mediaInfo,
+                                                                         NSString **outError) {
+    NSString *ffmpeg = SpliceKitURLImportFFmpegPath();
+    if (ffmpeg.length == 0) {
+        if (outError) {
+            *outError = @"SpliceKit could not find ffmpeg to normalize this media during import.";
+        }
+        return nil;
+    }
+
+    NSString *normalizationMode = SpliceKitURLImportTrimmedString(mediaInfo[@"normalizationMode"]);
+    BOOL needsTimestampRewrite = SpliceKitURLImportNormalizationModeNeedsTimestampRewrite(normalizationMode);
+    if (!SpliceKitURLImportNormalizationModeUsesStreamCopy(normalizationMode)) {
+        if (outError) {
+            *outError = @"SpliceKit could not stream-copy normalize this source.";
+        }
+        return nil;
+    }
+
+    int canonicalTimescale = [mediaInfo[@"canonicalFrameTimescale"] intValue];
+    int canonicalFrameTicks = [mediaInfo[@"canonicalFrameTicks"] intValue];
+    if (needsTimestampRewrite && (canonicalTimescale <= 0 || canonicalFrameTicks <= 0)) {
+        if (outError) {
+            *outError = @"SpliceKit could not derive a canonical CFR time base for this VP9 source.";
+        }
+        return nil;
+    }
+
+    NSString *safeName = SpliceKitURLImportSanitizeFilename(clipName.length > 0
+        ? clipName
+        : [[sourcePath lastPathComponent] stringByDeletingPathExtension]);
+    NSString *outputExtension = SpliceKitURLImportOutputExtensionForNormalizationMode(normalizationMode);
+    NSString *outputName = [NSString stringWithFormat:@"%@.%@", safeName, outputExtension];
+    NSString *outputPath = SpliceKitURLImportUniquePathForFilename(outputName,
+                                                                   SpliceKitURLImportSharedNormalizedDirectory());
+    [[NSFileManager defaultManager] removeItemAtPath:outputPath error:nil];
+
+    NSTask *task = [[NSTask alloc] init];
+    task.executableURL = [NSURL fileURLWithPath:ffmpeg];
+    NSMutableArray *arguments = [NSMutableArray arrayWithArray:@[
+        @"-hide_banner",
+        @"-y",
+        @"-i", sourcePath,
+        @"-map", @"0",
+        @"-c", @"copy",
+    ]];
+    if (needsTimestampRewrite) {
+        NSString *settsArg = [NSString stringWithFormat:
+            @"setts=pts=N*%d:dts=N*%d:duration=%d:time_base=1/%d",
+            canonicalFrameTicks,
+            canonicalFrameTicks,
+            canonicalFrameTicks,
+            canonicalTimescale];
+        [arguments addObjectsFromArray:@[@"-bsf:v", settsArg]];
+    }
+    [arguments addObjectsFromArray:@[@"-movflags", @"+faststart", outputPath]];
+    task.arguments = arguments;
+
+    NSPipe *pipe = [NSPipe pipe];
+    task.standardOutput = pipe;
+    task.standardError = pipe;
+
+    NSError *launchError = nil;
+    if (![task launchAndReturnError:&launchError]) {
+        if (outError) {
+            *outError = launchError.localizedDescription ?: @"Could not launch ffmpeg for VP9 timestamp normalization.";
+        }
+        return nil;
+    }
+
+    NSData *logData = [[pipe fileHandleForReading] readDataToEndOfFile];
+    [task waitUntilExit];
+    NSString *ffmpegLog = SpliceKitURLImportTrimmedString(SpliceKitURLImportStringFromData(logData));
+    if (task.terminationStatus != 0) {
+        if (outError) {
+            *outError = ffmpegLog.length > 0 ? ffmpegLog : @"ffmpeg failed while rewriting VP9 timestamps.";
+        }
+        return nil;
+    }
+
+    NSDictionary *rewrittenInfo = [[SpliceKitURLImportService sharedService] inspectMediaAtPath:outputPath];
+    if (rewrittenInfo[@"error"]) {
+        if (outError) *outError = rewrittenInfo[@"error"];
+        return nil;
+    }
+
+    return @{
+        @"path": outputPath,
+        @"mediaInfo": rewrittenInfo,
+    };
+}
+
+static id SpliceKitURLImportProviderFigExtensions(id self, SEL _cmd) {
+    id base = sSpliceKitURLImportOriginalProviderFigExtensionsIMP
+        ? ((id (*)(id, SEL))sSpliceKitURLImportOriginalProviderFigExtensionsIMP)(self, _cmd)
+        : nil;
+    return [SpliceKitURLImportUniqueStrings(base, @[@"mkv", @"webm"]) copy];
+}
+
+static id SpliceKitURLImportProviderFigUTIs(id self, SEL _cmd) {
+    id base = sSpliceKitURLImportOriginalProviderFigUTIsIMP
+        ? ((id (*)(id, SEL))sSpliceKitURLImportOriginalProviderFigUTIsIMP)(self, _cmd)
+        : nil;
+    return [SpliceKitURLImportUniqueStrings(base,
+                                            @[@"org.matroska.mkv",
+                                              @"org.webmproject.webm"]) copy];
+}
+
+static BOOL SpliceKitURLImport_installProviderShim(void) {
+    if (sSpliceKitURLImportProviderShimInstalled) return YES;
+
+    Class providerFigClass = objc_getClass("FFProviderFig");
+    if (!providerFigClass) {
+        SpliceKit_log(@"[VP9Import] FFProviderFig unavailable; Matroska provider shim not installed");
+        return NO;
+    }
+
+    @try {
+        Method extensionsMethod = class_getClassMethod(providerFigClass, @selector(extensions));
+        Method utisMethod = class_getClassMethod(providerFigClass, @selector(utis));
+        if (!extensionsMethod || !utisMethod) {
+            SpliceKit_log(@"[VP9Import] FFProviderFig missing extensions/utis methods; Matroska provider shim not installed");
+            return NO;
+        }
+
+        if (!sSpliceKitURLImportOriginalProviderFigExtensionsIMP) {
+            sSpliceKitURLImportOriginalProviderFigExtensionsIMP = method_setImplementation(
+                extensionsMethod,
+                (IMP)SpliceKitURLImportProviderFigExtensions);
+        }
+        if (!sSpliceKitURLImportOriginalProviderFigUTIsIMP) {
+            sSpliceKitURLImportOriginalProviderFigUTIsIMP = method_setImplementation(
+                utisMethod,
+                (IMP)SpliceKitURLImportProviderFigUTIs);
+        }
+
+        sSpliceKitURLImportProviderShimInstalled =
+            (sSpliceKitURLImportOriginalProviderFigExtensionsIMP != NULL) &&
+            (sSpliceKitURLImportOriginalProviderFigUTIsIMP != NULL);
+        if (sSpliceKitURLImportProviderShimInstalled) {
+            SpliceKit_log(@"[VP9Import] Installed FFProviderFig Matroska/WebM provider shim");
+        } else {
+            SpliceKit_log(@"[VP9Import] FFProviderFig Matroska/WebM provider shim incomplete");
+        }
+        return sSpliceKitURLImportProviderShimInstalled;
+    } @catch (NSException *e) {
+        SpliceKit_log(@"[VP9Import] Exception installing Matroska/WebM provider shim: %@", e.reason);
+        return NO;
+    }
+}
+
+static NSURL *SpliceKitURLImportMaybeRewriteLocalFileURL(NSURL *fileURL,
+                                                         NSString **outError) {
+    if (![fileURL isKindOfClass:[NSURL class]] || !fileURL.isFileURL) return fileURL;
+
+    NSString *sourcePath = fileURL.path.stringByStandardizingPath;
+    if (SpliceKitURLImportPathIsWithinDirectory(sourcePath,
+                                                SpliceKitURLImportSharedNormalizedDirectory())) {
+        return fileURL;
+    }
+
+    NSDictionary *mediaInfo = [[SpliceKitURLImportService sharedService] inspectMediaAtPath:sourcePath];
+    NSString *normalizationMode = SpliceKitURLImportTrimmedString(mediaInfo[@"normalizationMode"]);
+    if (!SpliceKitURLImportNormalizationModeUsesStreamCopy(normalizationMode)) return fileURL;
+
+    NSString *clipName = [[sourcePath lastPathComponent] stringByDeletingPathExtension];
+    NSDictionary *rewriteResult = SpliceKitURLImportRewriteVP9TimestampsSynchronously(sourcePath,
+                                                                                      clipName,
+                                                                                      mediaInfo,
+                                                                                      outError);
+    NSString *rewrittenPath = SpliceKitURLImportTrimmedString(rewriteResult[@"path"]);
+    if (rewrittenPath.length == 0) return fileURL;
+    return [NSURL fileURLWithPath:rewrittenPath];
+}
+
+static NSArray<NSURL *> *SpliceKitURLImportFileURLsFromPasteboard(NSPasteboard *pasteboard) {
+    if (![pasteboard isKindOfClass:[NSPasteboard class]]) return @[];
+
+    NSArray<NSURL *> *urls = [pasteboard readObjectsForClasses:@[[NSURL class]]
+                                                       options:@{ NSPasteboardURLReadingFileURLsOnlyKey : @YES }];
+    if (urls.count > 0) return urls;
+
+    NSArray *filenamePaths = [pasteboard propertyListForType:NSFilenamesPboardType];
+    if (![filenamePaths isKindOfClass:[NSArray class]] || filenamePaths.count == 0) return @[];
+
+    NSMutableArray<NSURL *> *fileURLs = [NSMutableArray arrayWithCapacity:filenamePaths.count];
+    for (id item in filenamePaths) {
+        if (![item isKindOfClass:[NSString class]]) continue;
+        [fileURLs addObject:[NSURL fileURLWithPath:[(NSString *)item stringByStandardizingPath]]];
+    }
+    return [fileURLs copy];
+}
+
+static BOOL SpliceKitURLImportRewriteFileURLsOnPasteboard(NSPasteboard *pasteboard) {
+    NSArray<NSURL *> *fileURLs = SpliceKitURLImportFileURLsFromPasteboard(pasteboard);
+    if (fileURLs.count == 0) return NO;
+
+    NSMutableArray<NSURL *> *rewrittenURLs = [NSMutableArray arrayWithCapacity:fileURLs.count];
+    BOOL changed = NO;
+
+    for (NSURL *fileURL in fileURLs) {
+        NSString *errorText = nil;
+        NSURL *rewrittenURL = SpliceKitURLImportMaybeRewriteLocalFileURL(fileURL, &errorText);
+        if (rewrittenURL && ![rewrittenURL isEqual:fileURL]) {
+            changed = YES;
+            SpliceKit_log(@"[VP9Import] Rewrote dragged URL %@ -> %@",
+                          fileURL.path, rewrittenURL.path);
+        } else if (errorText.length > 0) {
+            SpliceKit_log(@"[VP9Import] Drag rewrite failed for %@: %@. Falling back to original file.",
+                          fileURL.path, errorText);
+        }
+        [rewrittenURLs addObject:rewrittenURL ?: fileURL];
+    }
+
+    if (!changed) return NO;
+
+    @try {
+        [pasteboard clearContents];
+        BOOL wrote = [pasteboard writeObjects:rewrittenURLs];
+        if (!wrote) {
+            SpliceKit_log(@"[VP9Import] Failed to write rewritten dragged URLs back to pasteboard");
+            return NO;
+        }
+        SpliceKit_log(@"[VP9Import] Rewrote %lu dragged file URL(s) on pasteboard",
+                      (unsigned long)rewrittenURLs.count);
+        return YES;
+    } @catch (NSException *e) {
+        SpliceKit_log(@"[VP9Import] Exception while rewriting drag pasteboard: %@", e.reason);
+        return NO;
+    }
+}
+
+static id SpliceKitURLImportRemapObject(id value, NSDictionary<NSURL *, NSURL *> *rewriteMap) {
+    if (!value || rewriteMap.count == 0) return value;
+
+    if ([value isKindOfClass:[NSURL class]]) {
+        NSURL *mapped = rewriteMap[(NSURL *)value];
+        return mapped ?: value;
+    }
+
+    if ([value isKindOfClass:[NSString class]]) {
+        NSString *stringValue = (NSString *)value;
+        for (NSURL *originalURL in rewriteMap) {
+            NSURL *rewrittenURL = rewriteMap[originalURL];
+            if ([stringValue isEqualToString:originalURL.path] ||
+                [stringValue isEqualToString:originalURL.absoluteString]) {
+                return [stringValue isEqualToString:originalURL.path]
+                    ? rewrittenURL.path
+                    : rewrittenURL.absoluteString;
+            }
+        }
+        return value;
+    }
+
+    if ([value isKindOfClass:[NSArray class]]) {
+        NSArray *array = (NSArray *)value;
+        NSMutableArray *mapped = [NSMutableArray arrayWithCapacity:array.count];
+        BOOL changed = NO;
+        for (id item in array) {
+            id remapped = SpliceKitURLImportRemapObject(item, rewriteMap);
+            if (remapped != item) changed = YES;
+            [mapped addObject:remapped ?: [NSNull null]];
+        }
+        if (!changed) return value;
+        return [value isKindOfClass:[NSMutableArray class]] ? mapped : [mapped copy];
+    }
+
+    if ([value isKindOfClass:[NSDictionary class]]) {
+        NSDictionary *dictionary = (NSDictionary *)value;
+        NSMutableDictionary *mapped = [NSMutableDictionary dictionaryWithCapacity:dictionary.count];
+        BOOL changed = NO;
+        for (id key in dictionary) {
+            id remappedKey = SpliceKitURLImportRemapObject(key, rewriteMap) ?: [NSNull null];
+            id remappedValue = SpliceKitURLImportRemapObject(dictionary[key], rewriteMap) ?: [NSNull null];
+            if (remappedKey != key || remappedValue != dictionary[key]) changed = YES;
+            mapped[remappedKey] = remappedValue;
+        }
+        if (!changed) return value;
+        return [value isKindOfClass:[NSMutableDictionary class]] ? mapped : [mapped copy];
+    }
+
+    return value;
+}
+
+static id SpliceKitURLImportRewriteURLCollection(id urlCollection,
+                                                 NSMutableDictionary<NSURL *, NSURL *> *rewriteMap) {
+    if (![urlCollection isKindOfClass:[NSArray class]]) return urlCollection;
+
+    NSArray *urls = (NSArray *)urlCollection;
+    NSMutableArray *rewritten = [NSMutableArray arrayWithCapacity:urls.count];
+    BOOL changed = NO;
+
+    for (id item in urls) {
+        id newItem = item;
+        if ([item isKindOfClass:[NSURL class]] && ((NSURL *)item).isFileURL) {
+            NSURL *existingRewrite = rewriteMap[(NSURL *)item];
+            if (existingRewrite) {
+                newItem = existingRewrite;
+                changed = YES;
+            } else {
+                NSString *errorText = nil;
+                NSURL *rewrittenURL = SpliceKitURLImportMaybeRewriteLocalFileURL((NSURL *)item, &errorText);
+                if (rewrittenURL && ![rewrittenURL isEqual:item]) {
+                    rewriteMap[(NSURL *)item] = rewrittenURL;
+                    newItem = rewrittenURL;
+                    changed = YES;
+                    SpliceKit_log(@"[VP9Import] Rewrote importer URL %@ -> %@",
+                                  ((NSURL *)item).path, rewrittenURL.path);
+                } else if (errorText.length > 0) {
+                    SpliceKit_log(@"[VP9Import] Importer rewrite failed for %@: %@. Falling back to original file.",
+                                  ((NSURL *)item).path, errorText);
+                }
+            }
+        }
+        [rewritten addObject:newItem ?: [NSNull null]];
+    }
+
+    if (!changed) return urlCollection;
+    return [urlCollection isKindOfClass:[NSMutableArray class]] ? rewritten : [rewritten copy];
+}
+
+static void SpliceKitURLImportRewriteFFFileImporterIvarsIfNeeded(id importer) {
+    if (!importer) return;
+
+    @try {
+        Class importerClass = object_getClass(importer);
+        Ivar importURLsIvar = class_getInstanceVariable(importerClass, "_importURLs");
+        Ivar acceptedURLsIvar = class_getInstanceVariable(importerClass, "_acceptedURLs");
+        Ivar importURLsInfoIvar = class_getInstanceVariable(importerClass, "_importURLsInfo");
+
+        NSMutableDictionary<NSURL *, NSURL *> *rewriteMap = [NSMutableDictionary dictionary];
+
+        if (importURLsIvar) {
+            id originalImportURLs = object_getIvar(importer, importURLsIvar);
+            id rewrittenImportURLs = SpliceKitURLImportRewriteURLCollection(originalImportURLs, rewriteMap);
+            if (rewrittenImportURLs != originalImportURLs) {
+                object_setIvar(importer, importURLsIvar, rewrittenImportURLs);
+            }
+        }
+
+        if (acceptedURLsIvar) {
+            id originalAcceptedURLs = object_getIvar(importer, acceptedURLsIvar);
+            id rewrittenAcceptedURLs = SpliceKitURLImportRewriteURLCollection(originalAcceptedURLs, rewriteMap);
+            if (rewrittenAcceptedURLs != originalAcceptedURLs) {
+                object_setIvar(importer, acceptedURLsIvar, rewrittenAcceptedURLs);
+            }
+        }
+
+        if (rewriteMap.count > 0 && importURLsInfoIvar) {
+            id originalURLsInfo = object_getIvar(importer, importURLsInfoIvar);
+            id rewrittenURLsInfo = SpliceKitURLImportRemapObject(originalURLsInfo, rewriteMap);
+            if (rewrittenURLsInfo != originalURLsInfo) {
+                object_setIvar(importer, importURLsInfoIvar, rewrittenURLsInfo);
+            }
+            SpliceKit_log(@"[VP9Import] Rewrote %lu importer pending URL(s) before Media Import ingest",
+                          (unsigned long)rewriteMap.count);
+        }
+    } @catch (NSException *e) {
+        SpliceKit_log(@"[VP9Import] Exception while rewriting FFFileImporter ivars: %@", e.reason);
+    }
+}
+
+static id SpliceKitURLImport_swizzled_newClipFromURL_manageFileType(id self,
+                                                                    SEL _cmd,
+                                                                    id sourceURL,
+                                                                    int manageFileType) {
+    id importURL = sourceURL;
+
+    @try {
+        if ([sourceURL isKindOfClass:[NSURL class]] && ((NSURL *)sourceURL).isFileURL) {
+            NSURL *fileURL = (NSURL *)sourceURL;
+            NSString *sourcePath = fileURL.path.stringByStandardizingPath;
+            NSDictionary *mediaInfo = [[SpliceKitURLImportService sharedService] inspectMediaAtPath:sourcePath];
+            NSString *normalizationMode = SpliceKitURLImportTrimmedString(mediaInfo[@"normalizationMode"]);
+            if (SpliceKitURLImportNormalizationModeUsesStreamCopy(normalizationMode)) {
+                SpliceKit_log(@"[VP9Import] Preparing local import %@ with mode %@",
+                              sourcePath, normalizationMode);
+                NSString *errorText = nil;
+                NSString *clipName = [[sourcePath lastPathComponent] stringByDeletingPathExtension];
+                NSDictionary *rewriteResult = SpliceKitURLImportRewriteVP9TimestampsSynchronously(sourcePath,
+                                                                                                  clipName,
+                                                                                                  mediaInfo,
+                                                                                                  &errorText);
+                NSString *rewrittenPath = SpliceKitURLImportTrimmedString(rewriteResult[@"path"]);
+                if (rewrittenPath.length > 0) {
+                    importURL = [NSURL fileURLWithPath:rewrittenPath];
+                    SpliceKit_log(@"[VP9Import] Rewrote local import %@ -> %@",
+                                  sourcePath, rewrittenPath);
+                } else if (errorText.length > 0) {
+                    SpliceKit_log(@"[VP9Import] Stream-copy normalization failed for %@: %@. Falling back to original file.",
+                                  sourcePath, errorText);
+                }
+            }
+        }
+    } @catch (NSException *e) {
+        SpliceKit_log(@"[VP9Import] Exception while preparing local import: %@", e.reason);
+    }
+
+    if (sSpliceKitURLImportOriginalNewClipFromURLManageFileType) {
+        return sSpliceKitURLImportOriginalNewClipFromURLManageFileType(self, _cmd, importURL, manageFileType);
+    }
+    return nil;
+}
+
+static id SpliceKitURLImport_swizzled_FFFileImporter_importToEvent(id self,
+                                                                   SEL _cmd,
+                                                                   id event,
+                                                                   int manageFileType,
+                                                                   BOOL processNow,
+                                                                   BOOL warnClipsAlreadyExist,
+                                                                   id *error) {
+    SpliceKitURLImportRewriteFFFileImporterIvarsIfNeeded(self);
+    if (sSpliceKitURLImportOriginalFFFileImporterImportToEvent) {
+        return sSpliceKitURLImportOriginalFFFileImporterImportToEvent(self,
+                                                                      _cmd,
+                                                                      event,
+                                                                      manageFileType,
+                                                                      processNow,
+                                                                      warnClipsAlreadyExist,
+                                                                      error);
+    }
+    return nil;
+}
+
+static NSDragOperation SpliceKitURLImport_swizzled_TLKTimelineView_draggingEntered(id self,
+                                                                                    SEL _cmd,
+                                                                                    id draggingInfo) {
+    @try {
+        id pasteboard = [draggingInfo respondsToSelector:@selector(draggingPasteboard)]
+            ? [draggingInfo draggingPasteboard]
+            : nil;
+        if (SpliceKitURLImportRewriteFileURLsOnPasteboard(pasteboard)) {
+            SpliceKit_log(@"[VP9Import] Rewrote timeline drag pasteboard before draggingEntered");
+        }
+    } @catch (NSException *e) {
+        SpliceKit_log(@"[VP9Import] Exception in timeline draggingEntered rewrite: %@", e.reason);
+    }
+
+    if (sSpliceKitURLImportOriginalTLKTimelineViewDraggingEntered) {
+        return sSpliceKitURLImportOriginalTLKTimelineViewDraggingEntered(self, _cmd, draggingInfo);
+    }
+    return NSDragOperationNone;
+}
+
+static char SpliceKitURLImport_swizzled_TLKTimelineView_performDragOperation(id self,
+                                                                              SEL _cmd,
+                                                                              id draggingInfo) {
+    @try {
+        id pasteboard = [draggingInfo respondsToSelector:@selector(draggingPasteboard)]
+            ? [draggingInfo draggingPasteboard]
+            : nil;
+        if (SpliceKitURLImportRewriteFileURLsOnPasteboard(pasteboard)) {
+            SpliceKit_log(@"[VP9Import] Rewrote timeline drag pasteboard before performDragOperation");
+        }
+    } @catch (NSException *e) {
+        SpliceKit_log(@"[VP9Import] Exception in timeline performDragOperation rewrite: %@", e.reason);
+    }
+
+    if (sSpliceKitURLImportOriginalTLKTimelineViewPerformDragOperation) {
+        return sSpliceKitURLImportOriginalTLKTimelineViewPerformDragOperation(self, _cmd, draggingInfo);
+    }
+    return 0;
+}
+
+static BOOL SpliceKitURLImport_swizzled_FFFileImporter_validateURLs(id self,
+                                                                    SEL _cmd,
+                                                                    id urls,
+                                                                    id urlsInfo,
+                                                                    id importLocation,
+                                                                    BOOL showWarnings,
+                                                                    id window,
+                                                                    BOOL copyFiles,
+                                                                    id *acceptedURLs,
+                                                                    id options) {
+    NSMutableDictionary<NSURL *, NSURL *> *rewriteMap = [NSMutableDictionary dictionary];
+    id rewrittenURLs = SpliceKitURLImportRewriteURLCollection(urls, rewriteMap);
+    id rewrittenURLsInfo = rewriteMap.count > 0
+        ? SpliceKitURLImportRemapObject(urlsInfo, rewriteMap)
+        : urlsInfo;
+
+    NSUInteger inputCount = [urls respondsToSelector:@selector(count)] ? [urls count] : 0;
+    if (rewriteMap.count > 0) {
+        SpliceKit_log(@"[VP9Import] Rewrote %lu of %lu URL(s) before FFFileImporter validation",
+                      (unsigned long)rewriteMap.count, (unsigned long)inputCount);
+    }
+
+    BOOL result = NO;
+    if (sSpliceKitURLImportOriginalFFFileImporterValidateURLs) {
+        result = sSpliceKitURLImportOriginalFFFileImporterValidateURLs(self,
+                                                                       _cmd,
+                                                                       rewrittenURLs,
+                                                                       rewrittenURLsInfo,
+                                                                       importLocation,
+                                                                       showWarnings,
+                                                                       window,
+                                                                       copyFiles,
+                                                                       acceptedURLs,
+                                                                       options);
+    }
+
+    // FCP's downstream processFiles:/_importBackgroundTask path accesses
+    // keywordSets[i] in parallel with fileURLs[i]. If validation rejected any
+    // URL, the counts diverge and -[__NSArrayM removeObjectsInRange:] (or
+    // objectAtIndexedSubscript:) throws NSRangeException. This is an FCP
+    // latent bug that surfaces any time our rewrite leads to a rejection —
+    // even when the rewritten MP4 is technically valid, FCP's preflight can
+    // still reject edge cases.
+    //
+    // Mitigation: after the real validateURLs runs, log counts so we can
+    // diagnose mismatches, and normalize the ivars to match our rewriteMap.
+    // The accepted-URL rewrite in importToEvent only fires on the instance
+    // import path; mirror it here so the class-method path gets it too.
+    if (rewriteMap.count > 0) {
+        @try {
+            NSUInteger acceptedCount =
+                (acceptedURLs && *acceptedURLs && [(id)*acceptedURLs respondsToSelector:@selector(count)])
+                    ? [(id)*acceptedURLs count] : 0;
+            SpliceKit_log(@"[VP9Import] validateURLs returned result=%d acceptedURLs.count=%lu input.count=%lu",
+                          (int)result, (unsigned long)acceptedCount, (unsigned long)inputCount);
+            if (acceptedCount != inputCount) {
+                SpliceKit_log(@"[VP9Import] WARNING: acceptedURLs.count != input.count — FCP rejected some rewrites. _importBackgroundTask may crash on keywordSets[i] overrun.");
+            }
+
+            Ivar importURLsIvar = class_getInstanceVariable(object_getClass(self), "_importURLs");
+            Ivar acceptedURLsIvar = class_getInstanceVariable(object_getClass(self), "_acceptedURLs");
+            if (importURLsIvar) {
+                NSUInteger c = [(id)object_getIvar(self, importURLsIvar) respondsToSelector:@selector(count)]
+                    ? [(id)object_getIvar(self, importURLsIvar) count] : 0;
+                SpliceKit_log(@"[VP9Import] post-validate _importURLs.count=%lu", (unsigned long)c);
+            }
+            if (acceptedURLsIvar) {
+                NSUInteger c = [(id)object_getIvar(self, acceptedURLsIvar) respondsToSelector:@selector(count)]
+                    ? [(id)object_getIvar(self, acceptedURLsIvar) count] : 0;
+                SpliceKit_log(@"[VP9Import] post-validate _acceptedURLs.count=%lu", (unsigned long)c);
+            }
+
+            // Rewrite ivars to fold any remaining original-MKV paths into our
+            // shadow-MP4 paths. Safe even if FCP already rewrote — idempotent.
+            SpliceKitURLImportRewriteFFFileImporterIvarsIfNeeded(self);
+        } @catch (NSException *e) {
+            SpliceKit_log(@"[VP9Import] Exception in post-validate instrumentation: %@", e.reason);
+        }
+    }
+
+    return result;
+}
+
+static void SpliceKitURLImport_swizzled_FFFileImporter_scanURLForFiles(id self,
+                                                                       SEL _cmd,
+                                                                       id url,
+                                                                       id fileURLs,
+                                                                       id keywordSets,
+                                                                       id keywords,
+                                                                       id rejectedURLs,
+                                                                       id rejectedURLExtensions,
+                                                                       void *rejectedReasons) {
+    id scannedURL = url;
+    @try {
+        if ([url isKindOfClass:[NSURL class]] && ((NSURL *)url).isFileURL) {
+            NSString *errorText = nil;
+            NSURL *rewrittenURL = SpliceKitURLImportMaybeRewriteLocalFileURL((NSURL *)url, &errorText);
+            if (rewrittenURL && ![rewrittenURL isEqual:url]) {
+                scannedURL = rewrittenURL;
+                SpliceKit_log(@"[VP9Import] Rewrote scanned URL %@ -> %@",
+                              ((NSURL *)url).path, rewrittenURL.path);
+            } else if (errorText.length > 0) {
+                SpliceKit_log(@"[VP9Import] Scan rewrite failed for %@: %@. Falling back to original file.",
+                              ((NSURL *)url).path, errorText);
+            }
+        }
+    } @catch (NSException *e) {
+        SpliceKit_log(@"[VP9Import] Exception while rewriting scan URL: %@", e.reason);
+    }
+
+    if (sSpliceKitURLImportOriginalFFFileImporterScanURLForFiles) {
+        sSpliceKitURLImportOriginalFFFileImporterScanURLForFiles(self,
+                                                                 _cmd,
+                                                                 scannedURL,
+                                                                 fileURLs,
+                                                                 keywordSets,
+                                                                 keywords,
+                                                                 rejectedURLs,
+                                                                 rejectedURLExtensions,
+                                                                 rejectedReasons);
+    }
+}
+
+// Pads a parallel-per-URL array to the URL count so FCP's
+// +_importBackgroundTask: can do array[i] without NSRangeException.
+// `fill` is the value to use for missing slots — must be a type FCP will
+// actually send messages to downstream (e.g. NSSet for keywords, NSDictionary
+// for metadata). NSNull survives the index access but crashes in forwarding
+// when FCP later calls set/dictionary selectors on it.
+static id SpliceKitURLImportPadParallelArray(id candidate,
+                                             NSUInteger targetCount,
+                                             id fill,
+                                             NSString *label) {
+    if (targetCount == 0) return candidate;
+    if (!candidate || ![candidate isKindOfClass:[NSArray class]]) {
+        NSMutableArray *padded = [NSMutableArray arrayWithCapacity:targetCount];
+        for (NSUInteger i = 0; i < targetCount; i++) {
+            [padded addObject:fill];
+        }
+        SpliceKit_log(@"[VP9Import] Materialized missing %@ array (%lu entries)",
+                      label, (unsigned long)targetCount);
+        return padded;
+    }
+
+    NSArray *array = (NSArray *)candidate;
+    if (array.count >= targetCount) return candidate;
+
+    NSMutableArray *padded = [array mutableCopy];
+    NSUInteger missing = targetCount - array.count;
+    for (NSUInteger i = 0; i < missing; i++) {
+        [padded addObject:fill];
+    }
+    SpliceKit_log(@"[VP9Import] Padded %@ %lu -> %lu to match URL count",
+                  label, (unsigned long)array.count, (unsigned long)targetCount);
+    return padded;
+}
+
+static id SpliceKitURLImport_swizzled_FFFileImporter_importFileURLs(id self,
+                                                                    SEL _cmd,
+                                                                    id fileURLs,
+                                                                    id fileURLsInfo,
+                                                                    id event,
+                                                                    int manageFileType,
+                                                                    BOOL processNow,
+                                                                    BOOL warnClipsAlreadyExist,
+                                                                    id keywordSets,
+                                                                    id metadataArray,
+                                                                    id completionBlock) {
+    NSMutableDictionary<NSURL *, NSURL *> *rewriteMap = [NSMutableDictionary dictionary];
+    id rewrittenURLs = SpliceKitURLImportRewriteURLCollection(fileURLs, rewriteMap);
+    id rewrittenURLsInfo = rewriteMap.count > 0
+        ? SpliceKitURLImportRemapObject(fileURLsInfo, rewriteMap)
+        : fileURLsInfo;
+
+    if (rewriteMap.count > 0) {
+        SpliceKit_log(@"[VP9Import] Rewrote %lu Media Import URL(s) before FFFileImporter class import",
+                      (unsigned long)rewriteMap.count);
+    }
+
+    // FCP's +_importBackgroundTask: iterates fileURLs and does
+    //   keywordSets[i] and metadataArray[i]
+    // under the assumption that keywordSets.count == metadataArray.count ==
+    // fileURLs.count. When the Media Import UI never prepared keywords for
+    // a greyed row (common for our remuxed MKVs), keywordSets can be an
+    // empty array and keywordSets[0] throws NSRangeException — which
+    // surfaces as a confusing -[__NSArrayM removeObjectsInRange:] crash
+    // after exception unwinding. Force-pad both arrays to the URL count so
+    // the parallel-index access always stays in range.
+    NSUInteger urlCount = [rewrittenURLs respondsToSelector:@selector(count)]
+        ? [rewrittenURLs count] : 0;
+    // keywords per URL → empty NSSet; metadata per URL → empty NSDictionary.
+    // FCP's downstream -newAnchoredSequenceFromAssetRef:...keywords:... sends
+    // set-shaped selectors to each entry; handing it NSNull triggers the
+    // `_CF_forwarding_prep_0` forwarding-failure crash.
+    id safeKeywordSets = SpliceKitURLImportPadParallelArray(keywordSets,
+                                                             urlCount,
+                                                             [NSSet set],
+                                                             @"keywordSets");
+    id safeMetadataArray = SpliceKitURLImportPadParallelArray(metadataArray,
+                                                               urlCount,
+                                                               @{},
+                                                               @"metadataArray");
+
+    if (sSpliceKitURLImportOriginalFFFileImporterImportFileURLs) {
+        return sSpliceKitURLImportOriginalFFFileImporterImportFileURLs(self,
+                                                                       _cmd,
+                                                                       rewrittenURLs,
+                                                                       rewrittenURLsInfo,
+                                                                       event,
+                                                                       manageFileType,
+                                                                       processNow,
+                                                                       warnClipsAlreadyExist,
+                                                                       safeKeywordSets,
+                                                                       safeMetadataArray,
+                                                                       completionBlock);
+    }
+    return nil;
+}
+
+void SpliceKitURLImport_installVP9ImportHook(void) {
+    if (sSpliceKitURLImportVP9ImportHookInstalled) return;
+
+    (void)SpliceKitURLImport_installProviderShim();
+
+    Class projectClass = objc_getClass("FFMediaEventProject");
+    SEL selector = NSSelectorFromString(@"newClipFromURL:manageFileType:");
+    Method method = projectClass ? class_getInstanceMethod(projectClass, selector) : NULL;
+    if (!method) {
+        SpliceKit_log(@"[VP9Import] FFMediaEventProject.newClipFromURL:manageFileType: not available");
+        return;
+    }
+
+    sSpliceKitURLImportOriginalNewClipFromURLManageFileType =
+        (id (*)(id, SEL, id, int))method_setImplementation(
+            method,
+            (IMP)SpliceKitURLImport_swizzled_newClipFromURL_manageFileType);
+
+    Class fileImporterClass = objc_getClass("FFFileImporter");
+    SEL importToEventSelector = NSSelectorFromString(@"importToEvent:manageFileType:processNow:warnClipsAlreadyExist:error:");
+    Method importToEventMethod = fileImporterClass ? class_getInstanceMethod(fileImporterClass, importToEventSelector) : NULL;
+    if (importToEventMethod) {
+        sSpliceKitURLImportOriginalFFFileImporterImportToEvent =
+            (id (*)(id, SEL, id, int, BOOL, BOOL, id *))method_setImplementation(
+                importToEventMethod,
+                (IMP)SpliceKitURLImport_swizzled_FFFileImporter_importToEvent);
+    } else {
+        SpliceKit_log(@"[VP9Import] FFFileImporter.importToEvent:... not available");
+    }
+
+    SEL validateURLsSelector = NSSelectorFromString(@"validateURLs:withURLsInfo:forImportToLocation:showWarnings:window:copyFiles:acceptedURLs:options:");
+    Method validateURLsMethod = fileImporterClass ? class_getInstanceMethod(fileImporterClass, validateURLsSelector) : NULL;
+    if (validateURLsMethod) {
+        sSpliceKitURLImportOriginalFFFileImporterValidateURLs =
+            (BOOL (*)(id, SEL, id, id, id, BOOL, id, BOOL, id *, id))method_setImplementation(
+                validateURLsMethod,
+                (IMP)SpliceKitURLImport_swizzled_FFFileImporter_validateURLs);
+    } else {
+        SpliceKit_log(@"[VP9Import] FFFileImporter.validateURLs:... not available");
+    }
+
+    SEL scanURLSelector = NSSelectorFromString(@"scanURLForFiles:fileURLs:keywordSets:keywords:rejectedURLs:rejectedURLExtensions:rejectedReasons:");
+    Method scanURLMethod = fileImporterClass ? class_getInstanceMethod(fileImporterClass, scanURLSelector) : NULL;
+    if (scanURLMethod) {
+        sSpliceKitURLImportOriginalFFFileImporterScanURLForFiles =
+            (void (*)(id, SEL, id, id, id, id, id, id, void *))method_setImplementation(
+                scanURLMethod,
+                (IMP)SpliceKitURLImport_swizzled_FFFileImporter_scanURLForFiles);
+    } else {
+        SpliceKit_log(@"[VP9Import] FFFileImporter.scanURLForFiles:... not available");
+    }
+
+    // Re-enabled with keywordSets/metadataArray padding. The earlier crash at
+    // +_importBackgroundTask + 420 surfaced as -[__NSArrayM removeObjectsInRange:]
+    // after exception unwinding, but the real cause is FCP reading
+    // keywordSets[i] and metadataArray[i] in parallel with fileURLs — and
+    // those parallel arrays are under-populated when the Media Import UI
+    // treated a file as greyed/not-importable. Our swizzle now pads them.
+    SEL importFileURLsSelector = NSSelectorFromString(@"importFileURLs:fileURLsInfo:toEvent:manageFileType:processNow:warnClipsAlreadyExist:keywordSets:metadataArray:completionBlock:");
+    Method importFileURLsMethod = fileImporterClass ? class_getClassMethod(fileImporterClass, importFileURLsSelector) : NULL;
+    if (importFileURLsMethod) {
+        sSpliceKitURLImportOriginalFFFileImporterImportFileURLs =
+            (id (*)(id, SEL, id, id, id, int, BOOL, BOOL, id, id, id))method_setImplementation(
+                importFileURLsMethod,
+                (IMP)SpliceKitURLImport_swizzled_FFFileImporter_importFileURLs);
+    } else {
+        SpliceKit_log(@"[VP9Import] FFFileImporter.importFileURLs:... not available");
+    }
+
+    Class timelineViewClass = objc_getClass("TLKTimelineView");
+    Method draggingEnteredMethod = timelineViewClass
+        ? class_getInstanceMethod(timelineViewClass, @selector(draggingEntered:))
+        : NULL;
+    if (draggingEnteredMethod) {
+        sSpliceKitURLImportOriginalTLKTimelineViewDraggingEntered =
+            (NSDragOperation (*)(id, SEL, id))method_setImplementation(
+                draggingEnteredMethod,
+                (IMP)SpliceKitURLImport_swizzled_TLKTimelineView_draggingEntered);
+    } else {
+        SpliceKit_log(@"[VP9Import] TLKTimelineView.draggingEntered: not available");
+    }
+
+    Method performDragOperationMethod = timelineViewClass
+        ? class_getInstanceMethod(timelineViewClass, @selector(performDragOperation:))
+        : NULL;
+    if (performDragOperationMethod) {
+        sSpliceKitURLImportOriginalTLKTimelineViewPerformDragOperation =
+            (char (*)(id, SEL, id))method_setImplementation(
+                performDragOperationMethod,
+                (IMP)SpliceKitURLImport_swizzled_TLKTimelineView_performDragOperation);
+    } else {
+        SpliceKit_log(@"[VP9Import] TLKTimelineView.performDragOperation: not available");
+    }
+
+    sSpliceKitURLImportVP9ImportHookInstalled = YES;
+    SpliceKit_log(@"[VP9Import] Installed local-file + Media Import VP9 hooks");
+}
+
+void SpliceKitURLImport_bootstrapAtLaunchPhase(NSString *phase) {
+    NSString *phaseName = [SpliceKitURLImportTrimmedString(phase) lowercaseString];
+    if (phaseName.length == 0) phaseName = @"did-launch";
+
+    if ([phaseName isEqualToString:@"will-launch"] ||
+        [phaseName isEqualToString:@"will-finish-launching"]) {
+        (void)SpliceKitURLImport_installProviderShim();
+        return;
+    }
+
+    SpliceKitURLImport_installVP9ImportHook();
+}
+
 NSDictionary *SpliceKitURLImport_start(NSDictionary *params) {
     return [[SpliceKitURLImportService sharedService] startImportWithParams:params waitForCompletion:NO];
 }
@@ -1759,4 +3123,8 @@ NSDictionary *SpliceKitURLImport_cancel(NSDictionary *params) {
     NSString *jobID = SpliceKitURLImportTrimmedString(params[@"job_id"]);
     if (jobID.length == 0) return @{@"success": @NO, @"error": @"job_id parameter required"};
     return [[SpliceKitURLImportService sharedService] cancelJobID:jobID];
+}
+
+NSURL *SpliceKitURLImport_CopyShadowURL(NSURL *fileURL, NSString **outError) {
+    return SpliceKitURLImportMaybeRewriteLocalFileURL(fileURL, outError);
 }

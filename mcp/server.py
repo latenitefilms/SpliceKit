@@ -13,9 +13,27 @@ AI model sees when deciding which tool to use and how to call it.
 
 import socket
 import json
+import sys
 import time
 import functools
-from mcp.server.fastmcp import FastMCP
+
+try:
+    from mcp.server.fastmcp import FastMCP
+except ModuleNotFoundError as exc:
+    if exc.name and exc.name.split(".")[0] == "mcp":
+        sys.stderr.write(
+            "\n[splicekit-mcp] The `mcp` Python package is not installed for "
+            f"this interpreter ({sys.executable}).\n"
+            "Set up the recommended virtualenv and re-launch your MCP client:\n\n"
+            "    make mcp-setup\n\n"
+            "Or manually:\n"
+            "    python3 -m venv ~/.venvs/splicekit-mcp\n"
+            "    ~/.venvs/splicekit-mcp/bin/python -m pip install -r mcp/requirements.txt\n"
+            "Then point your MCP config `command` at "
+            "~/.venvs/splicekit-mcp/bin/python.\n\n"
+        )
+        sys.exit(1)
+    raise
 
 SPLICEKIT_HOST = "127.0.0.1"
 SPLICEKIT_PORT = 9876

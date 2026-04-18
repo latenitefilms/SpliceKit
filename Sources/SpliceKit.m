@@ -15,6 +15,7 @@
 #import "SpliceKitDebugUI.h"
 #import "SpliceKitSentry.h"
 #import "SpliceKitLiveCam.h"
+#import "SpliceKitURLImport.h"
 #import <AppKit/AppKit.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #import <Security/Security.h>
@@ -35,6 +36,8 @@ extern void SpliceKit_installMixerSkimHooks(void);
 extern void SpliceKit_installBRAWProviderShim(void);
 extern void SpliceKit_bootstrapBRAWAtLaunchPhase(NSString *phase);
 extern BOOL SpliceKit_installBRAWRAWSettingsHooks(void);
+extern void SpliceKitURLImport_bootstrapAtLaunchPhase(NSString *phase);
+extern void SpliceKitVP9_Bootstrap(void);
 
 #pragma mark - Logging
 //
@@ -3198,6 +3201,19 @@ static void SpliceKit_appDidLaunch(void) {
         SpliceKit_installBRAWRAWSettingsHooks();
     });
 
+    SpliceKit_safeInstall("VP9Bootstrap", ^{
+        SpliceKitVP9_Bootstrap();
+    });
+
+    SpliceKit_safeInstall("MKVBootstrap", ^{
+        extern void SpliceKitMKV_Bootstrap(void);
+        SpliceKitMKV_Bootstrap();
+    });
+
+    SpliceKit_safeInstall("VP9ImportHook", ^{
+        SpliceKitURLImport_bootstrapAtLaunchPhase(@"did-launch");
+    });
+
     // Install focused editor routing before commands and menus start querying
     // activeEditorContainer, so the secondary timeline can participate in the
     // normal responder path.
@@ -3911,6 +3927,11 @@ static void SpliceKit_init(void) {
             SpliceKit_logCloudContentGuardSummary(@"will-launch");
             SpliceKit_logLoadedFrameworks();
             SpliceKit_bootstrapBRAWAtLaunchPhase(@"will-launch");
+            SpliceKitURLImport_bootstrapAtLaunchPhase(@"will-launch");
+            SpliceKit_safeInstall("MKVWillLaunchHooks", ^{
+                extern void SpliceKitMKV_bootstrapAtLaunchPhase(NSString *phase);
+                SpliceKitMKV_bootstrapAtLaunchPhase(@"will-launch");
+            });
         }];
 
     // Everything else waits for the app to finish launching

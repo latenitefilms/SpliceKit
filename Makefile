@@ -86,7 +86,37 @@ BRAW_RAWPROC_MIN_VERSION = -mmacosx-version-min=15.0
 BRAW_RAWPROC_CFLAGS = $(ARCHS) $(BRAW_RAWPROC_MIN_VERSION) $(OBJCXX_FLAGS) $(DEBUG_FLAGS) -fvisibility=hidden -fapplication-extension -I $(BRAW_SOURCE_DIR) -I $(BRAW_PRIVATE_DIR)
 BRAW_RAWPROC_LDFLAGS = $(CPP_LIBS) -Wl,-rpath,@executable_path/../Frameworks
 
-.PHONY: all clean deploy launch tools url-import-tools audio-bus-probe install-audio-bus-probe uninstall-audio-bus-probe symbols braw-prototype braw-raw-processor
+# --- VP9 codec bundle (Plugins/VP9 → FCP.app/Contents/PlugIns/Codecs) --------
+VP9_SOURCE_DIR = Plugins/VP9/Sources
+VP9_PRIVATE_DIR = $(VP9_SOURCE_DIR)/Private
+VP9_BUILD_DIR = $(BUILD_DIR)/vp9
+VP9_DECODER_BUNDLE = $(VP9_BUILD_DIR)/Codecs/SpliceKitVP9Decoder.bundle
+VP9_DECODER_EXEC = $(VP9_DECODER_BUNDLE)/Contents/MacOS/SpliceKitVP9Decoder
+VP9_DECODER_INFO = Plugins/VP9/Codecs/SpliceKitVP9Decoder.bundle/Contents/Info.plist
+VP9_DECODER_SOURCES = $(VP9_SOURCE_DIR)/VP9VideoDecoder.mm
+VP9_FRAMEWORKS = -framework Foundation -framework CoreFoundation -framework CoreMedia -framework CoreVideo -framework VideoToolbox
+VP9_CFLAGS = $(ARCHS) $(MIN_VERSION) $(OBJCXX_FLAGS) $(DEBUG_FLAGS) -fvisibility=hidden -I $(VP9_SOURCE_DIR) -I $(VP9_PRIVATE_DIR)
+VP9_LDFLAGS = -bundle $(CPP_LIBS)
+
+# --- MKV/WebM format reader (Plugins/MKV → FCP.app/Contents/PlugIns/FormatReaders) ---
+MKV_SOURCE_DIR = Plugins/MKV/Sources
+MKV_PRIVATE_DIR = $(MKV_SOURCE_DIR)/Private
+MKV_LIBWEBM_DIR = $(MKV_SOURCE_DIR)/libwebm
+MKV_BUILD_DIR = $(BUILD_DIR)/mkv
+MKV_IMPORT_BUNDLE = $(MKV_BUILD_DIR)/FormatReaders/SpliceKitMKVImport.bundle
+MKV_IMPORT_EXEC = $(MKV_IMPORT_BUNDLE)/Contents/MacOS/SpliceKitMKVImport
+MKV_IMPORT_INFO = Plugins/MKV/FormatReaders/SpliceKitMKVImport.bundle/Contents/Info.plist
+MKV_IMPORT_SOURCES = $(MKV_SOURCE_DIR)/MKVCommon.mm \
+                      $(MKV_SOURCE_DIR)/MKVFormatReader.mm \
+                      $(MKV_LIBWEBM_DIR)/mkvparser/mkvparser.cc \
+                      $(MKV_LIBWEBM_DIR)/mkvparser/mkvreader.cc
+MKV_FRAMEWORKS = -framework Foundation -framework CoreFoundation -framework CoreMedia -framework CoreVideo -framework MediaToolbox -framework AudioToolbox
+# libwebm uses its own exceptions/assert flow; keep default C++ settings but
+# disable ObjC ARC for the .mm so we can freely mix with C++ heap types.
+MKV_CFLAGS = $(ARCHS) $(MIN_VERSION) -fno-objc-arc -fmodules -fmodules-cache-path=$(abspath $(MODULE_CACHE_DIR)) -std=c++17 $(DEBUG_FLAGS) -fvisibility=hidden -Wno-deprecated-declarations -I $(MKV_SOURCE_DIR) -I $(MKV_PRIVATE_DIR) -I $(MKV_LIBWEBM_DIR)
+MKV_LDFLAGS = -bundle $(CPP_LIBS)
+
+.PHONY: all clean deploy launch tools url-import-tools audio-bus-probe install-audio-bus-probe uninstall-audio-bus-probe symbols braw-prototype braw-raw-processor vp9-prototype mkv-prototype mcp-setup mcp-doctor
 
 all: $(OUTPUT)
 
@@ -119,6 +149,56 @@ uninstall-audio-bus-probe:
 	@killall -9 AudioComponentRegistrar >/dev/null 2>&1 || true
 	@echo "Uninstalled: $(AUDIO_BUS_PROBE_INSTALL_DIR)/SpliceKitAudioBusProbe.component"
 
+# ---------------------------------------------------------------------------
+# MCP server setup (Python venv + dependencies)
+# ---------------------------------------------------------------------------
+MCP_VENV ?= $(HOME)/.venvs/splicekit-mcp
+MCP_PYTHON = $(MCP_VENV)/bin/python
+MCP_REQUIREMENTS = mcp/requirements.txt
+
+mcp-setup:
+	@PY="$$(command -v python3.13 || command -v python3.12 || command -v python3.11 || command -v python3)"; \
+	if [ -z "$$PY" ]; then echo "[mcp-setup] python3 not found in PATH"; exit 1; fi; \
+	echo "[mcp-setup] Using interpreter: $$PY ($$($$PY --version 2>&1))"; \
+	if [ ! -x "$(MCP_PYTHON)" ]; then \
+		echo "[mcp-setup] Creating venv at $(MCP_VENV)"; \
+		"$$PY" -m venv "$(MCP_VENV)"; \
+	else \
+		echo "[mcp-setup] Reusing venv at $(MCP_VENV)"; \
+	fi
+	@"$(MCP_PYTHON)" -m pip install --upgrade --quiet pip
+	@"$(MCP_PYTHON)" -m pip install --upgrade --quiet -r $(MCP_REQUIREMENTS)
+	@echo "[mcp-setup] Installed:"; "$(MCP_PYTHON)" -m pip show mcp | awk '/^(Name|Version|Location):/'
+	@echo "[mcp-setup] Done. Point your MCP client `command` at: $(MCP_PYTHON)"
+
+mcp-doctor:
+	@echo "== SpliceKit MCP doctor =="
+	@if [ -x "$(MCP_PYTHON)" ]; then \
+		echo "[ok] venv interpreter:    $(MCP_PYTHON) ($$($(MCP_PYTHON) --version 2>&1))"; \
+	else \
+		echo "[FAIL] venv interpreter missing at $(MCP_PYTHON) — run 'make mcp-setup'"; \
+	fi
+	@if [ -x "$(MCP_PYTHON)" ] && "$(MCP_PYTHON)" -c "import mcp.server.fastmcp" >/dev/null 2>&1; then \
+		echo "[ok] mcp package:         $$($(MCP_PYTHON) -m pip show mcp | awk '/^Version:/{print $$2}')"; \
+	else \
+		echo "[FAIL] mcp package not importable in venv — run 'make mcp-setup'"; \
+	fi
+	@if [ -f .mcp.json ]; then \
+		CMD=$$(/usr/bin/python3 -c "import json; print(json.load(open('.mcp.json'))['mcpServers']['splicekit']['command'])" 2>/dev/null); \
+		if [ "$$CMD" = "$(MCP_PYTHON)" ]; then \
+			echo "[ok] .mcp.json command:   $$CMD"; \
+		else \
+			echo "[warn] .mcp.json command: $$CMD (expected $(MCP_PYTHON))"; \
+		fi; \
+	else \
+		echo "[warn] .mcp.json not found in repo root"; \
+	fi
+	@if /usr/sbin/lsof -nP -iTCP:9876 -sTCP:LISTEN 2>/dev/null | grep -q LISTEN; then \
+		echo "[ok] FCP bridge listening on 127.0.0.1:9876"; \
+	else \
+		echo "[warn] No process listening on :9876 — launch the modded Final Cut Pro"; \
+	fi
+
 url-import-tools:
 	@mkdir -p "$(TOOLS_DIR)"
 	@YTDLP_PATH="$$(command -v yt-dlp || true)"; \
@@ -134,6 +214,13 @@ url-import-tools:
 		echo "Linked ffmpeg -> $$FFMPEG_PATH"; \
 	else \
 		echo "ffmpeg not found in PATH. Install with: brew install ffmpeg"; \
+	fi
+	@FFPROBE_PATH="$$(command -v ffprobe || true)"; \
+	if [ -n "$$FFPROBE_PATH" ]; then \
+		ln -sf "$$FFPROBE_PATH" "$(TOOLS_DIR)/ffprobe"; \
+		echo "Linked ffprobe -> $$FFPROBE_PATH"; \
+	else \
+		echo "ffprobe not found in PATH. Install with: brew install ffmpeg"; \
 	fi
 
 $(BUILD_DIR):
@@ -207,6 +294,26 @@ $(BRAW_DECODER_EXEC): $(BRAW_DECODER_SOURCES) $(BRAW_DECODER_INFO) | $(BRAW_BUIL
 	@codesign --force --sign - "$(BRAW_DECODER_BUNDLE)" >/dev/null
 	@echo "Built: $(BRAW_DECODER_BUNDLE)"
 
+$(VP9_DECODER_EXEC): $(VP9_DECODER_SOURCES) $(VP9_DECODER_INFO) | $(BUILD_DIR)
+	@mkdir -p "$(VP9_DECODER_BUNDLE)/Contents/MacOS"
+	@cp "$(VP9_DECODER_INFO)" "$(VP9_DECODER_BUNDLE)/Contents/Info.plist"
+	$(CC) $(VP9_CFLAGS) $(VP9_FRAMEWORKS) $(VP9_DECODER_SOURCES) $(VP9_LDFLAGS) -o "$(VP9_DECODER_EXEC)"
+	@codesign --force --sign - "$(VP9_DECODER_BUNDLE)" >/dev/null
+	@echo "Built: $(VP9_DECODER_BUNDLE)"
+
+vp9-prototype: $(VP9_DECODER_EXEC)
+	@echo "Staged: $(VP9_BUILD_DIR)"
+
+$(MKV_IMPORT_EXEC): $(MKV_IMPORT_SOURCES) $(MKV_IMPORT_INFO) | $(BUILD_DIR)
+	@mkdir -p "$(MKV_IMPORT_BUNDLE)/Contents/MacOS"
+	@cp "$(MKV_IMPORT_INFO)" "$(MKV_IMPORT_BUNDLE)/Contents/Info.plist"
+	$(CC) $(MKV_CFLAGS) $(MKV_FRAMEWORKS) $(MKV_IMPORT_SOURCES) $(MKV_LDFLAGS) -o "$(MKV_IMPORT_EXEC)"
+	@codesign --force --sign - "$(MKV_IMPORT_BUNDLE)" >/dev/null
+	@echo "Built: $(MKV_IMPORT_BUNDLE)"
+
+mkv-prototype: $(MKV_IMPORT_EXEC)
+	@echo "Staged: $(MKV_BUILD_DIR)"
+
 $(BRAW_RAWPROC_EXEC): $(BRAW_RAWPROC_SOURCES) $(BRAW_RAWPROC_INFO) $(BRAW_RAWPROC_ENTITLEMENTS) $(BRAW_RAWPROC_PROFILE) | $(BRAW_BUILD_DIR)
 	@mkdir -p "$(BRAW_RAWPROC_BUNDLE)/Contents/MacOS"
 	@test -d "$(BRAW_SDK_FRAMEWORK)" || { echo "Missing BRAW SDK framework at $(BRAW_SDK_FRAMEWORK)"; exit 1; }
@@ -258,7 +365,7 @@ braw-prototype: $(BRAW_IMPORT_EXEC) $(BRAW_DECODER_EXEC) $(BRAW_CLI_BIN)
 braw-raw-processor: $(BRAW_RAWPROC_EXEC)
 	@echo "Staged: $(BRAW_RAWPROC_BUNDLE)"
 
-deploy: $(OUTPUT) $(SILENCE_DETECTOR) $(STRUCTURE_ANALYZER) $(MIXER_APP) braw-prototype
+deploy: $(OUTPUT) $(SILENCE_DETECTOR) $(STRUCTURE_ANALYZER) $(MIXER_APP) braw-prototype vp9-prototype mkv-prototype
 	@echo "=== Deploying SpliceKit to modded FCP ==="
 	@mkdir -p "$(FW_DIR)/Versions/A/Resources"
 	cp $(OUTPUT) "$(FW_DIR)/Versions/A/SpliceKit"
@@ -311,6 +418,16 @@ deploy: $(OUTPUT) $(SILENCE_DETECTOR) $(STRUCTURE_ANALYZER) $(MIXER_APP) braw-pr
 		cp -R "$(BUILD_DIR)/braw-prototype/FormatReaders/SpliceKitBRAWImport.bundle" "$(MODDED_APP)/Contents/PlugIns/FormatReaders/SpliceKitBRAWImport.bundle"; \
 		echo "Opt-in BRAW prototype bundles copied into FCP.app/Contents/PlugIns"; \
 	fi
+	@$(MAKE) vp9-prototype
+	@mkdir -p "$(MODDED_APP)/Contents/PlugIns/Codecs"
+	@rm -rf "$(MODDED_APP)/Contents/PlugIns/Codecs/SpliceKitVP9Decoder.bundle"
+	@cp -R "$(VP9_DECODER_BUNDLE)" "$(MODDED_APP)/Contents/PlugIns/Codecs/SpliceKitVP9Decoder.bundle"
+	@echo "VP9 decoder bundle copied into FCP.app/Contents/PlugIns"
+	@$(MAKE) mkv-prototype
+	@mkdir -p "$(MODDED_APP)/Contents/PlugIns/FormatReaders"
+	@rm -rf "$(MODDED_APP)/Contents/PlugIns/FormatReaders/SpliceKitMKVImport.bundle"
+	@cp -R "$(MKV_IMPORT_BUNDLE)" "$(MODDED_APP)/Contents/PlugIns/FormatReaders/SpliceKitMKVImport.bundle"
+	@echo "MKV/WebM format reader copied into FCP.app/Contents/PlugIns"
 	@if [ "$(ENABLE_BRAW_RAW_PROCESSOR)" = "1" ]; then \
 		$(MAKE) braw-raw-processor; \
 		mkdir -p "$(MODDED_APP)/Contents/Extensions"; \
@@ -330,6 +447,9 @@ deploy: $(OUTPUT) $(SILENCE_DETECTOR) $(STRUCTURE_ANALYZER) $(MIXER_APP) braw-pr
 	fi; \
 	if [ -d "$(MODDED_APP)/Contents/PlugIns/Codecs/SpliceKitBRAWDecoder.bundle" ]; then \
 		codesign --force --sign "$$sign_identity" "$(MODDED_APP)/Contents/PlugIns/Codecs/SpliceKitBRAWDecoder.bundle"; \
+	fi; \
+	if [ -d "$(MODDED_APP)/Contents/PlugIns/Codecs/SpliceKitVP9Decoder.bundle" ]; then \
+		codesign --force --sign "$$sign_identity" "$(MODDED_APP)/Contents/PlugIns/Codecs/SpliceKitVP9Decoder.bundle"; \
 	fi; \
 	if [ -d "$(MODDED_APP)/Contents/Extensions/SpliceKitBRAWRAWProcessor.appex" ]; then \
 		appex_sign_id="$(BRAW_RAWPROC_SIGN_ID)"; \
@@ -357,6 +477,9 @@ deploy: $(OUTPUT) $(SILENCE_DETECTOR) $(STRUCTURE_ANALYZER) $(MIXER_APP) braw-pr
 		fi; \
 		if [ -d "$(MODDED_APP)/Contents/PlugIns/Codecs/SpliceKitBRAWDecoder.bundle" ]; then \
 			codesign --force --sign - "$(MODDED_APP)/Contents/PlugIns/Codecs/SpliceKitBRAWDecoder.bundle"; \
+		fi; \
+		if [ -d "$(MODDED_APP)/Contents/PlugIns/Codecs/SpliceKitVP9Decoder.bundle" ]; then \
+			codesign --force --sign - "$(MODDED_APP)/Contents/PlugIns/Codecs/SpliceKitVP9Decoder.bundle"; \
 		fi; \
 		if [ -d "$(MODDED_APP)/Contents/Extensions/SpliceKitBRAWRAWProcessor.appex" ]; then \
 			codesign --force --sign - --entitlements "$(BRAW_RAWPROC_ENTITLEMENTS)" "$(MODDED_APP)/Contents/Extensions/SpliceKitBRAWRAWProcessor.appex" || \

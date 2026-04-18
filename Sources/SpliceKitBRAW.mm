@@ -1,4 +1,5 @@
 #import "SpliceKit.h"
+#import "SpliceKitBRAWToolboxCheck.h"
 
 #include <dlfcn.h>
 #include <sys/clonefile.h>
@@ -1594,7 +1595,10 @@ static NSString *SpliceKitBRAWEnsureFourCCShim(NSString *originalPath) {
                             shimPath, oldFCC, stereoMode ? "stereo entry=122" : "entry=110", fourccOffset, originalPath]);
     }
 
-    SpliceKitBRAWShimCloneToOriginal()[shimPath] = originalPath;
+    NSMutableDictionary *map = SpliceKitBRAWShimCloneToOriginal();
+    @synchronized (map) {
+        map[shimPath] = originalPath;
+    }
     return shimPath;
 }
 
@@ -1602,7 +1606,11 @@ static NSString *SpliceKitBRAWEnsureFourCCShim(NSString *originalPath) {
 // about — either the path itself (if not shimmed) or the pre-shim original.
 static NSString *SpliceKitBRAWResolveOriginalPath(NSString *path) {
     if (path.length == 0) return path;
-    NSString *original = SpliceKitBRAWShimCloneToOriginal()[path];
+    NSMutableDictionary *map = SpliceKitBRAWShimCloneToOriginal();
+    NSString *original = nil;
+    @synchronized (map) {
+        original = map[path];
+    }
     return original ?: path;
 }
 
@@ -1953,6 +1961,15 @@ extern "C" BOOL SpliceKitBRAW_registerInProcessDecoder(void);
 
 SPLICEKIT_BRAW_EXTERN_C void SpliceKit_bootstrapBRAWAtLaunchPhase(NSString *phase) {
     NSString *phaseName = [phase isKindOfClass:[NSString class]] ? phase : @"unknown";
+
+    // Gate the entire BRAW integration on the user having a valid Mac App
+    // Store copy of Braw Toolbox installed. Without it, we register nothing:
+    // no in-process decoder, no VT/UTI/AV hooks, no workflow plugins.
+    if (!SpliceKit_isBRAWToolboxInstalled()) {
+        SpliceKitBRAWTrace([NSString stringWithFormat:@"[startup] phase=%@ skipped: Braw Toolbox not installed",
+                                                      phaseName]);
+        return;
+    }
 
     // In-process decoder registration runs every time regardless of whether
     // the legacy MediaExtension bundles are present on disk. If a bundle IS

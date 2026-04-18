@@ -8,12 +8,15 @@ SpliceKitDualTimelineDrag.m
 SpliceKitRuntime.m
 SpliceKitSwizzle.m
 SpliceKitAudioBusDiagnostics.m
+SpliceKitBRAWToolboxCheck.m
 SpliceKitBRAW.mm
 SpliceKitBRAWRAW.mm
 SpliceKitBRAWAdjustmentInfo.mm
 SpliceKitBRAWSettingsHud.mm
 SpliceKitBRAWInspectorTile.mm
 SpliceKitBRAWDecoderInProcess.mm
+SpliceKitVP9.mm
+SpliceKitMKV.m
 SpliceKitServer.m
 SpliceKitLogPanel.m
 SpliceKitSentry.m

@@ -37,6 +37,7 @@
 
 #import "SpliceKitBRAWAdjustmentInfo.h"
 #import "SpliceKitBRAWInspectorTile.h"
+#import "SpliceKitBRAWToolboxCheck.h"
 
 #ifdef __cplusplus
 #define SPLICEKIT_BRAW_RAW_EXTERN_C extern "C"
@@ -570,6 +571,11 @@ static void SpliceKitBRAWRAWRegisterInspectorRPCs(void) {
 }
 
 SPLICEKIT_BRAW_RAW_EXTERN_C BOOL SpliceKit_installBRAWRAWSettingsHooks(void) {
+    if (!SpliceKit_isBRAWToolboxInstalled()) {
+        SpliceKitBRAWRAWTrace(@"install skipped: Braw Toolbox not installed");
+        return NO;
+    }
+
     NSNumber *override = [[NSUserDefaults standardUserDefaults] objectForKey:kSpliceKitBRAWRAWEnabledDefault];
     BOOL enabled = override ? override.boolValue : YES;
     SpliceKitBRAWRAWTrace([NSString stringWithFormat:@"install enabled=%@",

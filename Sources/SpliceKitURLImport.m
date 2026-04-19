@@ -7,6 +7,12 @@
 #import "SpliceKit.h"
 #import <AppKit/AppKit.h>
 #import <AVFoundation/AVFoundation.h>
+#import <sys/clonefile.h>
+#import <sys/mman.h>
+#import <sys/stat.h>
+#import <fcntl.h>
+#import <unistd.h>
+#import <errno.h>
 
 extern NSDictionary *SpliceKit_handleRequest(NSDictionary *request);
 extern id SpliceKit_getActiveTimelineModule(void);
@@ -1490,6 +1496,19 @@ static void SpliceKitURLImportResolveProviderURL(NSString *provider,
     BOOL canStreamCopyToMP4 = (videoCodecType == 'vp09' || videoCodecType == 'vp08') &&
         audioIsAACOrAbsent;
 
+    // MP4 muxed with the `hev1` sample-entry tag (parameter sets inline in the
+    // bitstream) refuses to decode in AVFoundation / Final Cut / QuickTime —
+    // Apple's stack only accepts `hvc1` (parameter sets in the extradata).
+    // When we see hev1 in an MP4, flag it for stream-copy remux with the
+    // existing `-tag:v hvc1` path. No timestamp rewrite: the source MP4 already
+    // has clean sample-table timestamps, unlike Matroska.
+    BOOL videoIsHEV1Tagged = isMP4Family && (videoCodecType == 'hev1');
+    if (videoIsHEV1Tagged) {
+        requiresNormalization = YES;
+        normalizationMode = @"remux_copy";
+        canStreamCopyToMP4 = YES;
+    }
+
     if (videoTrack) {
         CGSize size = CGSizeApplyAffineTransform(videoTrack.naturalSize, videoTrack.preferredTransform);
         width = (int)fabs(size.width);
@@ -1936,7 +1955,10 @@ static void SpliceKitURLImportResolveProviderURL(NSString *provider,
         BOOL audioCanStreamCopy = ![mediaInfo[@"audioCanStreamCopy"] isKindOfClass:[NSNumber class]] ||
             [mediaInfo[@"audioCanStreamCopy"] boolValue];
         NSString *videoCodec = SpliceKitURLImportTrimmedString(mediaInfo[@"videoCodec"]).lowercaseString;
-        BOOL videoIsHEVC = [videoCodec isEqualToString:@"hevc"] || [videoCodec isEqualToString:@"h265"];
+        BOOL videoIsHEVC = [videoCodec isEqualToString:@"hevc"] ||
+                           [videoCodec isEqualToString:@"h265"] ||
+                           [videoCodec isEqualToString:@"hev1"] ||
+                           [videoCodec isEqualToString:@"hvc1"];
 
         NSTask *task = [[NSTask alloc] init];
         task.executableURL = [NSURL fileURLWithPath:ffmpeg];
@@ -2461,7 +2483,10 @@ static NSDictionary *SpliceKitURLImportRewriteVP9TimestampsSynchronously(NSStrin
     BOOL audioCanStreamCopy = ![mediaInfo[@"audioCanStreamCopy"] isKindOfClass:[NSNumber class]] ||
         [mediaInfo[@"audioCanStreamCopy"] boolValue];
     NSString *videoCodec = SpliceKitURLImportTrimmedString(mediaInfo[@"videoCodec"]).lowercaseString;
-    BOOL videoIsHEVC = [videoCodec isEqualToString:@"hevc"] || [videoCodec isEqualToString:@"h265"];
+    BOOL videoIsHEVC = [videoCodec isEqualToString:@"hevc"] ||
+                       [videoCodec isEqualToString:@"h265"] ||
+                       [videoCodec isEqualToString:@"hev1"] ||
+                       [videoCodec isEqualToString:@"hvc1"];
 
     NSString *safeName = SpliceKitURLImportSanitizeFilename(clipName.length > 0
         ? clipName
@@ -2646,20 +2671,146 @@ static NSString *SpliceKitURLImportShadowFilenameForSource(NSString *sourcePath,
             extension.length > 0 ? extension : @"mp4"];
 }
 
-// Matroska-family extensions are the only source formats our shadow-remux path
-// handles. Every other extension short-circuits immediately — without this
-// gate, a hook like FFFileImporter.scanURLForFiles: triggered by opening the
-// Media Import window on a folder with thousands of unrelated files (Motion
-// templates, JDownloader class files, thumbnails, etc.) would call
-// inspectMediaAtPath on each one, spawning a tree-wide storm of ffprobe calls
-// that visibly stalls FCP's Processing Files dialog.
-static BOOL SpliceKitURLImportPathHasMatroskaExtension(NSString *path) {
+// Extensions we potentially remux. Matroska-family files are always inspected
+// (and usually rewritten to a shadow MP4); MP4-family files are inspected only
+// to catch the specific case of HEVC muxed with the `hev1` sample-entry tag,
+// which AVFoundation / Final Cut refuse to decode (they require `hvc1`).
+// Everything else short-circuits immediately — without the gate, a hook like
+// FFFileImporter.scanURLForFiles: on a folder with thousands of Motion
+// templates / JDownloader class files / thumbnails would spawn a tree-wide
+// storm of ffprobe calls and stall FCP's Processing Files dialog.
+static BOOL SpliceKitURLImportPathHasRemuxableExtension(NSString *path) {
     NSString *ext = [[path pathExtension] lowercaseString];
     if (ext.length == 0) return NO;
     return [ext isEqualToString:@"mkv"] ||
            [ext isEqualToString:@"webm"] ||
            [ext isEqualToString:@"mka"] ||
-           [ext isEqualToString:@"mk3d"];
+           [ext isEqualToString:@"mk3d"] ||
+           [ext isEqualToString:@"mp4"] ||
+           [ext isEqualToString:@"m4v"] ||
+           [ext isEqualToString:@"mov"];
+}
+
+// Fast-path for MP4 sources whose only problem is the `hev1` sample-entry tag.
+// A full ffmpeg stream-copy would rewrite all the video data (20+ GB on a
+// Dolby Vision iTunes rip) just to change 4 bytes. Instead:
+//   1. APFS clonefile() — near-instant COW snapshot, no disk duplication.
+//   2. mmap the clone, scan the first 64 MB for "hev1" in a plausible box
+//      header, verify it's a sample-entry (size in [32, 10MB], not metadata).
+//   3. Overwrite those 4 bytes with "hvc1" and msync.
+// Total extra disk usage: ~KB (the one modified block). Typical runtime: a
+// few ms for the scan, bounded by the moov box size on disk.
+//
+// Only applies when the source MP4 already has HEVC parameter sets in its
+// sample-description extradata (the common case — ffprobe reports
+// extradata_size > 0). If the parameter sets were inline-only, the decoder
+// would still fail after the tag flip; we leave that edge case to the ffmpeg
+// fallback.
+static BOOL SpliceKitURLImportRetagMP4HEVCInPlace(NSString *sourcePath,
+                                                   NSString *shadowPath,
+                                                   NSString **outError) {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    [fm removeItemAtPath:shadowPath error:nil];
+    [fm createDirectoryAtPath:[shadowPath stringByDeletingLastPathComponent]
+        withIntermediateDirectories:YES attributes:nil error:nil];
+
+    const char *src = sourcePath.fileSystemRepresentation;
+    const char *dst = shadowPath.fileSystemRepresentation;
+    if (clonefile(src, dst, 0) != 0) {
+        if (outError) {
+            *outError = [NSString stringWithFormat:
+                @"clonefile(%@ -> %@) failed: %s (likely cross-volume — shadow dir must live on the same APFS volume as the source)",
+                sourcePath.lastPathComponent, shadowPath.lastPathComponent, strerror(errno)];
+        }
+        return NO;
+    }
+
+    int fd = open(dst, O_RDWR);
+    if (fd < 0) {
+        if (outError) {
+            *outError = [NSString stringWithFormat:@"open clone for writing failed: %s", strerror(errno)];
+        }
+        return NO;
+    }
+
+    struct stat st;
+    if (fstat(fd, &st) != 0) {
+        close(fd);
+        if (outError) *outError = [NSString stringWithFormat:@"fstat failed: %s", strerror(errno)];
+        return NO;
+    }
+
+    // Scan bounds — moov box is normally at the start for faststart MP4s and
+    // at the end otherwise. 64 MB from the start covers faststart movs, plus
+    // we also scan 64 MB from the end for non-faststart cases.
+    size_t fileSize = (size_t)st.st_size;
+    size_t scanLen = fileSize < (64 * 1024 * 1024) ? fileSize : (64 * 1024 * 1024);
+
+    BOOL found = NO;
+    off_t regions[2][2] = {
+        { 0, (off_t)scanLen },
+        { (off_t)(fileSize > scanLen ? fileSize - scanLen : 0), (off_t)scanLen },
+    };
+    int regionCount = (fileSize > scanLen) ? 2 : 1;
+
+    for (int r = 0; r < regionCount && !found; r++) {
+        off_t offset = regions[r][0];
+        size_t length = (size_t)regions[r][1];
+        // mmap requires page-aligned offsets.
+        long pageSize = sysconf(_SC_PAGESIZE);
+        off_t alignedOffset = offset - (offset % pageSize);
+        size_t alignBias = (size_t)(offset - alignedOffset);
+        size_t mapLen = length + alignBias;
+        if (alignedOffset + (off_t)mapLen > (off_t)fileSize) {
+            mapLen = (size_t)(fileSize - alignedOffset);
+        }
+
+        unsigned char *map = mmap(NULL, mapLen, PROT_READ | PROT_WRITE,
+                                  MAP_SHARED, fd, alignedOffset);
+        if (map == MAP_FAILED) continue;
+
+        for (size_t i = alignBias; i + 8 <= mapLen; i++) {
+            if (map[i] != 'h' || map[i + 1] != 'e' ||
+                map[i + 2] != 'v' || map[i + 3] != '1') {
+                continue;
+            }
+            // A sample entry box header is: [4 bytes size][4 bytes type].
+            // The size field sits at bytes i-4 through i-1. Require it to be
+            // in a plausible range for a sample entry so we don't rewrite
+            // random metadata that happens to contain the ascii "hev1".
+            if (i < 4) continue;
+            uint32_t size = ((uint32_t)map[i - 4] << 24) |
+                            ((uint32_t)map[i - 3] << 16) |
+                            ((uint32_t)map[i - 2] <<  8) |
+                            ((uint32_t)map[i - 1]);
+            if (size < 32 || size > (10 * 1024 * 1024)) continue;
+
+            // "hev1" -> "hvc1": index 1 changes e->v, index 2 changes v->c,
+            // indices 0 (h) and 3 (1) stay. Don't write to index 3 without
+            // changing it — in the cloned file that would allocate a fresh
+            // block for a no-op write.
+            map[i + 1] = 'v';
+            map[i + 2] = 'c';
+            msync(map + i, 4, MS_SYNC);
+            SpliceKit_log(@"[VP9Import] retag: rewrote hev1 -> hvc1 at file offset %lld",
+                          (long long)(alignedOffset + (off_t)i));
+            found = YES;
+            break;
+        }
+
+        munmap(map, mapLen);
+    }
+
+    close(fd);
+
+    if (!found) {
+        [fm removeItemAtPath:shadowPath error:nil];
+        if (outError) {
+            *outError = @"Did not find a hev1 sample-entry in the source MP4 within the first or last 64 MB.";
+        }
+        return NO;
+    }
+    return YES;
 }
 
 static NSURL *SpliceKitURLImportMaybeRewriteLocalFileURL(NSURL *fileURL,
@@ -2671,7 +2822,7 @@ static NSURL *SpliceKitURLImportMaybeRewriteLocalFileURL(NSURL *fileURL,
                                                 SpliceKitURLImportSharedNormalizedDirectory())) {
         return fileURL;
     }
-    if (!SpliceKitURLImportPathHasMatroskaExtension(sourcePath)) {
+    if (!SpliceKitURLImportPathHasRemuxableExtension(sourcePath)) {
         return fileURL;
     }
 
@@ -2697,6 +2848,28 @@ static NSURL *SpliceKitURLImportMaybeRewriteLocalFileURL(NSURL *fileURL,
     NSDictionary *mediaInfo = [[SpliceKitURLImportService sharedService] inspectMediaAtPath:sourcePath];
     NSString *normalizationMode = SpliceKitURLImportTrimmedString(mediaInfo[@"normalizationMode"]);
     if (!SpliceKitURLImportNormalizationModeUsesStreamCopy(normalizationMode)) return fileURL;
+
+    // Fast path: MP4 source whose only issue is the `hev1` sample-entry tag
+    // (AVFoundation / Final Cut need `hvc1`). Clone + byte-edit instead of
+    // running a full 20+ GB stream-copy remux that a user on a full disk
+    // can't fit. We detect this case by source extension + codec — inspecting
+    // already set mode=`remux_copy` for it, so we just intercept before the
+    // ffmpeg path runs.
+    NSString *videoCodec = SpliceKitURLImportTrimmedString(mediaInfo[@"videoCodec"]).lowercaseString;
+    NSString *sourceExt = [[sourcePath pathExtension] lowercaseString];
+    BOOL sourceIsMP4 = [sourceExt isEqualToString:@"mp4"] ||
+                       [sourceExt isEqualToString:@"m4v"] ||
+                       [sourceExt isEqualToString:@"mov"];
+    BOOL sourceIsHEV1 = [videoCodec isEqualToString:@"hev1"];
+    if (sourceIsMP4 && sourceIsHEV1 && shadowPath.length > 0) {
+        NSString *retagError = nil;
+        if (SpliceKitURLImportRetagMP4HEVCInPlace(sourcePath, shadowPath, &retagError)) {
+            SpliceKit_log(@"[VP9Import] retag fast-path: %@ -> %@",
+                          sourcePath.lastPathComponent, shadowName);
+            return [NSURL fileURLWithPath:shadowPath];
+        }
+        SpliceKit_log(@"[VP9Import] retag fast-path failed (%@), falling back to ffmpeg", retagError);
+    }
 
     NSString *clipName = [[sourcePath lastPathComponent] stringByDeletingPathExtension];
     NSDictionary *rewriteResult = SpliceKitURLImportRewriteVP9TimestampsSynchronously(sourcePath,

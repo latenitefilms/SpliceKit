@@ -6,6 +6,27 @@ notarization ticket, and Sparkle signature live on the
 Sparkle users are notified automatically; manual download is available from the
 same page or via `appcast.xml`.
 
+## [3.2.07] — 2026-04-19
+
+### Fixed
+- **HEVC MP4s tagged `hev1` now import into Final Cut.** Apple's
+  AVFoundation / QuickTime / Final Cut decoder only accepts HEVC when the
+  MP4 sample-entry is `hvc1` (parameter sets in extradata); files muxed
+  with `hev1` — including most Dolby Vision iTunes rips — played in VLC
+  but showed up as unimportable in FCP. The hook extension filter now
+  covers `.mp4`/`.m4v`/`.mov` alongside the Matroska family, detects the
+  `hev1` tag via AVURLAsset's codec FourCC, and retags the file for
+  Final Cut.
+- **Zero-duplication fast path for large HEVC retags.** A full
+  stream-copy remux of a 19 GB DV rip would have to write out another
+  19 GB (and needs the headroom to do it). Instead we use APFS
+  `clonefile()` to make an instant COW snapshot, `mmap` the tail 64 MB
+  of the clone (where the moov box sits on non-faststart MP4s), find
+  the `hev1` sample-entry by its box-size prefix, and overwrite 2 bytes
+  in place (`e`→`v`, `v`→`c`). Total extra disk: a single modified
+  block (~KB). Total runtime: a few seconds. The original file on disk
+  is untouched — only the clone is modified.
+
 ## [3.2.06] — 2026-04-19
 
 ### Fixed

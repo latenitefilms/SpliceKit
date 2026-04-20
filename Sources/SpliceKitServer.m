@@ -21,7 +21,6 @@
 #import "SpliceKitDebugUI.h"
 #import "SpliceKitLua.h"
 #import "SpliceKitURLImport.h"
-#import "SpliceKitVisionPro.h"
 #import <sys/socket.h>
 #import <sys/un.h>
 #import <sys/stat.h>
@@ -27665,10 +27664,6 @@ NSDictionary *SpliceKit_handleRequest(NSDictionary *request) {
         result = SpliceKit_handleLiveCamHide(params);
     } else if ([method isEqualToString:@"liveCam.status"]) {
         result = SpliceKit_handleLiveCamStatus(params);
-    }
-    // visionpro.* namespace — live Vision Pro preview via ImmersiveVideoToolbox
-    else if ([method hasPrefix:@"visionpro."]) {
-        result = SpliceKit_handleVisionPro(method, params ?: @{});
     }
     // dualTimeline.* namespace
     else if ([method isEqualToString:@"dualTimeline.status"]) {

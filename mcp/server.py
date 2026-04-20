@@ -662,22 +662,40 @@ class BridgeConnection:
                     f"Is the modded FCP running? Error: {e}"}
 
         self._id += 1
-        req = json.dumps({"jsonrpc": "2.0", "method": method, "params": params, "id": self._id})
+        expected_id = self._id
+        req = json.dumps({"jsonrpc": "2.0", "method": method, "params": params, "id": expected_id})
         try:
-            # Protocol: newline-delimited JSON, one request/response per line
+            # Protocol: newline-delimited JSON, one request/response per line.
+            # The server may also emit unsolicited `method:"event"` frames
+            # (JSON-RPC notifications) on the same socket. Those must NOT be
+            # consumed as the response. Loop until we see a frame with a
+            # matching `id`; drop anything else.
             self.sock.sendall(req.encode() + b"\n")
-            while b"\n" not in self._buf:
-                chunk = self.sock.recv(16777216)  # 16MB — FCPXML responses can be large
-                if not chunk:
-                    self.sock = None  # server closed the connection, force reconnect next call
-                    return {"error": "Connection closed by SpliceKit"}
-                self._buf += chunk
-            # Split off the first complete message, keep any leftovers for next call
-            line, self._buf = self._buf.split(b"\n", 1)
-            resp = json.loads(line)
-            if "error" in resp:
-                return {"error": resp["error"]}
-            return resp.get("result", {})
+            while True:
+                while b"\n" not in self._buf:
+                    chunk = self.sock.recv(16777216)  # 16MB — FCPXML responses can be large
+                    if not chunk:
+                        self.sock = None  # server closed the connection, force reconnect next call
+                        return {"error": "Connection closed by SpliceKit"}
+                    self._buf += chunk
+                line, self._buf = self._buf.split(b"\n", 1)
+                if not line.strip():
+                    continue
+                try:
+                    resp = json.loads(line)
+                except json.JSONDecodeError:
+                    # Corrupt frame — skip it and keep reading
+                    continue
+                # Skip notifications (no id, or has a method field)
+                if "method" in resp or "id" not in resp:
+                    continue
+                # Skip responses whose id doesn't match (stale from a prior
+                # call that timed out or got interrupted)
+                if resp.get("id") != expected_id:
+                    continue
+                if "error" in resp:
+                    return {"error": resp["error"]}
+                return resp.get("result", {})
         except Exception as e:
             self.sock = None  # toss the broken socket so the next call reconnects
             return {"error": f"Bridge communication error: {e}"}
@@ -4825,6 +4843,10 @@ def set_bridge_option(option: str, enabled: bool) -> str:
                 "videoOnlyKeepsAudioDisabled" - when Video-Only AV edit mode adds clips, keep audio+video but with audio disabled in inspector
                 "suppressAutoImport" - stop FCP from auto-opening the Import Media window when a card, camera, or iOS device mounts
                 "timelineOverviewBar" - show an inline miniature-timeline strip below the ruler that you can click/drag to jump
+                "timelinePerformanceMode" - master toggle for all three timeline perf features below (atomic A/B switch)
+                "timelineInteractionSuspend" - freeze filmstrip + anchored-clip updates during pinch/marquee/scrollbar drag
+                "timelinePlayheadOverlay" - 120Hz cosmetic playhead overlay for smooth playback on ProMotion displays
+                "tlkOptimizedReload" - enable Apple's hidden TLKOptimizedReload fast-path (A/B experiment)
                 For "defaultSpatialConformType", use set_bridge_option_value() instead.
         enabled: True to enable, False to disable
     """

@@ -101,6 +101,27 @@ void SpliceKit_registerPluginMethod(NSString *method, SpliceKitMethodHandler han
 void SpliceKit_unregisterPluginMethod(NSString *method);
 void SpliceKit_registerPluginManifest(NSString *pluginId, NSDictionary *manifest);
 
+// Snapshot of plugin method metadata, used by bridge.describe.
+NSDictionary *SpliceKit_getPluginMetadataSnapshot(void);
+
+#pragma mark - Bridge Metadata & Async
+
+// Built-in method metadata registry + bridge.describe / bridge.alive endpoints.
+void SpliceKit_installBridgeMetadata(void);
+NSDictionary *SpliceKit_builtinMetadataForMethod(NSString *method);
+
+// Async dispatch + per-connection event subscriptions.
+// asyncDispatch runs the handler on a background queue, returns immediately
+// with a correlation_id, and broadcasts a `command.completed` event on finish.
+void SpliceKit_installAsync(void);
+NSDictionary *SpliceKit_asyncDispatch(NSString *method,
+                                       NSDictionary *params,
+                                       NSDictionary *(^handler)(NSDictionary *));
+void SpliceKit_asyncSetCurrentFd(int fd);
+int  SpliceKit_asyncCurrentFd(void);
+void SpliceKit_asyncCleanupFd(int fd);
+BOOL SpliceKit_asyncFdWantsEvent(int fd, NSString *eventType);
+
 #pragma mark - Server
 
 // Starts the TCP listener on port 9876 and the Unix domain socket.
@@ -148,6 +169,44 @@ void SpliceKit_installSidebarCoalesceLiveScroll(void);
 void SpliceKit_removeSidebarCoalesceLiveScroll(void);
 void SpliceKit_setSidebarCoalesceLiveScrollEnabled(BOOL enabled);
 BOOL SpliceKit_isSidebarCoalesceLiveScrollEnabled(void);
+
+#pragma mark - Timeline Performance
+
+// Timeline interaction suspend — during pinch / marquee / scroll-bar drag,
+// freezes filmstrip + anchored-clip layer updates and drops the min thumbnail
+// count to 0 so the cell-equivalence cache stops churning. Runs a single
+// coalesced catch-up reload when interaction ends.
+//
+// Covers both the tracking-notification path (marquee, scroll-bar drag) and
+// pinch-zoom (swizzles TLKTimelineHandler.magnifyWithEvent: which runs its
+// own internal nextEventMatchingMask: loop and never posts tracking notes).
+void SpliceKit_installTimelineInteractionSuspend(void);
+void SpliceKit_removeTimelineInteractionSuspend(void);
+void SpliceKit_setTimelineInteractionSuspendEnabled(BOOL enabled);
+BOOL SpliceKit_isTimelineInteractionSuspendEnabled(void);
+
+// Cosmetic 120Hz playhead overlay. Draws a thin vertical line at the
+// extrapolated playhead position on a CADisplayLink tick so playback looks
+// smooth on ProMotion even when the project is 24/30 fps. Hides Apple's
+// real playhead layer while active.
+void SpliceKit_installTimelinePlayheadOverlay(void);
+void SpliceKit_removeTimelinePlayheadOverlay(void);
+void SpliceKit_setTimelinePlayheadOverlayEnabled(BOOL enabled);
+BOOL SpliceKit_isTimelinePlayheadOverlayEnabled(void);
+
+// TLKOptimizedReload — hidden TimelineKit flag that skips ripple-adjustment
+// recomputation in TLKLayoutManager._performHorizontalLayoutForItemsAdded:...
+// Apple's _loadUserDefaults doesn't wire this to NSUserDefaults, so we
+// swizzle +[TLKUserDefaults optimizedReload] to return our override.
+void SpliceKit_setTLKOptimizedReloadEnabled(BOOL enabled);
+BOOL SpliceKit_isTLKOptimizedReloadEnabled(void);
+
+// Master Performance Mode — atomically enables/disables all three timeline
+// perf features for A/B testing. Individual sub-toggles remain callable
+// afterwards to narrow down which feature contributes which part of the effect.
+void SpliceKit_installTimelinePerformanceMode(void);
+void SpliceKit_setTimelinePerformanceModeEnabled(BOOL enabled);
+BOOL SpliceKit_isTimelinePerformanceModeEnabled(void);
 
 // Swizzles pasteAnchored: and paste: to handle FCPXML on the pasteboard.
 // When FCPXML is detected, imports it into a temp project, converts to native

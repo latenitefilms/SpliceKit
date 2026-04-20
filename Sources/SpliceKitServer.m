@@ -21,6 +21,7 @@
 #import "SpliceKitDebugUI.h"
 #import "SpliceKitLua.h"
 #import "SpliceKitURLImport.h"
+#import "SpliceKitVisionPro.h"
 #import <sys/socket.h>
 #import <sys/un.h>
 #import <sys/stat.h>
@@ -285,6 +286,80 @@ static id SpliceKit_serializeReturnValue(NSInvocation *invocation, BOOL returnHa
 static NSMutableArray *sConnectedClients = nil;
 static dispatch_queue_t sClientQueue = nil;
 
+// Per-client write serialization. Events broadcast from the async queue and
+// RPC replies from the per-client accept thread both target the same fd;
+// without serialization, either their bytes interleave mid-line (torn NDJSON)
+// or their frame order gets shuffled.
+//
+// A serial dispatch queue per fd fixes both at once: it gives ordered delivery
+// AND atomic writes. Events arrive on a client in the order they were emitted
+// server-side, and each frame is a single write() call.
+//
+// Keyed by NSNumber(fd), guarded by sClientQueue.
+static NSMutableDictionary<NSNumber *, dispatch_queue_t> *sClientWriteQueues = nil;
+
+static dispatch_queue_t SpliceKit_writeQueueForClientFd(int fd) {
+    __block dispatch_queue_t q = nil;
+    dispatch_sync(sClientQueue, ^{
+        q = sClientWriteQueues[@(fd)];
+        if (!q) {
+            char label[64];
+            snprintf(label, sizeof(label), "com.splicekit.client.write.%d", fd);
+            q = dispatch_queue_create(label, DISPATCH_QUEUE_SERIAL);
+            sClientWriteQueues[@(fd)] = q;
+        }
+    });
+    return q;
+}
+
+static void SpliceKit_releaseWriteQueueForClientFd(int fd) {
+    dispatch_async(sClientQueue, ^{
+        [sClientWriteQueues removeObjectForKey:@(fd)];
+    });
+}
+
+// Raw write with EINTR handling. Call ONLY from the fd's serial queue so
+// ordering + atomicity are preserved.
+static BOOL SpliceKit_rawWriteAll(int fd, NSData *line) {
+    if (fd < 0 || !line || line.length == 0) return NO;
+    const uint8_t *bytes = line.bytes;
+    size_t remaining = line.length;
+    while (remaining > 0) {
+        ssize_t n = write(fd, bytes, remaining);
+        if (n <= 0) {
+            if (n < 0 && (errno == EINTR)) continue;
+            return NO;
+        }
+        bytes += n;
+        remaining -= (size_t)n;
+    }
+    return YES;
+}
+
+// Writes `line` to `fd` on its dedicated serial queue. `line` should already
+// include a trailing newline (NDJSON framing). Dispatch is synchronous when
+// called from any non-main, non-fd-queue thread so the caller doesn't return
+// before the bytes are out — matters for RPC replies on the accept thread.
+static BOOL SpliceKit_writeLineToClientFd(int fd, NSData *line) {
+    if (fd < 0 || !line || line.length == 0) return NO;
+    dispatch_queue_t q = SpliceKit_writeQueueForClientFd(fd);
+    __block BOOL ok = NO;
+    dispatch_sync(q, ^{
+        ok = SpliceKit_rawWriteAll(fd, line);
+    });
+    return ok;
+}
+
+// Async variant for event broadcasting. Preserves per-fd ordering (serial
+// queue) without blocking the broadcaster on slow clients.
+static void SpliceKit_writeLineToClientFdAsync(int fd, NSData *line) {
+    if (fd < 0 || !line || line.length == 0) return;
+    dispatch_queue_t q = SpliceKit_writeQueueForClientFd(fd);
+    dispatch_async(q, ^{
+        SpliceKit_rawWriteAll(fd, line);
+    });
+}
+
 void SpliceKit_broadcastEvent(NSDictionary *event) {
     if (!sConnectedClients || !sClientQueue) return;
 
@@ -300,10 +375,20 @@ void SpliceKit_broadcastEvent(NSDictionary *event) {
     NSMutableData *line = [json mutableCopy];
     [line appendBytes:"\n" length:1];
 
+    // events.subscribe installs per-fd allowlists. Default is now
+    // deliver-nothing (see SpliceKit_asyncFdWantsEvent). Clients must
+    // explicitly subscribe to receive events.
+    NSString *eventType = [event[@"type"] isKindOfClass:[NSString class]]
+        ? event[@"type"] : nil;
+
     dispatch_async(sClientQueue, ^{
         NSArray *clients = [sConnectedClients copy];
         for (NSNumber *fd in clients) {
-            write([fd intValue], line.bytes, line.length);
+            int cfd = [fd intValue];
+            if (!SpliceKit_asyncFdWantsEvent(cfd, eventType)) continue;
+            // Hop to the fd's serial queue so order is preserved AND writes
+            // don't interleave with RPC replies.
+            SpliceKit_writeLineToClientFdAsync(cfd, line);
         }
     });
 }
@@ -2309,6 +2394,42 @@ NSDictionary *SpliceKit_handleTimelineAction(NSDictionary *params) {
 
     NSString *action = params[@"action"];
     if (!action) return @{@"error": @"action parameter required"};
+
+    // dry_run=true: report what would fire without firing. Returns the resolved
+    // selector, safety classification, and whether a project/selection is present.
+    if ([params[@"dry_run"] boolValue]) {
+        NSDictionary *dryMeta = SpliceKit_builtinMetadataForMethod(@"timeline.action");
+        __block BOOL hasProject = NO;
+        __block BOOL hasSelection = NO;
+        SpliceKit_executeOnMainThread(^{
+            id timeline = SpliceKit_getActiveTimelineModule();
+            hasProject = (timeline != nil);
+            if (timeline) {
+                id sel = SpliceKit_getSelectedTimelineItem(timeline);
+                hasSelection = (sel != nil);
+            }
+        });
+        BOOL needsSelection = ([action hasPrefix:@"addColor"]
+                               || [action hasPrefix:@"retime"]
+                               || [action hasPrefix:@"detach"]
+                               || [action hasPrefix:@"expand"]
+                               || [action hasPrefix:@"freeze"]
+                               || [action isEqualToString:@"solo"]
+                               || [action isEqualToString:@"disable"]
+                               || [action isEqualToString:@"favorite"]
+                               || [action isEqualToString:@"reject"]);
+        return @{
+            @"dry_run": @YES,
+            @"action": action,
+            @"safety": dryMeta[@"safety"] ?: @"state_dependent",
+            @"requires_project": @YES,
+            @"requires_selection": @(needsSelection),
+            @"project_loaded": @(hasProject),
+            @"clip_selected": @(hasSelection),
+            @"would_fire": @(hasProject && (!needsSelection || hasSelection)),
+            @"note": @"No action was performed. Remove dry_run=true to execute.",
+        };
+    }
 
     NSDictionary *actionMap = @{
         // Blade/Split
@@ -9092,6 +9213,10 @@ static NSDictionary *SpliceKit_handleOptionsGet(NSDictionary *params) {
         @"gemmaModel": [SpliceKitCommandPalette sharedPalette].gemmaModel ?: @"unsloth/gemma-4-E4B-it-UD-MLX-4bit",
         @"sidebarCoalesceLiveScroll": @(SpliceKit_isSidebarCoalesceLiveScrollEnabled()),
         @"timelineOverviewBar": @(SpliceKit_isTimelineOverviewBarEnabled()),
+        @"timelinePerformanceMode": @(SpliceKit_isTimelinePerformanceModeEnabled()),
+        @"timelineInteractionSuspend": @(SpliceKit_isTimelineInteractionSuspendEnabled()),
+        @"timelinePlayheadOverlay": @(SpliceKit_isTimelinePlayheadOverlayEnabled()),
+        @"tlkOptimizedReload": @(SpliceKit_isTLKOptimizedReloadEnabled()),
     };
 }
 
@@ -9182,6 +9307,33 @@ static NSDictionary *SpliceKit_handleOptionsSet(NSDictionary *params) {
         SpliceKit_setTimelineOverviewBarEnabled([enabled boolValue]);
         return @{@"status": @"ok",
                  @"timelineOverviewBar": @(SpliceKit_isTimelineOverviewBarEnabled())};
+    } else if ([option isEqualToString:@"timelinePerformanceMode"]) {
+        NSNumber *enabled = params[@"enabled"];
+        if (!enabled) return @{@"error": @"'enabled' parameter required (true/false)"};
+        SpliceKit_setTimelinePerformanceModeEnabled([enabled boolValue]);
+        return @{@"status": @"ok",
+                 @"timelinePerformanceMode": @(SpliceKit_isTimelinePerformanceModeEnabled()),
+                 @"timelineInteractionSuspend": @(SpliceKit_isTimelineInteractionSuspendEnabled()),
+                 @"timelinePlayheadOverlay": @(SpliceKit_isTimelinePlayheadOverlayEnabled()),
+                 @"tlkOptimizedReload": @(SpliceKit_isTLKOptimizedReloadEnabled())};
+    } else if ([option isEqualToString:@"timelineInteractionSuspend"]) {
+        NSNumber *enabled = params[@"enabled"];
+        if (!enabled) return @{@"error": @"'enabled' parameter required (true/false)"};
+        SpliceKit_setTimelineInteractionSuspendEnabled([enabled boolValue]);
+        return @{@"status": @"ok",
+                 @"timelineInteractionSuspend": @(SpliceKit_isTimelineInteractionSuspendEnabled())};
+    } else if ([option isEqualToString:@"timelinePlayheadOverlay"]) {
+        NSNumber *enabled = params[@"enabled"];
+        if (!enabled) return @{@"error": @"'enabled' parameter required (true/false)"};
+        SpliceKit_setTimelinePlayheadOverlayEnabled([enabled boolValue]);
+        return @{@"status": @"ok",
+                 @"timelinePlayheadOverlay": @(SpliceKit_isTimelinePlayheadOverlayEnabled())};
+    } else if ([option isEqualToString:@"tlkOptimizedReload"]) {
+        NSNumber *enabled = params[@"enabled"];
+        if (!enabled) return @{@"error": @"'enabled' parameter required (true/false)"};
+        SpliceKit_setTLKOptimizedReloadEnabled([enabled boolValue]);
+        return @{@"status": @"ok",
+                 @"tlkOptimizedReload": @(SpliceKit_isTLKOptimizedReloadEnabled())};
     }
 
     return @{@"error": [NSString stringWithFormat:@"Unknown option: %@", option]};
@@ -13976,6 +14128,8 @@ static NSDictionary *SpliceKit_handleMenuExecute(NSDictionary *params) {
         return @{@"error": @"menuPath array required (e.g. [\"File\", \"New\", \"Project...\"])"};
     }
 
+    BOOL dryRun = [params[@"dry_run"] boolValue];
+
     __block NSDictionary *result = nil;
     SpliceKit_executeOnMainThread(^{
         @try {
@@ -14044,15 +14198,59 @@ static NSDictionary *SpliceKit_handleMenuExecute(NSDictionary *params) {
                 return;
             }
 
-            if (![targetItem isEnabled]) {
+            SEL action = [targetItem action];
+            id target = [targetItem target];
+            NSString *itemTitle = [targetItem title];
+            BOOL enabled = [targetItem isEnabled];
+
+            // dry_run=true: describe what would fire without firing it. Use
+            // validateMenuItem: to probe the intended target; modal detection
+            // is a heuristic based on trailing ellipsis in the menu title.
+            if (dryRun) {
+                BOOL validates = enabled;
+                id validateTarget = target;
+                if (action) {
+                    if (target && [target respondsToSelector:@selector(validateMenuItem:)]) {
+                        @try {
+                            validates = ((BOOL (*)(id, SEL, id))objc_msgSend)(
+                                target, @selector(validateMenuItem:), targetItem);
+                        } @catch (NSException *e) { validates = enabled; }
+                    } else if (!target) {
+                        // Responder-chain action — walk the chain to see who'd handle it.
+                        id responder = [[app keyWindow] firstResponder];
+                        while (responder) {
+                            if ([responder respondsToSelector:action]) {
+                                validateTarget = responder;
+                                break;
+                            }
+                            responder = [responder nextResponder];
+                        }
+                    }
+                }
+                BOOL likelyModal = [itemTitle hasSuffix:@"…"] || [itemTitle hasSuffix:@"..."];
+                result = @{
+                    @"dry_run": @YES,
+                    @"menuItem": itemTitle ?: @"",
+                    @"enabled": @(enabled),
+                    @"validates": @(validates),
+                    @"action": action ? NSStringFromSelector(action) : [NSNull null],
+                    @"target_class": validateTarget
+                                     ? NSStringFromClass([validateTarget class])
+                                     : @"responder chain",
+                    @"likely_modal": @(likelyModal),
+                    @"would_fire": @(enabled && action != NULL),
+                    @"note": @"No action was performed. Remove dry_run=true to execute.",
+                };
+                return;
+            }
+
+            if (!enabled) {
                 result = @{@"error": [NSString stringWithFormat:@"Menu item '%@' is disabled",
-                            [targetItem title]]};
+                            itemTitle]};
                 return;
             }
 
             // Execute the menu item's action
-            SEL action = [targetItem action];
-            id target = [targetItem target];
             if (action) {
                 if (target) {
                     ((void (*)(id, SEL, id))objc_msgSend)(target, action, targetItem);
@@ -14061,7 +14259,7 @@ static NSDictionary *SpliceKit_handleMenuExecute(NSDictionary *params) {
                     ((BOOL (*)(id, SEL, SEL, id, id))objc_msgSend)(
                         app, @selector(sendAction:to:from:), action, nil, targetItem);
                 }
-                result = @{@"status": @"ok", @"menuItem": [targetItem title],
+                result = @{@"status": @"ok", @"menuItem": itemTitle ?: @"",
                           @"action": NSStringFromSelector(action)};
             } else {
                 result = @{@"error": @"Menu item has no action"};
@@ -26505,6 +26703,13 @@ void SpliceKit_registerPluginManifest(NSString *pluginId, NSDictionary *manifest
     sPluginManifests[pluginId] = manifest;
 }
 
+// Exposed to SpliceKitBridgeMetadata.m so bridge.describe can merge plugin
+// metadata with the built-in catalog.
+NSDictionary *SpliceKit_getPluginMetadataSnapshot(void) {
+    SpliceKit_ensurePluginRegistryInit();
+    return [sPluginMethodMeta copy] ?: @{};
+}
+
 // plugin.listMethods — returns all registered plugin methods + metadata
 static NSDictionary *SpliceKit_handlePluginListMethods(NSDictionary *params) {
     SpliceKit_ensurePluginRegistryInit();
@@ -27232,6 +27437,30 @@ NSDictionary *SpliceKit_handleRequest(NSDictionary *request) {
     // Auto-dismiss known blocking dialogs before processing any request
     SpliceKit_autoDismissBlockingDialogs();
 
+    // async=true in params: run this request on a worker queue, return a
+    // correlation_id immediately, broadcast `command.completed` when done.
+    // bridge.* / events.* / async.* / system.* are always synchronous — they're
+    // cheap and some are per-connection state.
+    BOOL wantsAsync = [params[@"async"] boolValue];
+    if (wantsAsync
+        && ![method hasPrefix:@"bridge."]
+        && ![method hasPrefix:@"events."]
+        && ![method hasPrefix:@"async."]
+        && ![method hasPrefix:@"system."]) {
+        NSMutableDictionary *cleanParams = [params mutableCopy];
+        [cleanParams removeObjectForKey:@"async"];
+        NSDictionary *dispatched = SpliceKit_asyncDispatch(method, cleanParams,
+            ^NSDictionary *(NSDictionary *innerParams) {
+                NSDictionary *innerReq = @{@"method": method, @"params": innerParams};
+                NSDictionary *innerResult = SpliceKit_handleRequest(innerReq);
+                // handleRequest wraps everything in {"result": ...} or {"error": ...};
+                // unwrap for the event payload.
+                if (innerResult[@"result"]) return innerResult[@"result"];
+                return innerResult;
+            });
+        return @{@"result": dispatched};
+    }
+
     NSDictionary *result = nil;
 
     // system.* namespace
@@ -27436,6 +27665,10 @@ NSDictionary *SpliceKit_handleRequest(NSDictionary *request) {
         result = SpliceKit_handleLiveCamHide(params);
     } else if ([method isEqualToString:@"liveCam.status"]) {
         result = SpliceKit_handleLiveCamStatus(params);
+    }
+    // visionpro.* namespace — live Vision Pro preview via ImmersiveVideoToolbox
+    else if ([method hasPrefix:@"visionpro."]) {
+        result = SpliceKit_handleVisionPro(method, params ?: @{});
     }
     // dualTimeline.* namespace
     else if ([method isEqualToString:@"dualTimeline.status"]) {
@@ -27779,6 +28012,11 @@ static void SpliceKit_handleClient(int clientFd) {
         [sConnectedClients addObject:@(clientFd)];
     });
 
+    // Publish the fd for this thread so handlers like events.subscribe can
+    // identify which connection they're running for. Cleared via asyncCleanupFd
+    // when the client disconnects.
+    SpliceKit_asyncSetCurrentFd(clientFd);
+
     FILE *stream = fdopen(clientFd, "r+");
     if (!stream) {
         close(clientFd);
@@ -27844,9 +28082,12 @@ static void SpliceKit_handleClient(int clientFd) {
                                                                   options:0
                                                                     error:nil];
             if (responseJson) {
-                fwrite(responseJson.bytes, 1, responseJson.length, stream);
-                fwrite("\n", 1, 1, stream);
-                fflush(stream);
+                // Route through the per-fd write lock so async event broadcasts
+                // can't slice into the middle of this reply. Matches the
+                // broadcast path — same raw write(), same lock.
+                NSMutableData *line = [responseJson mutableCopy];
+                [line appendBytes:"\n" length:1];
+                SpliceKit_writeLineToClientFd(clientFd, line);
             }
         }
     }
@@ -27865,6 +28106,8 @@ static void SpliceKit_handleClient(int clientFd) {
     dispatch_async(sClientQueue, ^{
         [sConnectedClients removeObject:@(clientFd)];
     });
+    SpliceKit_asyncCleanupFd(clientFd);
+    SpliceKit_releaseWriteQueueForClientFd(clientFd);
     fclose(stream);
 }
 
@@ -27882,6 +28125,7 @@ static void SpliceKit_handleClient(int clientFd) {
 void SpliceKit_startControlServer(void) {
     sClientQueue = dispatch_queue_create("com.splicekit.clients", DISPATCH_QUEUE_SERIAL);
     sConnectedClients = [NSMutableArray array];
+    sClientWriteQueues = [NSMutableDictionary dictionary];
 
     int serverFd = socket(AF_INET, SOCK_STREAM, 0);
     if (serverFd < 0) {

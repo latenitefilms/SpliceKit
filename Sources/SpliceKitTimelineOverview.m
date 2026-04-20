@@ -748,6 +748,31 @@ static BOOL OV_collectionIsRenderable(id collection) {
 static BOOL      sOverviewBarInstalled = NO;
 static NSPanel  *sOverviewPanel = nil;
 
+// Block-observer tokens. NSNotificationCenter's block API returns an opaque
+// observer object that's the ONLY way to remove the registration — passing
+// `bar` to -removeObserver: doesn't unregister these at all. We collect them
+// here so uninstall actually takes effect and so re-enable after an off/on
+// cycle doesn't double-register.
+static NSMutableArray<id> *sOverviewObserverTokens = nil;
+
+static void OV_addObserver(NSString *name, id object, void (^block)(NSNotification *)) {
+    if (!sOverviewObserverTokens) sOverviewObserverTokens = [NSMutableArray array];
+    id token = [[NSNotificationCenter defaultCenter] addObserverForName:name
+                                                                 object:object
+                                                                  queue:nil
+                                                             usingBlock:block];
+    if (token) [sOverviewObserverTokens addObject:token];
+}
+
+static void OV_removeAllObservers(void) {
+    if (!sOverviewObserverTokens) return;
+    NSNotificationCenter *nc = [NSNotificationCenter defaultCenter];
+    for (id token in sOverviewObserverTokens) {
+        [nc removeObserver:token];
+    }
+    [sOverviewObserverTokens removeAllObjects];
+}
+
 static BOOL OV_findTimelineViews(NSView *view,
                                  NSInteger depth,
                                  NSView **timelineViewOut,
@@ -906,55 +931,46 @@ void SpliceKit_installTimelineOverviewBar(void) {
         // We run the display link only between them, matching FCP's own
         // playhead-redraw cadence (60Hz or 120Hz ProMotion) with zero CPU
         // when idle.
-        [[NSNotificationCenter defaultCenter] addObserverForName:@"PEPlayerDidBeginPlaybackNotification"
-            object:nil queue:nil usingBlock:^(NSNotification *n) {
+        OV_addObserver(@"PEPlayerDidBeginPlaybackNotification", nil, ^(NSNotification *n) {
             [[SpliceKitTimelineOverviewView shared] setPlaying:YES];
-        }];
-        [[NSNotificationCenter defaultCenter] addObserverForName:@"PEPlayerDidEndPlaybackNotification"
-            object:nil queue:nil usingBlock:^(NSNotification *n) {
+        });
+        OV_addObserver(@"PEPlayerDidEndPlaybackNotification", nil, ^(NSNotification *n) {
             [[SpliceKitTimelineOverviewView shared] setPlaying:NO];
-        }];
+        });
 
         // ── Playhead scrub / step (not playback) → one-shot setNeedsDisplay ─
-        [[NSNotificationCenter defaultCenter] addObserverForName:@"TLKPlayheadViewFrameDidChangeNotification"
-            object:nil queue:nil usingBlock:^(NSNotification *n) {
+        OV_addObserver(@"TLKPlayheadViewFrameDidChangeNotification", nil, ^(NSNotification *n) {
             [[SpliceKitTimelineOverviewView shared] setNeedsDisplay:YES];
-        }];
+        });
 
         // ── Timeline content edits → invalidate image + rerender ───────────
         // FFSequenceEditedNotification fires for every mutation of the spine
         // (blade, insert, delete, move, ripple, etc). Coalesced so a compound
         // edit results in a single re-render.
-        [[NSNotificationCenter defaultCenter] addObserverForName:@"FFSequenceEditedNotification"
-            object:nil queue:nil usingBlock:^(NSNotification *n) {
+        OV_addObserver(@"FFSequenceEditedNotification", nil, ^(NSNotification *n) {
             OV_scheduleRerender();
-        }];
-        [[NSNotificationCenter defaultCenter] addObserverForName:@"FFSequenceRangesChangedNotification"
-            object:nil queue:nil usingBlock:^(NSNotification *n) {
+        });
+        OV_addObserver(@"FFSequenceRangesChangedNotification", nil, ^(NSNotification *n) {
             OV_scheduleRerender();
-        }];
-        [[NSNotificationCenter defaultCenter] addObserverForName:@"FFEffectsChangedNotification"
-            object:nil queue:nil usingBlock:^(NSNotification *n) {
+        });
+        OV_addObserver(@"FFEffectsChangedNotification", nil, ^(NSNotification *n) {
             OV_scheduleRerender();
-        }];
+        });
 
         // ── Project / sequence becoming active → render the miniature ──────
         // These fire when a project is opened, or when the active sequence is
         // swapped (e.g. opening a compound clip). Without listening for them
         // the bar stays blank until the user touches something that triggers
         // an edit or scroll notification.
-        [[NSNotificationCenter defaultCenter] addObserverForName:@"activeRootItemDidChange"
-            object:nil queue:nil usingBlock:^(NSNotification *n) {
+        OV_addObserver(@"activeRootItemDidChange", nil, ^(NSNotification *n) {
             OV_scheduleRerender();
-        }];
-        [[NSNotificationCenter defaultCenter] addObserverForName:@"PEActivePlayerModuleDidChangeNotification"
-            object:nil queue:nil usingBlock:^(NSNotification *n) {
+        });
+        OV_addObserver(@"PEActivePlayerModuleDidChangeNotification", nil, ^(NSNotification *n) {
             OV_scheduleRerender();
-        }];
-        [[NSNotificationCenter defaultCenter] addObserverForName:@"FFTimelineIndexDidReloadArrangedItemsNotification"
-            object:nil queue:nil usingBlock:^(NSNotification *n) {
+        });
+        OV_addObserver(@"FFTimelineIndexDidReloadArrangedItemsNotification", nil, ^(NSNotification *n) {
             OV_scheduleRerender();
-        }];
+        });
 
         // Seed the initial playback state in case playback is already active.
         id tm = SpliceKit_getActiveTimelineModule();
@@ -967,16 +983,14 @@ void SpliceKit_installTimelineOverviewBar(void) {
         }
 
         // Re-render on scroll/zoom so the visible-region rectangle stays accurate
-        [[NSNotificationCenter defaultCenter] addObserverForName:NSViewBoundsDidChangeNotification
-            object:clipView queue:nil usingBlock:^(NSNotification *n) {
+        OV_addObserver(NSViewBoundsDidChangeNotification, clipView, ^(NSNotification *n) {
             [[SpliceKitTimelineOverviewView shared] setNeedsDisplay:YES];
-        }];
+        });
         clipView.postsBoundsChangedNotifications = YES;
-        [[NSNotificationCenter defaultCenter] addObserverForName:NSViewFrameDidChangeNotification
-            object:timelineView queue:nil usingBlock:^(NSNotification *n) {
+        OV_addObserver(NSViewFrameDidChangeNotification, timelineView, ^(NSNotification *n) {
             // Zoom change -> visible region width changes
             [[SpliceKitTimelineOverviewView shared] setNeedsDisplay:YES];
-        }];
+        });
 
         // Reposition when the timeline scroll view's frame changes (e.g. the
         // user opens/closes a sidebar, the inspector, or drags a split view).
@@ -986,34 +1000,29 @@ void SpliceKit_installTimelineOverviewBar(void) {
         clipView.postsFrameChangedNotifications = YES;
         NSView *widthRefObserve = scrollView.superview;
         if (widthRefObserve) widthRefObserve.postsFrameChangedNotifications = YES;
-        [[NSNotificationCenter defaultCenter] addObserverForName:NSViewFrameDidChangeNotification
-            object:scrollView queue:nil usingBlock:^(NSNotification *n) {
+        OV_addObserver(NSViewFrameDidChangeNotification, scrollView, ^(NSNotification *n) {
             OV_repositionPanel();
             OV_scheduleRerender();
-        }];
-        [[NSNotificationCenter defaultCenter] addObserverForName:NSViewFrameDidChangeNotification
-            object:clipView queue:nil usingBlock:^(NSNotification *n) {
+        });
+        OV_addObserver(NSViewFrameDidChangeNotification, clipView, ^(NSNotification *n) {
             OV_repositionPanel();
             OV_scheduleRerender();
-        }];
+        });
         if (widthRefObserve) {
-            [[NSNotificationCenter defaultCenter] addObserverForName:NSViewFrameDidChangeNotification
-                object:widthRefObserve queue:nil usingBlock:^(NSNotification *n) {
+            OV_addObserver(NSViewFrameDidChangeNotification, widthRefObserve, ^(NSNotification *n) {
                 OV_repositionPanel();
                 OV_scheduleRerender();
-            }];
+            });
         }
 
         // Reposition on window move/resize
-        [[NSNotificationCenter defaultCenter] addObserverForName:NSWindowDidResizeNotification
-            object:parent queue:nil usingBlock:^(NSNotification *n) {
+        OV_addObserver(NSWindowDidResizeNotification, parent, ^(NSNotification *n) {
             OV_repositionPanel();
             OV_scheduleRerender();
-        }];
-        [[NSNotificationCenter defaultCenter] addObserverForName:NSWindowDidMoveNotification
-            object:parent queue:nil usingBlock:^(NSNotification *n) {
+        });
+        OV_addObserver(NSWindowDidMoveNotification, parent, ^(NSNotification *n) {
             OV_repositionPanel();
-        }];
+        });
 
         sOverviewBarInstalled = YES;
         SpliceKit_log(@"[Overview] Timeline overview bar installed at %@",
@@ -1028,6 +1037,10 @@ void SpliceKit_uninstallTimelineOverviewBar(void) {
         [bar setPlaying:NO];
         [bar stopDisplayLink];
         [NSObject cancelPreviousPerformRequestsWithTarget:bar];
+        // The block-based observers were registered under opaque tokens, not
+        // under `bar`. -removeObserver:bar only covers any direct-target
+        // registrations (there aren't any here). Tear down the tokens.
+        OV_removeAllObservers();
         [[NSNotificationCenter defaultCenter] removeObserver:bar];
         if (sOverviewPanel) {
             [sOverviewPanel.parentWindow removeChildWindow:sOverviewPanel];

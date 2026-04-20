@@ -417,6 +417,7 @@ static void SpliceKit_checkCompatibility(void) {
 - (void)toggleCaptionPanel:(id)sender;
 - (void)toggleLiveCamPanel:(id)sender;
 - (void)toggleSections:(id)sender;
+- (void)toggleOverviewBar:(id)sender;
 - (void)toggleCommandPalette:(id)sender;
 - (void)toggleLuaPanel:(id)sender;
 - (void)runLuaScript:(id)sender;
@@ -425,6 +426,7 @@ static void SpliceKit_checkCompatibility(void) {
 - (void)toggleViewerPinchZoom:(id)sender;
 - (void)toggleVideoOnlyKeepsAudioDisabled:(id)sender;
 - (void)toggleSuppressAutoImport:(id)sender;
+- (void)toggleTimelinePerformanceMode:(id)sender;
 - (void)editLLadder:(id)sender;
 - (void)editJLadder:(id)sender;
 - (void)setDefaultConformFit:(id)sender;
@@ -447,6 +449,7 @@ static void SpliceKit_checkCompatibility(void) {
 - (void)importOTIO:(id)sender;
 - (void)toggleLiveCamPanel:(id)sender;
 - (void)updateLiveCamToolbarButtonState:(BOOL)active;
+- (void)toggleVisionProPanel:(id)sender;
 @property (nonatomic, weak) NSButton *toolbarButton;
 @property (nonatomic, weak) NSButton *paletteToolbarButton;
 @property (nonatomic, weak) NSButton *liveCamToolbarButton;
@@ -526,6 +529,16 @@ static void SpliceKit_checkCompatibility(void) {
     [self updateLiveCamToolbarButtonState:!visible];
 }
 
+- (void)toggleVisionProPanel:(id)sender {
+    Class panelClass = objc_getClass("SpliceKitVisionProPanel");
+    if (!panelClass) {
+        SpliceKit_log(@"SpliceKitVisionProPanel class not found");
+        return;
+    }
+    id panel = ((id (*)(id, SEL))objc_msgSend)((id)panelClass, @selector(sharedPanel));
+    ((void (*)(id, SEL))objc_msgSend)(panel, @selector(togglePanel));
+}
+
 - (void)toggleCommandPalette:(id)sender {
     [[SpliceKitCommandPalette sharedPalette] togglePalette];
 }
@@ -559,6 +572,10 @@ static void SpliceKit_checkCompatibility(void) {
 
 - (void)toggleOverviewBar:(id)sender {
     SpliceKit_setTimelineOverviewBarEnabled(!SpliceKit_isTimelineOverviewBarEnabled());
+}
+
+- (void)toggleTimelinePerformanceMode:(id)sender {
+    SpliceKit_setTimelinePerformanceModeEnabled(!SpliceKit_isTimelinePerformanceModeEnabled());
 }
 
 - (void)toggleMuteAudio:(id)sender {
@@ -1996,6 +2013,8 @@ NSString *SpliceKit_otioToFCPXML(NSString *otioPath) {
         menuItem.state = [state[@"installed"] boolValue] ? NSControlStateValueOn : NSControlStateValueOff;
     } else if (menuItem.action == @selector(toggleOverviewBar:)) {
         menuItem.state = SpliceKit_isTimelineOverviewBarEnabled() ? NSControlStateValueOn : NSControlStateValueOff;
+    } else if (menuItem.action == @selector(toggleTimelinePerformanceMode:)) {
+        menuItem.state = SpliceKit_isTimelinePerformanceModeEnabled() ? NSControlStateValueOn : NSControlStateValueOff;
     }
     return YES;
 }
@@ -2420,6 +2439,13 @@ static void SpliceKit_installMenu(void) {
     liveCamItem.target = [SpliceKitMenuController shared];
     [bridgeMenu addItem:liveCamItem];
 
+    NSMenuItem *visionProItem = [[NSMenuItem alloc]
+        initWithTitle:@"Vision Pro Preview"
+               action:@selector(toggleVisionProPanel:)
+        keyEquivalent:@""];
+    visionProItem.target = [SpliceKitMenuController shared];
+    [bridgeMenu addItem:visionProItem];
+
     NSMenuItem *paletteItem = [[NSMenuItem alloc]
         initWithTitle:@"Command Palette"
                action:@selector(toggleCommandPalette:)
@@ -2450,6 +2476,16 @@ static void SpliceKit_installMenu(void) {
         keyEquivalent:@""];
     overviewItem.target = [SpliceKitMenuController shared];
     [bridgeMenu addItem:overviewItem];
+
+    NSMenuItem *perfModeItem = [[NSMenuItem alloc]
+        initWithTitle:@"Performance Mode"
+               action:@selector(toggleTimelinePerformanceMode:)
+        keyEquivalent:@""];
+    perfModeItem.target = [SpliceKitMenuController shared];
+    perfModeItem.toolTip = @"Suspend filmstrip updates during pinch/scroll, "
+                           @"smooth 120Hz playhead, and enable TLKOptimizedReload. "
+                           @"Master toggle for A/B testing timeline performance.";
+    [bridgeMenu addItem:perfModeItem];
 
     NSMenuItem *mixerItem = [[NSMenuItem alloc]
         initWithTitle:@"Audio Mixer"
@@ -3305,6 +3341,14 @@ static void SpliceKit_appDidLaunch(void) {
         });
     }
 
+    // Timeline Performance Mode — master toggle for the interaction-suspend,
+    // 120Hz playhead overlay, and TLKOptimizedReload knob. Respects the user's
+    // saved value; individual sub-toggles are applied independently if the
+    // master is off.
+    SpliceKit_safeInstall("TimelinePerformanceMode", ^{
+        SpliceKit_installTimelinePerformanceMode();
+    });
+
     // Latch skim state off the methods FCP actually calls so the mixer can
     // meter live skims even when isToolSkimming stays false.
     SpliceKit_installMixerSkimHooks();
@@ -3344,6 +3388,16 @@ static void SpliceKit_appDidLaunch(void) {
             SpliceKit_installTimelineOverviewBar();
         });
     }
+
+    // Bridge metadata (bridge.describe / bridge.alive) and async/events
+    // infrastructure must be registered before the control server starts
+    // accepting requests, since they go through the plugin registry.
+    SpliceKit_safeInstall("BridgeMetadata", ^{
+        SpliceKit_installBridgeMetadata();
+    });
+    SpliceKit_safeInstall("AsyncEvents", ^{
+        SpliceKit_installAsync();
+    });
 
     // Start the control server on a background thread
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{

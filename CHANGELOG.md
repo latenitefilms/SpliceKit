@@ -6,6 +6,28 @@ notarization ticket, and Sparkle signature live on the
 Sparkle users are notified automatically; manual download is available from the
 same page or via `appcast.xml`.
 
+## [3.2.10] — 2026-04-20
+
+### Fixed
+- **Smooth Scroll now respects the Continuous Scrolling preference.** The
+  gate that decided whether to engage the 120 Hz centered-scroll takeover
+  was reading `keepsPlayheadCenteredDuringPlayback` on TLKScrollingTimeline
+  — which reads correct by name but is actually a rate-derived computed
+  value set only during fast-forward / rewind (and always off at the
+  default playback rate of 1.0). Swapped the gate over to the real
+  user-facing `scrollDuringPlayback` flag on TLKTimelineView
+  (backed by the `FFScrollDuringPlaybackKey` NSUserDefaults key and
+  pushed into the view from
+  `-[FFAnchoredTimelineModule updateTimelineScrollDuringPlaybackToMatchUserDefaults]`).
+  Now:
+  - Continuous Scrolling ON → Apple's step-based centering is paused
+    and our display-link-driven scroll is authoritative, so the
+    timeline content slides continuously under a stationary playhead.
+  - Continuous Scrolling OFF → we leave Apple's native edge-tracking
+    alone and just draw the smooth 120 Hz playhead line on top, so the
+    playhead slides smoothly across the viewport until it reaches the
+    side threshold and FCP's autoscroller takes over.
+
 ## [3.2.09] — 2026-04-20
 
 ### Added

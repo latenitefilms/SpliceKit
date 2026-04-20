@@ -9,6 +9,14 @@ same page or via `appcast.xml`.
 ## [3.2.10] — 2026-04-20
 
 ### Fixed
+- **Crash on first install of the overview bar.** Two call sites were
+  hitting the FFAnchoredCollectionImageCreation renderer synchronously
+  before the child panel had finished attaching and the active sequence
+  had finished becoming current, so the renderer occasionally landed on
+  a half-built graph and crashed. Both paths now go through a single
+  `scheduleInitialRerender` helper that defers the invalidate + rerender
+  via `performSelector:afterDelay:`, so the first paint always lands
+  after the run-loop turn where the collection is actually renderable.
 - **Smooth Scroll now respects the Continuous Scrolling preference.** The
   gate that decided whether to engage the 120 Hz centered-scroll takeover
   was reading `keepsPlayheadCenteredDuringPlayback` on TLKScrollingTimeline

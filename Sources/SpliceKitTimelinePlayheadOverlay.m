@@ -248,19 +248,25 @@ static void PO_updateOverlayPath(NSView *timelineView) {
 @interface SpliceKitPlayheadOverlayTarget : NSObject
 @end
 
-// Tries to read the timeline view's keepsPlayheadCenteredDuringPlayback flag.
-// On modern FCP this lives on TLKScrollingTimeline (accessible via
-// -[TLKTimelineView scrollingTimeline]). Returns NO if unavailable.
-static BOOL PO_keepsPlayheadCentered(id timelineView) {
+// Reads the user's "Continuous Scrolling" preference — the toggle that
+// controls whether the timeline scrolls to keep the playhead centered
+// during playback, or whether the playhead slides off to the right.
+//
+// This lives on TLKTimelineView as -scrollDuringPlayback (backed by the
+// FFScrollDuringPlaybackKey NSUserDefaults key, wired from
+// -[FFAnchoredTimelineModule updateTimelineScrollDuringPlaybackToMatchUserDefaults]).
+//
+// IMPORTANT: we deliberately do NOT use `keepsPlayheadCenteredDuringPlayback`
+// here. That one looks like the right property by name, but it's a computed
+// value driven by playback rate — it's NO at normal rate=1.0 and only
+// flips YES during fast-forward / rewind. Using it as a gate made Smooth
+// Scroll silently skip the 120Hz centered path for every normal playback.
+static BOOL PO_scrollDuringPlayback(id timelineView) {
     if (!timelineView) return NO;
     @try {
-        SEL stSel = NSSelectorFromString(@"scrollingTimeline");
-        if (![timelineView respondsToSelector:stSel]) return NO;
-        id scrollingTimeline = ((id (*)(id, SEL))objc_msgSend)(timelineView, stSel);
-        if (!scrollingTimeline) return NO;
-        SEL kSel = NSSelectorFromString(@"keepsPlayheadCenteredDuringPlayback");
-        if (![scrollingTimeline respondsToSelector:kSel]) return NO;
-        return ((BOOL (*)(id, SEL))objc_msgSend)(scrollingTimeline, kSel);
+        SEL sel = NSSelectorFromString(@"scrollDuringPlayback");
+        if (![timelineView respondsToSelector:sel]) return NO;
+        return ((BOOL (*)(id, SEL))objc_msgSend)(timelineView, sel);
     } @catch (...) {}
     return NO;
 }
@@ -418,12 +424,21 @@ static void PO_onPlaybackBegan(void) {
         }
     }
 
+    // Respect the user's "Continuous Scrolling" preference (the
+    // FFScrollDuringPlaybackKey NSUserDefaults toggle). If it's OFF, we
+    // should only draw the smooth 120Hz overlay line and let FCP's native
+    // edge-tracking handle the scroll (playhead slides right, timeline
+    // stays put until the playhead hits the side threshold). If it's ON,
+    // we take over the scroll so centering happens smoothly at display
+    // refresh instead of FCP's 30Hz step-based centering.
+    BOOL userWantsCentered = PO_scrollDuringPlayback(view);
+
     // Safety gate: only pause Apple's scroll machinery if we can actually
     // drive our own replacement. If locationRangeForTime: or the clip-view
     // lookup fails, leave Apple's scroller running and show only a cosmetic
     // line on top — still a visual win, no functional regression.
     BOOL canDriveScroll = NO;
-    if ([view respondsToSelector:phSel]) {
+    if (userWantsCentered && [view respondsToSelector:phSel]) {
         PO_CMTime probeTime = ((PO_CMTime (*)(id, SEL))PO_STRET)(view, phSel);
         double probeX = 0.0;
         BOOL gotX = (probeTime.timescale > 0) && PO_xForTime(view, probeTime, &probeX);
@@ -443,19 +458,18 @@ static void PO_onPlaybackBegan(void) {
         real.hidden = YES;
     }
 
-    // Pause Apple's auto-scroll. TLKScrollingTimeline otherwise runs
-    // step-based `scrollPlayheadTowardMiddle` / `scrollPlayheadTowardSide`
-    // on every playhead-time update (30Hz on a 30p project); on a ProMotion
-    // display that reads as the timeline hopping sideways a few times per
-    // second. After takeover, our 120Hz tick is authoritative.
-    //
-    // We accept a slight hitch at play-begin in exchange for the overlay
-    // being centered immediately — the alternative (deferred takeover) made
-    // the playhead visibly jump from its current viewport position to the
-    // center after ~130ms, which felt worse.
+    // Pause Apple's auto-scroll *only* when the user has centered-during-
+    // playback on AND our safety probe succeeded. TLKScrollingTimeline
+    // otherwise runs step-based `scrollPlayheadTowardMiddle` on every
+    // playhead-time update (30Hz on a 30p project); on a ProMotion display
+    // that reads as the timeline hopping sideways a few times per second.
+    // When centered is OFF, we want Apple's edge-threshold scroll left
+    // intact — the user explicitly chose "playhead slides off to the right
+    // until it reaches the edge," and our 120Hz overlay already gives them
+    // a smooth line.
     sPausedScrollingTimelineWeak = nil;
     sScrollingTimelineWasPaused = NO;
-    if (canDriveScroll) {
+    if (userWantsCentered && canDriveScroll) {
         @try {
             SEL stSel = NSSelectorFromString(@"scrollingTimeline");
             id scrollingTimeline = [view respondsToSelector:stSel]
@@ -470,7 +484,7 @@ static void PO_onPlaybackBegan(void) {
                 if ([scrollingTimeline respondsToSelector:pausedSet]) {
                     ((void (*)(id, SEL, BOOL))objc_msgSend)(scrollingTimeline, pausedSet, YES);
                     sPausedScrollingTimelineWeak = scrollingTimeline;
-                    SpliceKit_log(@"[PlayheadOverlay] Paused TLKScrollingTimeline for smooth playback");
+                    SpliceKit_log(@"[PlayheadOverlay] Paused TLKScrollingTimeline (centered-playback mode)");
                 }
             }
         } @catch (...) {}

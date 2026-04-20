@@ -385,7 +385,7 @@
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 4.0.0;
+				CURRENT_PROJECT_VERSION = "$(SPLICEKIT_VERSION)";
 				DEAD_CODE_STRIPPING = YES;
 				DEVELOPMENT_TEAM = "$(HARDCODED_DEVELOPMENT_TEAM)";
 				ENABLE_HARDENED_RUNTIME = YES;
@@ -400,7 +400,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 4.0.0;
+				MARKETING_VERSION = "$(SPLICEKIT_VERSION)";
 				OTHER_LDFLAGS = (
 					"$(inherited)",
 					"-ObjC",
@@ -420,7 +420,7 @@
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 4.0.0;
+				CURRENT_PROJECT_VERSION = "$(SPLICEKIT_VERSION)";
 				DEAD_CODE_STRIPPING = YES;
 				DEVELOPMENT_TEAM = "$(HARDCODED_DEVELOPMENT_TEAM)";
 				ENABLE_HARDENED_RUNTIME = YES;
@@ -435,7 +435,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 4.0.0;
+				MARKETING_VERSION = "$(SPLICEKIT_VERSION)";
 				OTHER_LDFLAGS = (
 					"$(inherited)",
 					"-ObjC",

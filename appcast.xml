@@ -6,6 +6,22 @@
     <description>SpliceKit Patcher release updates</description>
     <language>en</language>
     <item>
+      <title>SpliceKit v3.3.2</title>
+      <sparkle:version>3.3.2</sparkle:version>
+      <sparkle:shortVersionString>3.3.2</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+      <pubDate>Tue, 21 Apr 2026 13:01:20 +0000</pubDate>
+      <description><![CDATA[
+        <h2>What's New in 3.3.2</h2>
+        <p>Fixes BRAW thumbnail crash when third-party Media Extensions are installed, restores LiveCam camera/microphone access, fixes rare installer signing failures from stray extended attributes, and adds build-time guards against undefined SpliceKit_ symbols.</p>
+      ]]></description>
+      <enclosure
+        url="https://github.com/elliotttate/SpliceKit/releases/download/v3.3.2/SpliceKit-v3.3.2.dmg"
+        sparkle:edSignature="QmJah8GhlHU0PALA45Mx4SsB9gdh6JkFXH8jHDRGPZC9vvE8B+854Va5yRa5962hLgPp/sPDj9xTaNHCiIBlBA=="
+        length="19390978"
+        type="application/octet-stream" />
+    </item>
+    <item>
       <title>SpliceKit v3.3.1</title>
       <sparkle:version>3.3.1</sparkle:version>
       <sparkle:shortVersionString>3.3.1</sparkle:shortVersionString>

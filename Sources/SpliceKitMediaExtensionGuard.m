@@ -104,10 +104,20 @@ static BOOL MEG_isVTNilPropertyException(NSException *exception) {
         && [reason containsString:@"object cannot be nil"];
 }
 
-static id MEG_swizzledCopyDecoderInfo(id self, SEL _cmd, id arg) {
+// copyDecoderInfo: takes a FourCharCode (uint32 codec FourCC like 'braw' =
+// 0x62726177), NOT an Objective-C object. Declaring the parameter as `id`
+// would make ARC emit objc_storeStrong on entry, which segfaults trying to
+// dereference the FourCC value as an object pointer. We saw this on the very
+// first deploy of this guard (2026-04-21 15:03:54): EXC_BAD_ACCESS at
+// 0x62726177 inside MEG_swizzledCopyDecoderInfo+68 → objc_storeStrong+60.
+// Using `void *` for the parameter passes the register value through with no
+// ARC retain. The 32-bit FourCharCode lives in the low half of the 64-bit arg
+// register on ARM64; the original method reads it back as a uint32 and never
+// notices the wider-than-needed type.
+static id MEG_swizzledCopyDecoderInfo(id self, SEL _cmd, void *arg) {
     if (!sOrigCopyDecoderInfo) return nil;
     @try {
-        return ((id (*)(id, SEL, id))sOrigCopyDecoderInfo)(self, _cmd, arg);
+        return ((id (*)(id, SEL, void *))sOrigCopyDecoderInfo)(self, _cmd, arg);
     } @catch (NSException *exception) {
         if (MEG_isVTNilPropertyException(exception)) {
             MEG_logCatch(exception);

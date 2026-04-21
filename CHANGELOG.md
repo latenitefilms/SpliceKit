@@ -6,6 +6,31 @@ notarization ticket, and Sparkle signature live on the
 Sparkle users are notified automatically; manual download is available from the
 same page or via `appcast.xml`.
 
+## [Unreleased]
+
+### Fixed
+- **Crash in FCP's thumbnail manager when an installed Media Extension
+  returns nil for a VTExtensionProperties key.** FCP's thumbnail dispatch
+  thread calls `-[FFMediaExtensionManager copyDecoderInfo:]`, which calls
+  Apple's `VTCopyVideoDecoderExtensionProperties`. That function builds a
+  CFDictionary of six required keys (extension identifier, name, URL, host
+  bundle name, host bundle URL, codec name) by querying the matched
+  Media Extension. If any value resolves to nil — for example, an
+  extension whose `CodecInfo` array does not declare an entry for the
+  FourCC the format description carries — VT calls
+  `__setObject:forKey:` with nil and `__NSDictionaryM` raises
+  `NSInvalidArgumentException`. The exception unwinds to FCP's uncaught
+  handler and abort()s the process. We saw this on a multicam clip with
+  BRAW angles where SpliceKit registers the brxq/brst/brvn/brs2/brxh
+  variants but installed third-party decoders only advertise 'braw'.
+  SpliceKit now wraps `copyDecoderInfo:` with a `@try`/`@catch` that
+  swallows that one specific exception (matched on
+  `__setObject:forKey:` + `object cannot be nil` reason text) and
+  returns nil, mirroring the `kVTCouldNotFindExtensionErr` path that FCP
+  already handles cleanly. Any other exception is re-raised so we don't
+  hide unrelated bugs. First catch logs in full; subsequent catches
+  throttle to one log line per minute with a running count.
+
 ## [3.2.10] — 2026-04-20
 
 ### Fixed

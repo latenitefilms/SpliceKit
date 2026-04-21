@@ -77,6 +77,9 @@
 #import <objc/message.h>
 
 static IMP sOrigCopyDecoderInfo = NULL;
+static IMP sOrigCopyProcessorInfo = NULL;
+static IMP sOrigIsAppExclusiveDecoder = NULL;
+static IMP sOrigIsDecoderUsingMediaExtension = NULL;
 static BOOL sMediaExtensionGuardInstalled = NO;
 
 // Codecs SpliceKit handles in-process via VTRegisterVideoDecoder
@@ -188,6 +191,82 @@ static id MEG_swizzledCopyDecoderInfo(id self, SEL _cmd, uintptr_t arg) {
     }
 }
 
+// copyProcessorInfo: shares its signature with copyDecoderInfo: (returns
+// FFMediaExtensionInfo for the matched RAW processor extension). Same
+// FourCC arg, same nil-property crash potential, same routing intent —
+// SpliceKit handles BRAW RAW adjustments in-process via the
+// FFSourceVideoFig.setRAWAdjustmentInfo: hook in SpliceKitBRAWRAW.mm, and
+// we don't want a third-party RAW processor (Apple ProRes RAW Processor,
+// BRAW Toolbox RAW Processor, nablet) inserted into the pipeline for BRAW
+// FourCCs.
+static id MEG_swizzledCopyProcessorInfo(id self, SEL _cmd, uintptr_t arg) {
+    if (!sOrigCopyProcessorInfo) return nil;
+    uint32_t fourcc = (uint32_t)arg;
+
+    if (MEG_isSpliceKitOwnedCodec(fourcc)) {
+        MEG_logRoutingDecisionOnce(fourcc);
+        return nil;
+    }
+
+    @try {
+        return ((id (*)(id, SEL, uintptr_t))sOrigCopyProcessorInfo)(self, _cmd, arg);
+    } @catch (NSException *exception) {
+        if (MEG_isVTNilPropertyException(exception)) {
+            MEG_logCatch(exception, fourcc);
+            return nil;
+        }
+        @throw;
+    }
+}
+
+// isAppExclusiveDecoder: returns YES when FCP should treat the in-app
+// decoder as authoritative (skipping Media Extension lookup) for the given
+// FourCC. BRAW decoders SpliceKit owns get a hard YES here; everything
+// else passes through to FCP's normal logic.
+static BOOL MEG_swizzledIsAppExclusiveDecoder(id self, SEL _cmd, uintptr_t arg) {
+    uint32_t fourcc = (uint32_t)arg;
+    if (MEG_isSpliceKitOwnedCodec(fourcc)) return YES;
+    if (!sOrigIsAppExclusiveDecoder) return NO;
+    return ((BOOL (*)(id, SEL, uintptr_t))sOrigIsAppExclusiveDecoder)(self, _cmd, arg);
+}
+
+// isDecoderUsingMediaExtension: returns YES when FCP routes the codec
+// through a Media Extension. We override to NO for BRAW so any callers
+// that gate on this predicate (cache invalidation, Inspector display,
+// asset-rep-provider selection in -[FFAsset _newMediaRepProviderForQuality:])
+// believe FCP is using the in-process path even if a third-party Media
+// Extension is registered for the codec.
+static BOOL MEG_swizzledIsDecoderUsingMediaExtension(id self, SEL _cmd, uintptr_t arg) {
+    uint32_t fourcc = (uint32_t)arg;
+    if (MEG_isSpliceKitOwnedCodec(fourcc)) return NO;
+    if (!sOrigIsDecoderUsingMediaExtension) return NO;
+    return ((BOOL (*)(id, SEL, uintptr_t))sOrigIsDecoderUsingMediaExtension)(self, _cmd, arg);
+}
+
+// Dump every instance + class method on a class so we can see what other
+// hooks might exist for format reader / RAW processor selection. Logged once
+// at install time. Output goes to ~/Library/Logs/SpliceKit/splicekit.log.
+static void MEG_dumpClassMethods(Class cls, const char *label) {
+    if (!cls) return;
+    NSMutableArray *names = [NSMutableArray array];
+    unsigned int count = 0;
+    Method *methods = class_copyMethodList(cls, &count);
+    for (unsigned int i = 0; i < count; i++) {
+        [names addObject:[@"-" stringByAppendingString:NSStringFromSelector(method_getName(methods[i]))]];
+    }
+    free(methods);
+    Class meta = object_getClass((id)cls);
+    methods = class_copyMethodList(meta, &count);
+    for (unsigned int i = 0; i < count; i++) {
+        [names addObject:[@"+" stringByAppendingString:NSStringFromSelector(method_getName(methods[i]))]];
+    }
+    free(methods);
+    [names sortUsingSelector:@selector(compare:)];
+    SpliceKit_log(@"[MediaExtensionGuard] %s methods (%lu): %@",
+                  label, (unsigned long)names.count,
+                  [names componentsJoinedByString:@" | "]);
+}
+
 void SpliceKit_installMediaExtensionGuard(void) {
     if (sMediaExtensionGuardInstalled) return;
 
@@ -197,6 +276,19 @@ void SpliceKit_installMediaExtensionGuard(void) {
         return;
     }
 
+    // One-shot API surface dump so we can see what other format-reader /
+    // raw-processor selection hooks live on these classes — the third-party
+    // BRAW Toolbox Format Reader is still winning the lookup race even with
+    // the decoder swizzle in place, and we need to know which method to
+    // intercept next. Also dump FFProviderFig because the asset-side
+    // copyMediaExtensionInfo call appears in the crash trace.
+    MEG_dumpClassMethods(cls, "FFMediaExtensionManager");
+    MEG_dumpClassMethods(objc_getClass("FFProviderFig"), "FFProviderFig");
+
+    // copyDecoderInfo: is the load-bearing swizzle — both crash-guard and
+    // routing depend on it. If it doesn't exist, abort early; the other
+    // hooks below are best-effort and individual failures are logged but
+    // don't block install.
     SEL sel = @selector(copyDecoderInfo:);
     if (![cls instancesRespondToSelector:sel]) {
         SpliceKit_log(@"[MediaExtensionGuard] -[FFMediaExtensionManager copyDecoderInfo:] missing; skipping");
@@ -209,6 +301,28 @@ void SpliceKit_installMediaExtensionGuard(void) {
         return;
     }
 
+    // Best-effort hooks for the other Media-Extension routing predicates.
+    // Each is independent — missing or swizzle-failed selectors degrade
+    // gracefully (we just don't override that predicate for BRAW).
+    if ([cls instancesRespondToSelector:@selector(copyProcessorInfo:)]) {
+        sOrigCopyProcessorInfo = SpliceKit_swizzleMethod(
+            cls, @selector(copyProcessorInfo:), (IMP)MEG_swizzledCopyProcessorInfo);
+    }
+    if ([cls instancesRespondToSelector:@selector(isAppExclusiveDecoder:)]) {
+        sOrigIsAppExclusiveDecoder = SpliceKit_swizzleMethod(
+            cls, @selector(isAppExclusiveDecoder:), (IMP)MEG_swizzledIsAppExclusiveDecoder);
+    }
+    if ([cls instancesRespondToSelector:@selector(isDecoderUsingMediaExtension:)]) {
+        sOrigIsDecoderUsingMediaExtension = SpliceKit_swizzleMethod(
+            cls, @selector(isDecoderUsingMediaExtension:), (IMP)MEG_swizzledIsDecoderUsingMediaExtension);
+    }
+
     sMediaExtensionGuardInstalled = YES;
-    SpliceKit_log(@"[MediaExtensionGuard] installed: BRAW codecs (braw/brxq/brst/brvn/brs2/brxh) routed past Media Extensions to in-process VT decoder; other codecs guarded against VT nil-property exception");
+    SpliceKit_log(@"[MediaExtensionGuard] installed: BRAW codecs (braw/brxq/brst/brvn/brs2/brxh) "
+                  @"redirected past Media Extension routing — copyDecoderInfo:%s "
+                  @"copyProcessorInfo:%s isAppExclusiveDecoder:%s isDecoderUsingMediaExtension:%s",
+                  sOrigCopyDecoderInfo ? "✓" : "✗",
+                  sOrigCopyProcessorInfo ? "✓" : "✗",
+                  sOrigIsAppExclusiveDecoder ? "✓" : "✗",
+                  sOrigIsDecoderUsingMediaExtension ? "✓" : "✗");
 }

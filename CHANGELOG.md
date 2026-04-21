@@ -12,20 +12,41 @@ same page or via `appcast.xml`.
 - **SpliceKit is now authoritative for BRAW playback even when third-party
   Media Extensions are installed.** Apple prioritises Media Extension
   video decoders (e.g. BRAW Toolbox's Decoder.appex) over legacy
-  in-process VT registrations, so `-[FFMediaExtensionManager copyDecoderInfo:]`
-  was routing every BRAW frame through whichever decoder won the lookup
-  race — usually the third-party extension, even for the brxq/brst/
-  brvn/brs2/brxh variants that the third party doesn't actually
-  advertise in its `CodecInfo`. SpliceKit's swizzle on `copyDecoderInfo:`
-  now short-circuits to nil for the six BRAW FourCCs SpliceKit handles
-  (`braw`, `brxq`, `brst`, `brvn`, `brs2`, `brxh`), making FCP's Media
-  Extension lookup miss and the decoder selection fall through to
-  `VTRegisterVideoDecoder`'s in-process registry where
-  `SpliceKitBRAW_registerInProcessDecoder` has bound all six variants
-  to `SpliceKitBRAWInProcess_CreateInstance`. Other codecs are still
-  routed to whichever Media Extension claims them (Sony Raw via nablet,
-  AVI/MKV via QLVideo, etc.). The first redirect for each FourCC logs
-  one line so it's visible at startup; subsequent calls are silent.
+  in-process VT registrations. SpliceKit now overrides four
+  `FFMediaExtensionManager` predicates so FCP's Media Extension routing
+  consistently sees the in-process VT decoder as authoritative for the
+  six BRAW FourCCs (`braw`, `brxq`, `brst`, `brvn`, `brs2`, `brxh`):
+  - `copyDecoderInfo:` returns nil — Media Extension lookup misses,
+    decoder selection falls through to `VTRegisterVideoDecoder`'s
+    in-process registry where `SpliceKitBRAW_registerInProcessDecoder`
+    has bound all six variants to `SpliceKitBRAWInProcess_CreateInstance`.
+  - `copyProcessorInfo:` returns nil — same routing intent for the RAW
+    processor side (SpliceKit handles BRAW RAW adjustments in-process
+    via the `FFSourceVideoFig.setRAWAdjustmentInfo:` hook in
+    `SpliceKitBRAWRAW.mm`; we don't want a third-party RAW processor
+    inserted into the pipeline).
+  - `isAppExclusiveDecoder:` returns YES — signals "the in-app decoder
+    is exclusive for this codec, skip Media Extension lookup".
+  - `isDecoderUsingMediaExtension:` returns NO — callers that gate on
+    this predicate (cache invalidation, Inspector display,
+    asset-rep-provider selection) believe FCP is using the in-process
+    path even when a third-party Media Extension is registered for the
+    codec.
+
+  Other codecs are still routed to whichever Media Extension claims
+  them (Sony Raw via nablet, AVI/MKV via QLVideo, etc.). The first
+  redirect for each FourCC logs one line so it's visible at startup;
+  subsequent calls are silent.
+
+  Known limitation: this only changes decoder/processor selection.
+  Format reader selection (the .braw container parser) lives below FCP
+  in `mediaextensiond` and is not yet redirected — Apple resolves
+  format readers by UTI lookup before the asset reaches `FFAsset`, so
+  if BRAW Toolbox's `FormatReader.appex` is installed it can still win
+  that lookup. Disabling its format reader requires either OS-level
+  `pluginkit -e ignore` (heavy-handed; affects all apps) or shipping
+  SpliceKit's own format reader as a competing Media Extension; both
+  are tracked separately.
 
 ### Fixed
 - **Crash in FCP's thumbnail manager when an installed Media Extension

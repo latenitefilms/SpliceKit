@@ -842,17 +842,17 @@ class PatcherModel: ObservableObject {
         let signBRAW: (String) -> String = { ident in
             var parts: [String] = []
             if FileManager.default.fileExists(atPath: brawDecoderBundle) {
-                parts.append("codesign --force --sign \(ident) '\(brawDecoderBundle)' 2>&1")
+                parts.append("codesign --force --options runtime --sign \(ident) '\(brawDecoderBundle)' 2>&1")
             }
             if FileManager.default.fileExists(atPath: brawImportBundle) {
-                parts.append("codesign --force --sign \(ident) '\(brawImportBundle)' 2>&1")
+                parts.append("codesign --force --options runtime --sign \(ident) '\(brawImportBundle)' 2>&1")
             }
             return parts.isEmpty ? "true" : parts.joined(separator: " && ")
         }
         var signResult = shellResult("""
             \(signBRAW(quotedIdentity)) && \
-            codesign --force --sign \(quotedIdentity) '\(moddedApp)/Contents/Frameworks/SpliceKit.framework' 2>&1 && \
-            codesign --force --sign \(quotedIdentity) --entitlements '\(entitlements)' '\(moddedApp)' 2>&1
+            codesign --force --options runtime --sign \(quotedIdentity) '\(moddedApp)/Contents/Frameworks/SpliceKit.framework' 2>&1 && \
+            codesign --force --options runtime --sign \(quotedIdentity) --entitlements '\(entitlements)' '\(moddedApp)' 2>&1
             """)
         if signResult.status != 0 && signIdentity != "-" {
             await logAsync("Developer signing failed; retrying with ad-hoc signature (higher risk of macOS launch/security blocks)")
@@ -862,8 +862,8 @@ class PatcherModel: ObservableObject {
             signIdentity = "-"
             signResult = shellResult("""
                 \(signBRAW("-")) && \
-                codesign --force --sign - '\(moddedApp)/Contents/Frameworks/SpliceKit.framework' 2>&1 && \
-                codesign --force --sign - --entitlements '\(entitlements)' '\(moddedApp)' 2>&1
+                codesign --force --options runtime --sign - '\(moddedApp)/Contents/Frameworks/SpliceKit.framework' 2>&1 && \
+                codesign --force --options runtime --sign - --entitlements '\(entitlements)' '\(moddedApp)' 2>&1
                 """)
         }
         guard signResult.status == 0 else {
@@ -1055,6 +1055,9 @@ class PatcherModel: ObservableObject {
             <key>com.apple.security.cs.disable-library-validation</key><true/>
             <key>com.apple.security.cs.allow-dyld-environment-variables</key><true/>
             <key>com.apple.security.get-task-allow</key><true/>
+            <key>com.apple.security.device.camera</key><true/>
+            <key>com.apple.security.device.microphone</key><true/>
+            <key>com.apple.security.device.audio-input</key><true/>
             </dict></plist>
             """
         try entPlist.write(toFile: entitlements, atomically: true, encoding: .utf8)
@@ -1066,17 +1069,17 @@ class PatcherModel: ObservableObject {
         let signBRAW: (String) -> String = { ident in
             var parts: [String] = []
             if FileManager.default.fileExists(atPath: brawDecoderBundle) {
-                parts.append("codesign --force --sign \(ident) '\(brawDecoderBundle)' 2>&1")
+                parts.append("codesign --force --options runtime --sign \(ident) '\(brawDecoderBundle)' 2>&1")
             }
             if FileManager.default.fileExists(atPath: brawImportBundle) {
-                parts.append("codesign --force --sign \(ident) '\(brawImportBundle)' 2>&1")
+                parts.append("codesign --force --options runtime --sign \(ident) '\(brawImportBundle)' 2>&1")
             }
             return parts.isEmpty ? "true" : parts.joined(separator: " && ")
         }
         var signResult = shellResult("""
             \(signBRAW(quotedIdentity)) && \
-            codesign --force --sign \(quotedIdentity) '\(moddedApp)/Contents/Frameworks/SpliceKit.framework' 2>&1 && \
-            codesign --force --sign \(quotedIdentity) --entitlements '\(entitlements)' '\(moddedApp)' 2>&1
+            codesign --force --options runtime --sign \(quotedIdentity) '\(moddedApp)/Contents/Frameworks/SpliceKit.framework' 2>&1 && \
+            codesign --force --options runtime --sign \(quotedIdentity) --entitlements '\(entitlements)' '\(moddedApp)' 2>&1
             """)
         if signResult.status != 0 && signIdentity != "-" {
             await logAsync("Developer signing failed; retrying with ad-hoc signature (higher risk of macOS launch/security blocks)")
@@ -1086,8 +1089,8 @@ class PatcherModel: ObservableObject {
             signIdentity = "-"
             signResult = shellResult("""
                 \(signBRAW("-")) && \
-                codesign --force --sign - '\(moddedApp)/Contents/Frameworks/SpliceKit.framework' 2>&1 && \
-                codesign --force --sign - --entitlements '\(entitlements)' '\(moddedApp)' 2>&1
+                codesign --force --options runtime --sign - '\(moddedApp)/Contents/Frameworks/SpliceKit.framework' 2>&1 && \
+                codesign --force --options runtime --sign - --entitlements '\(entitlements)' '\(moddedApp)' 2>&1
                 """)
         }
         guard signResult.status == 0 else {

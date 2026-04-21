@@ -82,21 +82,15 @@ static IMP sOrigIsAppExclusiveDecoder = NULL;
 static IMP sOrigIsDecoderUsingMediaExtension = NULL;
 static BOOL sMediaExtensionGuardInstalled = NO;
 
+extern BOOL SpliceKitBRAW_isInProcessDecoderRegisteredForCodec(uint32_t fourcc);
+
 // Codecs SpliceKit handles in-process via VTRegisterVideoDecoder
 // (SpliceKitBRAWDecoderInProcess.mm registers all six variants on startup).
-// When FFMediaExtensionManager is asked for one of these we return nil so
-// FCP's decoder selection falls past the Media Extension layer and lands on
-// our in-process registration. Synced with the FourCC list in
-// SpliceKitBRAWDecoderInProcess.mm:524 and the format-description filter in
-// SpliceKitBRAW.mm:1743.
-static BOOL MEG_isSpliceKitOwnedCodec(uint32_t fourcc) {
-    switch (fourcc) {
-    case 'braw': case 'brxq': case 'brst':
-    case 'brvn': case 'brs2': case 'brxh':
-        return YES;
-    default:
-        return NO;
-    }
+// Only codecs whose in-process registration actually succeeded should bypass
+// Media Extension routing; otherwise we leave FCP's original fallback path
+// in place.
+static BOOL MEG_shouldBypassMediaExtensionRouting(uint32_t fourcc) {
+    return SpliceKitBRAW_isInProcessDecoderRegisteredForCodec(fourcc);
 }
 
 static NSString *MEG_fourCCString(uint32_t fourcc) {
@@ -171,7 +165,7 @@ static id MEG_swizzledCopyDecoderInfo(id self, SEL _cmd, uintptr_t arg) {
     // register; truncate to read it back without dereferencing.
     uint32_t fourcc = (uint32_t)arg;
 
-    if (MEG_isSpliceKitOwnedCodec(fourcc)) {
+    if (MEG_shouldBypassMediaExtensionRouting(fourcc)) {
         MEG_logRoutingDecisionOnce(fourcc);
         return nil;
     }
@@ -203,7 +197,7 @@ static id MEG_swizzledCopyProcessorInfo(id self, SEL _cmd, uintptr_t arg) {
     if (!sOrigCopyProcessorInfo) return nil;
     uint32_t fourcc = (uint32_t)arg;
 
-    if (MEG_isSpliceKitOwnedCodec(fourcc)) {
+    if (MEG_shouldBypassMediaExtensionRouting(fourcc)) {
         MEG_logRoutingDecisionOnce(fourcc);
         return nil;
     }
@@ -221,24 +215,24 @@ static id MEG_swizzledCopyProcessorInfo(id self, SEL _cmd, uintptr_t arg) {
 
 // isAppExclusiveDecoder: returns YES when FCP should treat the in-app
 // decoder as authoritative (skipping Media Extension lookup) for the given
-// FourCC. BRAW decoders SpliceKit owns get a hard YES here; everything
-// else passes through to FCP's normal logic.
+// FourCC. We only force YES when that exact BRAW variant is registered
+// in-process; everything else passes through to FCP's normal logic.
 static BOOL MEG_swizzledIsAppExclusiveDecoder(id self, SEL _cmd, uintptr_t arg) {
     uint32_t fourcc = (uint32_t)arg;
-    if (MEG_isSpliceKitOwnedCodec(fourcc)) return YES;
+    if (MEG_shouldBypassMediaExtensionRouting(fourcc)) return YES;
     if (!sOrigIsAppExclusiveDecoder) return NO;
     return ((BOOL (*)(id, SEL, uintptr_t))sOrigIsAppExclusiveDecoder)(self, _cmd, arg);
 }
 
 // isDecoderUsingMediaExtension: returns YES when FCP routes the codec
-// through a Media Extension. We override to NO for BRAW so any callers
-// that gate on this predicate (cache invalidation, Inspector display,
-// asset-rep-provider selection in -[FFAsset _newMediaRepProviderForQuality:])
-// believe FCP is using the in-process path even if a third-party Media
-// Extension is registered for the codec.
+// through a Media Extension. We override to NO only for BRAW variants that
+// are currently registered in-process so any callers that gate on this
+// predicate (cache invalidation, Inspector display, asset-rep-provider
+// selection in -[FFAsset _newMediaRepProviderForQuality:]) stay aligned with
+// the actual decoder route.
 static BOOL MEG_swizzledIsDecoderUsingMediaExtension(id self, SEL _cmd, uintptr_t arg) {
     uint32_t fourcc = (uint32_t)arg;
-    if (MEG_isSpliceKitOwnedCodec(fourcc)) return NO;
+    if (MEG_shouldBypassMediaExtensionRouting(fourcc)) return NO;
     if (!sOrigIsDecoderUsingMediaExtension) return NO;
     return ((BOOL (*)(id, SEL, uintptr_t))sOrigIsDecoderUsingMediaExtension)(self, _cmd, arg);
 }

@@ -92,6 +92,7 @@ class PatcherModel: ObservableObject {
     @Published private(set) var isLaunchInProgress = false
     @Published private(set) var isModdedFCPRunning = false
 
+    private var isLaunchRequestPending = false
     private var launchedFCPRunningApp: NSRunningApplication?
     private var launchedFCPTerminationObserver: NSObjectProtocol?
     private var launchMonitorTask: Task<Void, Never>?
@@ -248,6 +249,8 @@ class PatcherModel: ObservableObject {
 
         if isRunning {
             isLaunchInProgress = false
+        } else if isLaunchRequestPending {
+            isLaunchInProgress = true
         } else if launchedFCPRunningApp?.isTerminated ?? true {
             isLaunchInProgress = false
             launchedFCPRunningApp = nil
@@ -529,6 +532,7 @@ class PatcherModel: ObservableObject {
 
         launchMonitorTask?.cancel()
         launchMonitorTask = nil
+        isLaunchRequestPending = true
         isLaunchInProgress = true
         appendLog("Launching modded FCP...")
         appendLog("Launch binary: \(binary)")
@@ -564,6 +568,7 @@ class PatcherModel: ObservableObject {
             Task { @MainActor in
                 guard let self else { return }
                 if let error = error {
+                    self.isLaunchRequestPending = false
                     self.launchedFCPRunningApp = nil
                     self.isLaunchInProgress = false
                     self.syncModdedFCPRunningState()
@@ -574,11 +579,13 @@ class PatcherModel: ObservableObject {
                     return
                 }
                 guard let runningApp else {
+                    self.isLaunchRequestPending = false
                     self.isLaunchInProgress = false
                     self.syncModdedFCPRunningState()
                     self.appendLog("Final Cut Pro launched but no NSRunningApplication returned")
                     return
                 }
+                self.isLaunchRequestPending = false
                 self.launchedFCPRunningApp = runningApp
                 self.appendLog("Spawned Final Cut Pro pid \(runningApp.processIdentifier)")
                 self.observeLaunchedAppTermination(
@@ -626,6 +633,7 @@ class PatcherModel: ObservableObject {
             appendLog("Removed \(destDir)")
             status = .notInstalled
             bridgeConnected = false
+            isLaunchRequestPending = false
             isLaunchInProgress = false
             isModdedFCPRunning = false
             launchedFCPRunningApp = nil
@@ -682,6 +690,7 @@ class PatcherModel: ObservableObject {
         shell("pkill -f 'Applications/SpliceKit' 2>/dev/null; sleep 1")
         try? FileManager.default.removeItem(atPath: moddedApp)
         bridgeConnected = false
+        isLaunchRequestPending = false
         isLaunchInProgress = false
         isModdedFCPRunning = false
         launchedFCPRunningApp = nil
@@ -1443,6 +1452,7 @@ class PatcherModel: ObservableObject {
             launchMonitorTask?.cancel()
             launchMonitorTask = nil
         }
+        isLaunchRequestPending = false
         if let observer = launchedFCPTerminationObserver {
             NSWorkspace.shared.notificationCenter.removeObserver(observer)
             launchedFCPTerminationObserver = nil

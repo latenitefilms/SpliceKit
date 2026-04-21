@@ -230,6 +230,13 @@ fi
 codesign --force --options runtime --timestamp --sign "${SIGN_ID}" "${SPARKLE_FW}"
 echo "  Signed: Sparkle.framework"
 
+# Sign Sentry framework (SPM ships it without a secure timestamp or Developer ID)
+SENTRY_FW="${BUILT_APP}/Contents/Frameworks/Sentry.framework"
+if [ -d "${SENTRY_FW}" ]; then
+    codesign --force --options runtime --timestamp --sign "${SIGN_ID}" "${SENTRY_FW}"
+    echo "  Signed: Sentry.framework"
+fi
+
 # Sign all Mach-O binaries in Resources (dylib, tools)
 find "${BUILT_APP}/Contents/Resources" -type f | while read f; do
     if file -b "$f" 2>/dev/null | grep -q "Mach-O"; then

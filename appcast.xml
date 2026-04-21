@@ -6,6 +6,22 @@
     <description>SpliceKit Patcher release updates</description>
     <language>en</language>
     <item>
+      <title>SpliceKit v3.3.1</title>
+      <sparkle:version>3.3.1</sparkle:version>
+      <sparkle:shortVersionString>3.3.1</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+      <pubDate>Tue, 21 Apr 2026 02:52:03 +0000</pubDate>
+      <description><![CDATA[
+        <h2>What's New in 3.3.1</h2>
+        <p>Fixes crash-on-launch in v3.3.0. The SpliceKitBridgeMetadata module had its declaration and call site committed but its implementation file was never included in the build, so the safe-install block jumped to 0x0 during FCP's didFinishLaunching fanout. Also lands the Vision Pro preview panel, Bonjour discovery for _ivtpreviewclient._tcp, MCP bridge additions for the Vision Pro tools, and the Resolve Immersive BRAW reverse-engineering notes.</p>
+      ]]></description>
+      <enclosure
+        url="https://github.com/elliotttate/SpliceKit/releases/download/v3.3.1/SpliceKit-v3.3.1.dmg"
+        sparkle:edSignature="pVMSPmHnYtny+egkIPL0uoqXYIUFo7oEhtR2wLCXw2zg9P6TdwhR8apyjKdleIVVBGzZV/oi64D5ZXaYmgRTCA=="
+        length="19378905"
+        type="application/octet-stream" />
+    </item>
+    <item>
       <title>SpliceKit v3.3.0</title>
       <sparkle:version>3.3.0</sparkle:version>
       <sparkle:shortVersionString>3.3.0</sparkle:shortVersionString>

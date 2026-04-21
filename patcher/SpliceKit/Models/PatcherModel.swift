@@ -824,11 +824,16 @@ class PatcherModel: ObservableObject {
             <key>com.apple.security.cs.disable-library-validation</key><true/>
             <key>com.apple.security.cs.allow-dyld-environment-variables</key><true/>
             <key>com.apple.security.get-task-allow</key><true/>
+            <key>com.apple.security.device.camera</key><true/>
+            <key>com.apple.security.device.microphone</key><true/>
+            <key>com.apple.security.device.audio-input</key><true/>
             </dict></plist>
             """
         try entPlist.write(toFile: entitlements, atomically: true, encoding: .utf8)
 
         shell("/usr/libexec/PlistBuddy -c \"Add :NSSpeechRecognitionUsageDescription string 'SpliceKit uses speech recognition to transcribe timeline audio for text-based editing.'\" '\(moddedApp)/Contents/Info.plist' 2>/dev/null")
+        shell("/usr/libexec/PlistBuddy -c \"Add :NSCameraUsageDescription string 'SpliceKit LiveCam uses the camera for native webcam recording inside Final Cut Pro.'\" '\(moddedApp)/Contents/Info.plist' 2>/dev/null")
+        shell("/usr/libexec/PlistBuddy -c \"Add :NSMicrophoneUsageDescription string 'SpliceKit LiveCam uses the microphone for native webcam capture inside Final Cut Pro.'\" '\(moddedApp)/Contents/Info.plist' 2>/dev/null")
 
         let quotedIdentity = shellQuote(signIdentity)
         // Sign inside-out: BRAW plugin bundles (innermost) → framework → app.

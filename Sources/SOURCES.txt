@@ -15,6 +15,7 @@ SpliceKitBRAWAdjustmentInfo.mm
 SpliceKitBRAWSettingsHud.mm
 SpliceKitBRAWInspectorTile.mm
 SpliceKitBRAWDecoderInProcess.mm
+SpliceKitMediaExtensionGuard.m
 SpliceKitVP9.mm
 SpliceKitMKV.m
 SpliceKitServer.m

@@ -170,6 +170,14 @@ void SpliceKit_removeSidebarCoalesceLiveScroll(void);
 void SpliceKit_setSidebarCoalesceLiveScrollEnabled(BOOL enabled);
 BOOL SpliceKit_isSidebarCoalesceLiveScrollEnabled(void);
 
+// Wraps -[FFMediaExtensionManager copyDecoderInfo:] to swallow the specific
+// NSInvalidArgumentException that VTCopyVideoDecoderExtensionProperties throws
+// when an installed Media Extension returns nil for a required property key
+// (e.g. CodecName for a FourCC the extension does not advertise). Without this,
+// FCP abort()s on the thumbnail dispatch thread the moment a multicam clip
+// touches a codec whose extension has malformed CodecInfo.
+void SpliceKit_installMediaExtensionGuard(void);
+
 #pragma mark - Timeline Performance
 
 // Timeline interaction suspend — during pinch / marquee / scroll-bar drag,

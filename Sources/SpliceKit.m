@@ -3244,6 +3244,16 @@ static void SpliceKit_appDidLaunch(void) {
     // Run compatibility check now that all frameworks are loaded
     SpliceKit_checkCompatibility();
 
+    // Guard against the VTCopyVideoDecoderExtensionProperties nil-property
+    // crash before BRAW bootstrap runs — registering BRAW variant FourCCs
+    // increases the surface area where a Media Extension with incomplete
+    // CodecInfo (e.g. BRAW Toolbox advertises only 'braw') can be queried for
+    // a codec it doesn't enumerate, and the resulting nil triggers
+    // -[__NSDictionaryM __setObject:forKey:] inside VT.
+    SpliceKit_safeInstall("MediaExtensionGuard", ^{
+        SpliceKit_installMediaExtensionGuard();
+    });
+
     SpliceKit_bootstrapBRAWAtLaunchPhase(@"did-launch");
 
     SpliceKit_safeInstall("BRAWRAWSettings", ^{

@@ -6,6 +6,22 @@
     <description>SpliceKit Patcher release updates</description>
     <language>en</language>
     <item>
+      <title>SpliceKit v3.3.3</title>
+      <sparkle:version>3.3.3</sparkle:version>
+      <sparkle:shortVersionString>3.3.3</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+      <pubDate>Wed, 22 Apr 2026 21:56:56 +0000</pubDate>
+      <description><![CDATA[
+        <h2>What's New in 3.3.3</h2>
+        <p>Fixes the patcher signing path for existing modded installs so nested SpliceKit bundles, framework, and app wrapper are re-signed correctly during rebuilds and updates.</p>
+      ]]></description>
+      <enclosure
+        url="https://github.com/elliotttate/SpliceKit/releases/download/v3.3.3/SpliceKit-v3.3.3.dmg"
+        sparkle:edSignature="fxaV0zLeh+cJc6E7oYlJpYLxMu+xtPPLoaOyK2QDfK8v7hKWxl147l8oa9svmlTMkOxZkSDcYH9uJ0pxMN80Bw=="
+        length="19390957"
+        type="application/octet-stream" />
+    </item>
+    <item>
       <title>SpliceKit v3.3.2</title>
       <sparkle:version>3.3.2</sparkle:version>
       <sparkle:shortVersionString>3.3.2</sparkle:shortVersionString>

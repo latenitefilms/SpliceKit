@@ -194,6 +194,30 @@ static NSColor *FCPCommandAccentColor(SpliceKitCommand *cmd) {
     }
 }
 
+static void FCPSelectSingleTableRow(NSTableView *tableView, NSInteger row) {
+    if (!tableView || row < 0 || row >= tableView.numberOfRows) return;
+
+    NSInteger rowCount = tableView.numberOfRows;
+    NSIndexSet *previousSelection = tableView.selectedRowIndexes.copy;
+
+    [tableView selectRowIndexes:[NSIndexSet indexSetWithIndex:row] byExtendingSelection:NO];
+    [tableView scrollRowToVisible:row];
+
+    NSMutableIndexSet *rowsToRedraw = [NSMutableIndexSet indexSetWithIndex:(NSUInteger)row];
+    [previousSelection enumerateIndexesUsingBlock:^(NSUInteger idx, BOOL *stop) {
+        if ((NSInteger)idx < rowCount) {
+            [rowsToRedraw addIndex:idx];
+        }
+    }];
+
+    NSIndexSet *columns = [NSIndexSet indexSetWithIndexesInRange:NSMakeRange(0, tableView.numberOfColumns)];
+    if (rowsToRedraw.count > 0 && columns.count > 0) {
+        [tableView reloadDataForRowIndexes:rowsToRedraw columnIndexes:columns];
+    }
+    [tableView setNeedsDisplay:YES];
+    [tableView.enclosingScrollView.contentView setNeedsDisplay:YES];
+}
+
 #pragma mark - Search Field
 //
 // Custom text field that intercepts arrow keys and forwards them to the
@@ -208,7 +232,7 @@ static NSColor *FCPCommandAccentColor(SpliceKitCommand *cmd) {
 
 - (NSRect)titleRectForBounds:(NSRect)rect {
     NSRect titleRect = [super titleRectForBounds:rect];
-    CGFloat offset = floor((NSHeight(rect) - NSHeight(titleRect)) * 0.5) - 1.0;
+    CGFloat offset = floor((NSHeight(rect) - NSHeight(titleRect)) * 0.5) + 2.0;
     titleRect.origin.y += MAX(0.0, offset);
     return titleRect;
 }
@@ -254,16 +278,12 @@ static NSColor *FCPCommandAccentColor(SpliceKitCommand *cmd) {
                 NSInteger newRow = row - 1;
                 SpliceKitCommand *cmd = [palette commandForDisplayRow:newRow];
                 if (cmd && cmd.isSeparatorRow && newRow > 0) newRow--;
-                [self.targetTableView selectRowIndexes:[NSIndexSet indexSetWithIndex:newRow]
-                                  byExtendingSelection:NO];
-                [self.targetTableView scrollRowToVisible:newRow];
+                FCPSelectSingleTableRow(self.targetTableView, newRow);
             } else if (keyCode == 125 && row < maxRow) { // Down
                 NSInteger newRow = row + 1;
                 SpliceKitCommand *cmd = [palette commandForDisplayRow:newRow];
                 if (cmd && cmd.isSeparatorRow && newRow < maxRow) newRow++;
-                [self.targetTableView selectRowIndexes:[NSIndexSet indexSetWithIndex:newRow]
-                                  byExtendingSelection:NO];
-                [self.targetTableView scrollRowToVisible:newRow];
+                FCPSelectSingleTableRow(self.targetTableView, newRow);
             }
             return YES;
         }
@@ -376,35 +396,8 @@ static NSColor *FCPCommandAccentColor(SpliceKitCommand *cmd) {
 }
 
 - (void)drawBackgroundInRect:(NSRect)dirtyRect {
-    if (self.separatorRow) return;
-
-    NSRect cardRect = NSInsetRect(self.bounds, 12.0, 5.0);
-    NSBezierPath *path = [NSBezierPath bezierPathWithRoundedRect:cardRect xRadius:18.0 yRadius:18.0];
-
-    if (self.isSelected) {
-        NSGradient *gradient = [[NSGradient alloc] initWithColors:@[
-            FCPPaletteColor(0.27, 0.35, 0.61, 0.18),
-            FCPPaletteColor(0.17, 0.22, 0.42, 0.26)
-        ]];
-        [gradient drawInBezierPath:path angle:-18.0];
-        [FCPPaletteColor(0.72, 0.84, 1.0, 0.16) setStroke];
-        path.lineWidth = 1.0;
-        [path stroke];
-    } else {
-        [FCPPaletteColor(1.0, 1.0, 1.0, 0.010) setFill];
-        [path fill];
-        [FCPPaletteColor(1.0, 1.0, 1.0, 0.06) setStroke];
-        path.lineWidth = 1.0;
-        [path stroke];
-
-        NSBezierPath *glossLine = [NSBezierPath bezierPath];
-        CGFloat insetX = 18.0;
-        [glossLine moveToPoint:NSMakePoint(NSMinX(cardRect) + insetX, NSMaxY(cardRect) - 1.0)];
-        [glossLine lineToPoint:NSMakePoint(NSMaxX(cardRect) - insetX, NSMaxY(cardRect) - 1.0)];
-        [[FCPPaletteColor(1.0, 1.0, 1.0, 0.05) colorWithAlphaComponent:0.05] setStroke];
-        glossLine.lineWidth = 1.0;
-        [glossLine stroke];
-    }
+    // Row highlight/card rendering is handled by the reusable cell view. Drawing
+    // it here can leave stale selected backgrounds when AppKit reuses row views.
 }
 
 - (void)drawSeparatorInRect:(NSRect)dirtyRect {
@@ -415,6 +408,7 @@ static NSColor *FCPCommandAccentColor(SpliceKitCommand *cmd) {
 #pragma mark - Command Row View
 
 @interface SpliceKitCommandRowView : NSTableCellView
+@property (nonatomic, strong) NSView *cardView;
 @property (nonatomic, strong) NSView *iconPlate;
 @property (nonatomic, strong) NSImageView *iconView;
 @property (nonatomic, strong) NSTextField *starLabel;
@@ -430,6 +424,14 @@ static NSColor *FCPCommandAccentColor(SpliceKitCommand *cmd) {
     self = [super initWithFrame:frame];
     if (self) {
         self.translatesAutoresizingMaskIntoConstraints = NO;
+        self.wantsLayer = YES;
+
+        _cardView = [[NSView alloc] initWithFrame:NSZeroRect];
+        _cardView.wantsLayer = YES;
+        _cardView.layer.cornerRadius = 18.0;
+        _cardView.layer.masksToBounds = YES;
+        _cardView.layer.borderWidth = 1.0;
+        _cardView.translatesAutoresizingMaskIntoConstraints = NO;
 
         _iconPlate = [[NSView alloc] initWithFrame:NSZeroRect];
         _iconPlate.wantsLayer = YES;
@@ -470,6 +472,7 @@ static NSColor *FCPCommandAccentColor(SpliceKitCommand *cmd) {
         _shortcutLabel.translatesAutoresizingMaskIntoConstraints = NO;
         _shortcutLabel.alignment = NSTextAlignmentRight;
 
+        [self addSubview:_cardView positioned:NSWindowBelow relativeTo:nil];
         [self addSubview:_iconPlate];
         [_iconPlate addSubview:_iconView];
         [self addSubview:_starLabel];
@@ -479,6 +482,11 @@ static NSColor *FCPCommandAccentColor(SpliceKitCommand *cmd) {
         [self addSubview:_shortcutLabel];
 
         [NSLayoutConstraint activateConstraints:@[
+            [_cardView.leadingAnchor constraintEqualToAnchor:self.leadingAnchor constant:12.0],
+            [_cardView.trailingAnchor constraintEqualToAnchor:self.trailingAnchor constant:-12.0],
+            [_cardView.topAnchor constraintEqualToAnchor:self.topAnchor constant:5.0],
+            [_cardView.bottomAnchor constraintEqualToAnchor:self.bottomAnchor constant:-5.0],
+
             [_iconPlate.leadingAnchor constraintEqualToAnchor:self.leadingAnchor constant:22.0],
             [_iconPlate.centerYAnchor constraintEqualToAnchor:self.centerYAnchor],
             [_iconPlate.widthAnchor constraintEqualToConstant:34.0],
@@ -514,6 +522,10 @@ static NSColor *FCPCommandAccentColor(SpliceKitCommand *cmd) {
 }
 
 - (void)configureWithCommand:(SpliceKitCommand *)cmd isFavorited:(BOOL)favorited {
+    [self configureWithCommand:cmd isFavorited:favorited selected:NO];
+}
+
+- (void)configureWithCommand:(SpliceKitCommand *)cmd isFavorited:(BOOL)favorited selected:(BOOL)selected {
     NSColor *accent = FCPCommandAccentColor(cmd);
     self.nameLabel.stringValue = cmd.name ?: @"";
     self.detailLabel.stringValue = cmd.detail ?: @"";
@@ -527,6 +539,20 @@ static NSColor *FCPCommandAccentColor(SpliceKitCommand *cmd) {
     self.iconPlate.layer.backgroundColor = [accent colorWithAlphaComponent:0.10].CGColor;
     self.iconPlate.layer.borderColor = [accent colorWithAlphaComponent:0.18].CGColor;
     self.iconPlate.layer.borderWidth = 1.0;
+
+    if (selected) {
+        self.cardView.layer.backgroundColor = FCPPaletteColor(0.16, 0.20, 0.36, 0.58).CGColor;
+        self.cardView.layer.borderColor = FCPPaletteColor(0.72, 0.84, 1.0, 0.22).CGColor;
+        self.cardView.layer.shadowColor = FCPPaletteColor(0.20, 0.30, 0.60, 0.36).CGColor;
+        self.cardView.layer.shadowOpacity = 0.28;
+        self.cardView.layer.shadowRadius = 10.0;
+        self.cardView.layer.shadowOffset = CGSizeZero;
+    } else {
+        self.cardView.layer.backgroundColor = FCPPaletteColor(0.04, 0.05, 0.07, 0.42).CGColor;
+        self.cardView.layer.borderColor = FCPPaletteColor(1.0, 1.0, 1.0, 0.08).CGColor;
+        self.cardView.layer.shadowOpacity = 0.0;
+    }
+    self.needsDisplay = YES;
 }
 
 @end
@@ -1533,7 +1559,7 @@ static NSString * const kSeparatorRowID = @"FCPSeparatorRow";
     bg.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
     bg.layer.borderWidth = 1.0;
     bg.layer.borderColor = FCPPaletteColor(1.0, 1.0, 1.0, 0.10).CGColor;
-    bg.layer.backgroundColor = FCPPaletteColor(0.02, 0.03, 0.06, 0.035).CGColor;
+    bg.layer.backgroundColor = FCPPaletteColor(0.02, 0.03, 0.06, 0.075).CGColor;
     bg.layer.shadowColor = NSColor.blackColor.CGColor;
     bg.layer.shadowOpacity = 0.14;
     bg.layer.shadowRadius = 24.0;
@@ -1544,9 +1570,9 @@ static NSString * const kSeparatorRowID = @"FCPSeparatorRow";
     CAGradientLayer *shellTint = [CAGradientLayer layer];
     shellTint.frame = bg.bounds;
     shellTint.colors = @[
-        (__bridge id)FCPPaletteColor(0.20, 0.24, 0.40, 0.05).CGColor,
-        (__bridge id)FCPPaletteColor(0.10, 0.12, 0.20, 0.025).CGColor,
-        (__bridge id)FCPPaletteColor(0.05, 0.06, 0.10, 0.012).CGColor
+        (__bridge id)FCPPaletteColor(0.20, 0.24, 0.40, 0.085).CGColor,
+        (__bridge id)FCPPaletteColor(0.10, 0.12, 0.20, 0.048).CGColor,
+        (__bridge id)FCPPaletteColor(0.05, 0.06, 0.10, 0.024).CGColor
     ];
     shellTint.startPoint = CGPointMake(0.0, 1.0);
     shellTint.endPoint = CGPointMake(1.0, 0.0);
@@ -1557,7 +1583,7 @@ static NSString * const kSeparatorRowID = @"FCPSeparatorRow";
     NSView *searchChrome = FCPCreateGlassContainerView(NSZeroRect, NSVisualEffectMaterialMenu, 24.0);
     searchChrome.layer.borderWidth = 1.0;
     searchChrome.layer.borderColor = FCPPaletteColor(1.0, 1.0, 1.0, 0.12).CGColor;
-    searchChrome.layer.backgroundColor = FCPPaletteColor(0.10, 0.12, 0.22, 0.04).CGColor;
+    searchChrome.layer.backgroundColor = FCPPaletteColor(0.10, 0.12, 0.22, 0.075).CGColor;
     searchChrome.layer.shadowColor = NSColor.blackColor.CGColor;
     searchChrome.layer.shadowOpacity = 0.08;
     searchChrome.layer.shadowRadius = 14.0;
@@ -1569,9 +1595,9 @@ static NSString * const kSeparatorRowID = @"FCPSeparatorRow";
     CAGradientLayer *searchBody = [CAGradientLayer layer];
     searchBody.frame = CGRectMake(0.0, 0.0, width - 36.0, 58.0);
     searchBody.colors = @[
-        (__bridge id)FCPPaletteColor(0.26, 0.31, 0.54, 0.06).CGColor,
-        (__bridge id)FCPPaletteColor(0.15, 0.18, 0.31, 0.03).CGColor,
-        (__bridge id)FCPPaletteColor(0.09, 0.11, 0.18, 0.015).CGColor
+        (__bridge id)FCPPaletteColor(0.26, 0.31, 0.54, 0.10).CGColor,
+        (__bridge id)FCPPaletteColor(0.15, 0.18, 0.31, 0.055).CGColor,
+        (__bridge id)FCPPaletteColor(0.09, 0.11, 0.18, 0.028).CGColor
     ];
     searchBody.startPoint = CGPointMake(0.0, 1.0);
     searchBody.endPoint = CGPointMake(1.0, 0.0);
@@ -1673,6 +1699,8 @@ static NSString * const kSeparatorRowID = @"FCPSeparatorRow";
     suggestionStack.distribution = NSStackViewDistributionFillEqually;
     suggestionStack.spacing = 12.0;
     suggestionStack.translatesAutoresizingMaskIntoConstraints = NO;
+    suggestionStack.hidden = YES;
+    suggestionStack.alphaValue = 0.0;
     [heroStage addSubview:suggestionStack];
     self.heroSuggestionStackView = suggestionStack;
 
@@ -1709,6 +1737,8 @@ static NSString * const kSeparatorRowID = @"FCPSeparatorRow";
     tableView.intercellSpacing = NSMakeSize(0.0, 0.0);
     tableView.backgroundColor = [NSColor clearColor];
     tableView.selectionHighlightStyle = NSTableViewSelectionHighlightStyleNone;
+    tableView.allowsMultipleSelection = NO;
+    tableView.allowsEmptySelection = NO;
     tableView.usesAlternatingRowBackgroundColors = NO;
     tableView.delegate = self;
     tableView.dataSource = self;
@@ -1770,10 +1800,10 @@ static NSString * const kSeparatorRowID = @"FCPSeparatorRow";
         [dictationButton.widthAnchor constraintEqualToConstant:36.0],
         [dictationButton.heightAnchor constraintEqualToConstant:36.0],
 
-        [searchField.leadingAnchor constraintEqualToAnchor:orbView.trailingAnchor constant:14.0],
+        [searchField.leadingAnchor constraintEqualToAnchor:orbView.trailingAnchor constant:20.0],
         [searchField.trailingAnchor constraintEqualToAnchor:dictationButton.leadingAnchor constant:-12.0],
-        [searchField.topAnchor constraintEqualToAnchor:searchChrome.topAnchor constant:10.0],
-        [searchField.bottomAnchor constraintEqualToAnchor:searchChrome.bottomAnchor constant:-10.0],
+        [searchField.topAnchor constraintEqualToAnchor:searchChrome.topAnchor constant:12.0],
+        [searchField.bottomAnchor constraintEqualToAnchor:searchChrome.bottomAnchor constant:-6.0],
 
         [heroStage.topAnchor constraintEqualToAnchor:searchChrome.bottomAnchor constant:8.0],
         [heroStage.leadingAnchor constraintEqualToAnchor:bg.leadingAnchor constant:18.0],
@@ -1786,7 +1816,7 @@ static NSString * const kSeparatorRowID = @"FCPSeparatorRow";
         [suggestionStack.heightAnchor constraintEqualToConstant:52.0],
 
         [latencyPill.centerXAnchor constraintEqualToAnchor:heroStage.centerXAnchor],
-        [latencyPill.centerYAnchor constraintEqualToAnchor:heroStage.centerYAnchor constant:-10.0],
+        [latencyPill.centerYAnchor constraintEqualToAnchor:heroStage.centerYAnchor],
         [latencyPill.widthAnchor constraintLessThanOrEqualToConstant:360.0],
         [latencyPill.widthAnchor constraintGreaterThanOrEqualToConstant:180.0],
         [latencyPill.heightAnchor constraintEqualToConstant:44.0],
@@ -1848,7 +1878,7 @@ static NSString * const kSeparatorRowID = @"FCPSeparatorRow";
                     (unsigned long)self.aiResults.count, self.aiResults.count == 1 ? @"" : @"s"];
         }
     } else if (self.searchField.stringValue.length == 0 && !self.inBrowseMode) {
-        text = @"Try “blade clip”, “open transcript”, or tap the mic for Siri-style dictation.";
+        text = @"Return executes  |  Tab asks AI  |  Mic starts dictation";
     }
     self.statusLabel.stringValue = text;
     [self updatePaletteChromeAnimated:YES];
@@ -1861,8 +1891,8 @@ static NSString * const kSeparatorRowID = @"FCPSeparatorRow";
         ? FCPPaletteColor(0.58, 0.80, 1.0, 0.34)
         : (self.aiLoading ? FCPPaletteColor(0.69, 0.73, 1.0, 0.24) : FCPPaletteColor(1.0, 1.0, 1.0, 0.18));
     NSColor *background = self.dictationActive
-        ? FCPPaletteColor(0.20, 0.25, 0.40, 0.08)
-        : FCPPaletteColor(0.10, 0.12, 0.22, 0.03);
+        ? FCPPaletteColor(0.20, 0.25, 0.40, 0.12)
+        : FCPPaletteColor(0.10, 0.12, 0.22, 0.065);
 
     self.searchChromeView.layer.borderColor = border.CGColor;
     self.searchChromeView.layer.backgroundColor = background.CGColor;
@@ -1870,20 +1900,20 @@ static NSString * const kSeparatorRowID = @"FCPSeparatorRow";
 
     NSArray *bodyColors = self.dictationActive
         ? @[
-            (__bridge id)FCPPaletteColor(0.28, 0.37, 0.62, 0.10).CGColor,
-            (__bridge id)FCPPaletteColor(0.16, 0.22, 0.40, 0.05).CGColor,
-            (__bridge id)FCPPaletteColor(0.10, 0.13, 0.24, 0.02).CGColor
+            (__bridge id)FCPPaletteColor(0.28, 0.37, 0.62, 0.14).CGColor,
+            (__bridge id)FCPPaletteColor(0.16, 0.22, 0.40, 0.075).CGColor,
+            (__bridge id)FCPPaletteColor(0.10, 0.13, 0.24, 0.04).CGColor
         ]
         : (self.aiLoading
             ? @[
-                (__bridge id)FCPPaletteColor(0.34, 0.34, 0.60, 0.08).CGColor,
-                (__bridge id)FCPPaletteColor(0.18, 0.18, 0.34, 0.04).CGColor,
-                (__bridge id)FCPPaletteColor(0.10, 0.10, 0.18, 0.015).CGColor
+                (__bridge id)FCPPaletteColor(0.34, 0.34, 0.60, 0.12).CGColor,
+                (__bridge id)FCPPaletteColor(0.18, 0.18, 0.34, 0.065).CGColor,
+                (__bridge id)FCPPaletteColor(0.10, 0.10, 0.18, 0.032).CGColor
             ]
             : @[
-                (__bridge id)FCPPaletteColor(0.26, 0.31, 0.54, 0.06).CGColor,
-                (__bridge id)FCPPaletteColor(0.15, 0.18, 0.31, 0.03).CGColor,
-                (__bridge id)FCPPaletteColor(0.09, 0.11, 0.18, 0.015).CGColor
+                (__bridge id)FCPPaletteColor(0.26, 0.31, 0.54, 0.10).CGColor,
+                (__bridge id)FCPPaletteColor(0.15, 0.18, 0.31, 0.055).CGColor,
+                (__bridge id)FCPPaletteColor(0.09, 0.11, 0.18, 0.028).CGColor
             ]);
     self.searchBodyLayer.colors = bodyColors;
     self.searchEdgeLayer.borderColor = border.CGColor;
@@ -2056,7 +2086,7 @@ static NSString * const kSeparatorRowID = @"FCPSeparatorRow";
     if (!self.heroStageView || self.commandCommitAnimating) return;
 
     NSString *query = [self.searchField.stringValue stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-    SpliceKitPalettePresentationState targetState = SpliceKitPalettePresentationStateStarterSuggestions;
+    SpliceKitPalettePresentationState targetState = SpliceKitPalettePresentationStateHidden;
     NSArray<SpliceKitCommand *> *heroSuggestions = @[];
     NSArray<SpliceKitCommand *> *heroContinuer = @[];
     NSString *latencyText = @"";
@@ -2071,15 +2101,21 @@ static NSString * const kSeparatorRowID = @"FCPSeparatorRow";
         targetState = SpliceKitPalettePresentationStateLatencyPill;
     } else if (self.aiResults.count > 0) {
         targetState = SpliceKitPalettePresentationStateResultPlatter;
-    } else if (query.length > 0) {
-        targetState = SpliceKitPalettePresentationStateTypingSuggestions;
     }
 
     self.presentationState = targetState;
 
     CGFloat scrollAlpha = 1.0;
-    CGFloat heroStageHeight = 60.0;
+    CGFloat heroStageHeight = 0.0;
     switch (targetState) {
+        case SpliceKitPalettePresentationStateHidden: {
+            [self animatePresentationView:self.heroSuggestionStackView visible:NO animated:animated delay:0.0 yOffset:-8.0 scale:0.97];
+            [self animatePresentationView:self.heroLatencyPillView visible:NO animated:animated delay:0.0 yOffset:-8.0 scale:0.96];
+            [self animatePresentationView:self.heroResultPlatterView visible:NO animated:animated delay:0.0 yOffset:-10.0 scale:0.96];
+            [self animatePresentationView:self.heroContinuerStackView visible:NO animated:animated delay:0.0 yOffset:6.0 scale:0.98];
+            scrollAlpha = 1.0;
+            break;
+        }
         case SpliceKitPalettePresentationStateStarterSuggestions: {
             heroSuggestions = [self starterSuggestionCommands];
             [self animatePresentationView:self.heroSuggestionStackView visible:YES animated:animated delay:0.0 yOffset:8.0 scale:0.98];
@@ -2110,7 +2146,7 @@ static NSString * const kSeparatorRowID = @"FCPSeparatorRow";
             break;
         }
         case SpliceKitPalettePresentationStateLatencyPill: {
-            heroStageHeight = 60.0;
+            heroStageHeight = 72.0;
             latencyText = query.length > 0 ? query : (self.gemmaCurrentTask ?: @"Working...");
             [self animatePresentationView:self.heroSuggestionStackView visible:NO animated:animated delay:0.0 yOffset:-8.0 scale:0.97];
             [self animatePresentationView:self.heroResultPlatterView visible:NO animated:animated delay:0.0 yOffset:-8.0 scale:0.95];
@@ -2143,7 +2179,6 @@ static NSString * const kSeparatorRowID = @"FCPSeparatorRow";
             scrollAlpha = 0.76;
             break;
         }
-        case SpliceKitPalettePresentationStateHidden:
         default:
             break;
     }
@@ -2375,9 +2410,7 @@ static NSString * const kSeparatorRowID = @"FCPSeparatorRow";
                         NSInteger newRow = row - 1;
                         SpliceKitCommand *cmd = [weakSelf commandForDisplayRow:newRow];
                         if (cmd && cmd.isSeparatorRow && newRow > 0) newRow--;
-                        [weakSelf.tableView selectRowIndexes:[NSIndexSet indexSetWithIndex:newRow]
-                                        byExtendingSelection:NO];
-                        [weakSelf.tableView scrollRowToVisible:newRow];
+                        FCPSelectSingleTableRow(weakSelf.tableView, newRow);
                     }
                     return nil;
                 }
@@ -2388,9 +2421,7 @@ static NSString * const kSeparatorRowID = @"FCPSeparatorRow";
                         NSInteger newRow = row + 1;
                         SpliceKitCommand *cmd = [weakSelf commandForDisplayRow:newRow];
                         if (cmd && cmd.isSeparatorRow && newRow < max) newRow++;
-                        [weakSelf.tableView selectRowIndexes:[NSIndexSet indexSetWithIndex:newRow]
-                                        byExtendingSelection:NO];
-                        [weakSelf.tableView scrollRowToVisible:newRow];
+                        FCPSelectSingleTableRow(weakSelf.tableView, newRow);
                     }
                     return nil;
                 }
@@ -2465,9 +2496,7 @@ static NSString * const kSeparatorRowID = @"FCPSeparatorRow";
             NSInteger newRow = row - 1;
             SpliceKitCommand *cmd = [self commandForDisplayRow:newRow];
             if (cmd && cmd.isSeparatorRow && newRow > 0) newRow--;
-            [self.tableView selectRowIndexes:[NSIndexSet indexSetWithIndex:newRow]
-                        byExtendingSelection:NO];
-            [self.tableView scrollRowToVisible:newRow];
+            FCPSelectSingleTableRow(self.tableView, newRow);
         }
         return YES;
     }
@@ -2478,9 +2507,7 @@ static NSString * const kSeparatorRowID = @"FCPSeparatorRow";
             NSInteger newRow = row + 1;
             SpliceKitCommand *cmd = [self commandForDisplayRow:newRow];
             if (cmd && cmd.isSeparatorRow && newRow < maxRow) newRow++;
-            [self.tableView selectRowIndexes:[NSIndexSet indexSetWithIndex:newRow]
-                        byExtendingSelection:NO];
-            [self.tableView scrollRowToVisible:newRow];
+            FCPSelectSingleTableRow(self.tableView, newRow);
         }
         return YES;
     }
@@ -2863,7 +2890,9 @@ static NSString *FCPStripStopWords(NSString *query) {
         cell.identifier = kCommandRowID;
     }
 
-    [cell configureWithCommand:cmd isFavorited:cmd.isFavoritedItem];
+    [cell configureWithCommand:cmd
+                   isFavorited:cmd.isFavoritedItem
+                      selected:(tableView.selectedRow == row)];
     return cell;
 }
 
@@ -2904,6 +2933,12 @@ static NSString *FCPStripStopWords(NSString *query) {
 
 - (void)tableViewSelectionDidChange:(NSNotification *)notification {
     // The hero stage is derived from query/AI state, not transient table selection.
+    NSRange visibleRows = [self.tableView rowsInRect:self.tableView.visibleRect];
+    if (visibleRows.length > 0 && self.tableView.numberOfColumns > 0) {
+        NSIndexSet *rows = [NSIndexSet indexSetWithIndexesInRange:visibleRows];
+        NSIndexSet *columns = [NSIndexSet indexSetWithIndexesInRange:NSMakeRange(0, self.tableView.numberOfColumns)];
+        [self.tableView reloadDataForRowIndexes:rows columnIndexes:columns];
+    }
 }
 
 #pragma mark - Execute

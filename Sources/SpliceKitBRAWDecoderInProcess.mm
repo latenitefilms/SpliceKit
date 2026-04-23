@@ -61,6 +61,29 @@ int SpliceKitBRAWLookupEyeForFormatDescription(CMFormatDescriptionRef fd);
 
 namespace splicekit_braw_decoder {
 
+struct DecoderRegistrationState {
+    FourCharCode codec;
+    BOOL registered;
+};
+
+static DecoderRegistrationState kDecoderRegistrationStates[] = {
+    { 'braw', NO },
+    { 'brxq', NO },
+    { 'brst', NO },
+    { 'brvn', NO },
+    { 'brs2', NO },
+    { 'brxh', NO },
+};
+
+static DecoderRegistrationState *registrationStateForCodec(FourCharCode codec) {
+    for (size_t i = 0; i < sizeof(kDecoderRegistrationStates) / sizeof(DecoderRegistrationState); ++i) {
+        if (kDecoderRegistrationStates[i].codec == codec) {
+            return &kDecoderRegistrationStates[i];
+        }
+    }
+    return nullptr;
+}
+
 #if defined(__x86_64__)
 constexpr size_t kCMBasePadSize = 4;
 #else
@@ -515,23 +538,31 @@ extern "C" OSStatus SpliceKitBRAWInProcess_CreateInstance(FourCharCode /*codecTy
 
 // -------- Public registration entry point ------------------------------------
 
+extern "C" BOOL SpliceKitBRAW_isInProcessDecoderRegisteredForCodec(uint32_t codec) {
+    splicekit_braw_decoder::DecoderRegistrationState *state =
+        splicekit_braw_decoder::registrationStateForCodec((FourCharCode)codec);
+    return state ? state->registered : NO;
+}
+
 extern "C" BOOL SpliceKitBRAW_registerInProcessDecoder(void) {
     static dispatch_once_t once;
     static BOOL registered = NO;
     dispatch_once(&once, ^{
         // All BRAW FourCC variants we support. Each call binds one codec type
         // to our CreateInstance factory in VT's in-process decoder registry.
-        FourCharCode codecs[] = { 'braw', 'brxq', 'brst', 'brvn', 'brs2', 'brxh' };
         BOOL anyOK = NO;
-        for (size_t i = 0; i < sizeof(codecs) / sizeof(FourCharCode); ++i) {
-            OSStatus s = VTRegisterVideoDecoder(codecs[i],
+        for (size_t i = 0; i < sizeof(splicekit_braw_decoder::kDecoderRegistrationStates) / sizeof(splicekit_braw_decoder::DecoderRegistrationState); ++i) {
+            FourCharCode codec = splicekit_braw_decoder::kDecoderRegistrationStates[i].codec;
+            OSStatus s = VTRegisterVideoDecoder(codec,
                 &splicekit_braw_decoder::SpliceKitBRAWInProcess_CreateInstance);
-            if (s == noErr) anyOK = YES;
+            BOOL didRegister = (s == noErr);
+            splicekit_braw_decoder::kDecoderRegistrationStates[i].registered = didRegister;
+            if (didRegister) anyOK = YES;
             NSString *msg = [NSString stringWithFormat:@"[decoder-in-process] register %c%c%c%c status=%d",
-                (char)((codecs[i] >> 24) & 0xFF),
-                (char)((codecs[i] >> 16) & 0xFF),
-                (char)((codecs[i] >> 8) & 0xFF),
-                (char)(codecs[i] & 0xFF),
+                (char)((codec >> 24) & 0xFF),
+                (char)((codec >> 16) & 0xFF),
+                (char)((codec >> 8) & 0xFF),
+                (char)(codec & 0xFF),
                 (int)s];
             NSLog(@"%@", msg);
             // Also append to the BRAW log so we can diagnose without Console.

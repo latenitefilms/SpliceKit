@@ -16,6 +16,9 @@
 #import "SpliceKit.h"
 #import "SpliceKitURLImport.h"
 #import <AppKit/AppKit.h>
+#import <AVFoundation/AVFoundation.h>
+#import <QuartzCore/QuartzCore.h>
+#import <Speech/Speech.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
 #import <sys/socket.h>
@@ -87,6 +90,110 @@ static CGFloat FCPFuzzyScore(NSString *query, NSString *target) {
     return normalized * lengthPenalty;
 }
 
+static NSColor *FCPPaletteColor(CGFloat r, CGFloat g, CGFloat b, CGFloat a) {
+    return [NSColor colorWithSRGBRed:r green:g blue:b alpha:a];
+}
+
+static NSView *FCPCreateGlassContainerView(NSRect frame, NSVisualEffectMaterial fallbackMaterial, CGFloat cornerRadius) {
+    Class glassClass = NSClassFromString(@"NSGlassContainerView");
+    NSView *view = nil;
+    if (glassClass && [glassClass isSubclassOfClass:[NSView class]]) {
+        view = [[glassClass alloc] initWithFrame:frame];
+    } else {
+        NSVisualEffectView *effectView = [[NSVisualEffectView alloc] initWithFrame:frame];
+        effectView.material = fallbackMaterial;
+        effectView.state = NSVisualEffectStateActive;
+        effectView.blendingMode = NSVisualEffectBlendingModeBehindWindow;
+        view = effectView;
+    }
+
+    view.wantsLayer = YES;
+    view.layer.cornerRadius = cornerRadius;
+    view.layer.masksToBounds = YES;
+
+    SEL cornerRadiusSelector = NSSelectorFromString(@"_setMaterialCornerRadius:");
+    if ([view respondsToSelector:cornerRadiusSelector]) {
+        ((void (*)(id, SEL, CGFloat))objc_msgSend)(view, cornerRadiusSelector, cornerRadius);
+    }
+
+    return view;
+}
+
+static NSString *FCPCommandSignature(SpliceKitCommand *cmd) {
+    if (!cmd) return @"";
+    return [NSString stringWithFormat:@"%@|%@|%@", cmd.type ?: @"", cmd.action ?: @"", cmd.name ?: @""];
+}
+
+static NSString *FCPCommandListSignature(NSArray<SpliceKitCommand *> *commands) {
+    NSMutableArray<NSString *> *parts = [NSMutableArray arrayWithCapacity:commands.count];
+    for (SpliceKitCommand *cmd in commands) {
+        [parts addObject:FCPCommandSignature(cmd)];
+    }
+    return [parts componentsJoinedByString:@";"];
+}
+
+static NSURL *FCPCommandPaletteSiriBlobURL(void) {
+    static NSURL *blobURL = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        NSString *path = @"/System/Library/PrivateFrameworks/SiriUI.framework/Versions/A/Resources/Siri Blob.mov";
+        if ([[NSFileManager defaultManager] fileExistsAtPath:path]) {
+            blobURL = [NSURL fileURLWithPath:path];
+        }
+    });
+    return blobURL;
+}
+
+static NSString *FCPCommandSymbolName(SpliceKitCommand *cmd) {
+    if ([cmd.type isEqualToString:@"playback"]) return @"play.fill";
+    if ([cmd.type isEqualToString:@"transition_browse"]) return @"square.on.square.squareshape.controlhandles";
+    if ([cmd.type isEqualToString:@"effect_browse"]) return @"sparkles";
+    if ([cmd.type isEqualToString:@"generator_browse"]) return @"square.stack.3d.up.fill";
+    if ([cmd.type isEqualToString:@"title_browse"]) return @"textformat";
+    if ([cmd.type isEqualToString:@"favorites_browse"]) return @"star.fill";
+    if ([cmd.type isEqualToString:@"transcript"]) return @"quote.bubble.fill";
+    if ([cmd.type isEqualToString:@"captions"]) return @"captions.bubble.fill";
+    if ([cmd.type isEqualToString:@"mixer"]) return @"slider.horizontal.3";
+    if ([cmd.type isEqualToString:@"livecam"]) return @"video.fill";
+    if ([cmd.type isEqualToString:@"beats"] || [cmd.type isEqualToString:@"flexmusic"] || [cmd.type isEqualToString:@"montage"]) return @"music.note";
+
+    switch (cmd.category) {
+        case SpliceKitCommandCategoryPlayback: return @"play.fill";
+        case SpliceKitCommandCategoryColor: return @"camera.filters";
+        case SpliceKitCommandCategorySpeed: return @"speedometer";
+        case SpliceKitCommandCategoryMarkers: return @"mappin.and.ellipse";
+        case SpliceKitCommandCategoryTitles: return @"text.bubble.fill";
+        case SpliceKitCommandCategoryKeyframes: return @"point.topleft.down.curvedto.point.bottomright.up";
+        case SpliceKitCommandCategoryEffects: return @"wand.and.stars";
+        case SpliceKitCommandCategoryTranscript: return @"waveform.and.mic";
+        case SpliceKitCommandCategoryExport: return @"square.and.arrow.up.fill";
+        case SpliceKitCommandCategoryMusic: return @"music.note.list";
+        case SpliceKitCommandCategoryOptions: return @"slider.horizontal.3";
+        case SpliceKitCommandCategoryAI: return @"sparkles";
+        case SpliceKitCommandCategoryEditing:
+        default: return @"scissors";
+    }
+}
+
+static NSColor *FCPCommandAccentColor(SpliceKitCommand *cmd) {
+    switch (cmd.category) {
+        case SpliceKitCommandCategoryPlayback: return FCPPaletteColor(0.35, 0.76, 0.96, 0.95);
+        case SpliceKitCommandCategoryColor: return FCPPaletteColor(0.99, 0.57, 0.39, 0.95);
+        case SpliceKitCommandCategorySpeed: return FCPPaletteColor(0.96, 0.55, 0.72, 0.95);
+        case SpliceKitCommandCategoryMarkers: return FCPPaletteColor(0.99, 0.80, 0.34, 0.95);
+        case SpliceKitCommandCategoryTitles: return FCPPaletteColor(0.71, 0.58, 0.99, 0.95);
+        case SpliceKitCommandCategoryKeyframes: return FCPPaletteColor(0.63, 0.82, 0.39, 0.95);
+        case SpliceKitCommandCategoryEffects: return FCPPaletteColor(0.45, 0.88, 0.80, 0.95);
+        case SpliceKitCommandCategoryTranscript: return FCPPaletteColor(0.36, 0.74, 0.99, 0.95);
+        case SpliceKitCommandCategoryExport: return FCPPaletteColor(0.99, 0.47, 0.47, 0.95);
+        case SpliceKitCommandCategoryMusic: return FCPPaletteColor(0.47, 0.89, 0.64, 0.95);
+        case SpliceKitCommandCategoryOptions: return FCPPaletteColor(0.78, 0.82, 0.92, 0.95);
+        case SpliceKitCommandCategoryAI: return FCPPaletteColor(0.61, 0.61, 0.99, 0.95);
+        case SpliceKitCommandCategoryEditing:
+        default: return FCPPaletteColor(0.54, 0.67, 0.99, 0.95);
+    }
+}
+
 #pragma mark - Search Field
 //
 // Custom text field that intercepts arrow keys and forwards them to the
@@ -94,11 +201,46 @@ static CGFloat FCPFuzzyScore(NSString *query, NSString *target) {
 // the text cursor instead of navigating the command list.
 //
 
+@interface SpliceKitCenteredTextFieldCell : NSTextFieldCell
+@end
+
+@implementation SpliceKitCenteredTextFieldCell
+
+- (NSRect)titleRectForBounds:(NSRect)rect {
+    NSRect titleRect = [super titleRectForBounds:rect];
+    CGFloat offset = floor((NSHeight(rect) - NSHeight(titleRect)) * 0.5) - 1.0;
+    titleRect.origin.y += MAX(0.0, offset);
+    return titleRect;
+}
+
+- (NSRect)drawingRectForBounds:(NSRect)rect {
+    return [self titleRectForBounds:rect];
+}
+
+- (NSRect)editingRectForBounds:(NSRect)rect {
+    return [self titleRectForBounds:rect];
+}
+
+- (void)selectWithFrame:(NSRect)rect inView:(NSView *)view editor:(NSText *)editor delegate:(id)delegate start:(NSInteger)start length:(NSInteger)length {
+    [super selectWithFrame:[self titleRectForBounds:rect]
+                    inView:view
+                    editor:editor
+                  delegate:delegate
+                     start:start
+                    length:length];
+}
+
+@end
+
 @interface SpliceKitCommandSearchField : NSTextField
 @property (nonatomic, weak) NSTableView *targetTableView;
 @end
 
 @implementation SpliceKitCommandSearchField
+
++ (Class)cellClass {
+    return [SpliceKitCenteredTextFieldCell class];
+}
 
 - (BOOL)performKeyEquivalent:(NSEvent *)event {
     // Forward up/down arrows to the table view (skip separator rows)
@@ -131,11 +273,150 @@ static CGFloat FCPFuzzyScore(NSString *query, NSString *target) {
 
 @end
 
+#pragma mark - Siri Orb
+
+@interface SpliceKitCommandPalettePanel : NSPanel
+@end
+
+@implementation SpliceKitCommandPalettePanel
+
+- (BOOL)canBecomeKeyWindow {
+    return YES;
+}
+
+- (BOOL)canBecomeMainWindow {
+    return YES;
+}
+
+@end
+
+@interface SpliceKitSiriOrbView : NSView
+@property (nonatomic, strong) AVQueuePlayer *player;
+@property (nonatomic, strong) AVPlayerLooper *looper;
+@property (nonatomic, strong) CAGradientLayer *fallbackLayer;
+@end
+
+@implementation SpliceKitSiriOrbView
+
+- (instancetype)initWithFrame:(NSRect)frame {
+    self = [super initWithFrame:frame];
+    if (self) {
+        self.wantsLayer = YES;
+        self.layer.cornerRadius = 14.0;
+        self.layer.masksToBounds = YES;
+        self.layer.backgroundColor = FCPPaletteColor(0.12, 0.15, 0.26, 0.34).CGColor;
+
+        NSURL *blobURL = FCPCommandPaletteSiriBlobURL();
+        if (blobURL) {
+            self.player = [[AVQueuePlayer alloc] init];
+            self.player.muted = YES;
+            AVPlayerItem *item = [AVPlayerItem playerItemWithURL:blobURL];
+            self.looper = [AVPlayerLooper playerLooperWithPlayer:self.player templateItem:item];
+            AVPlayerLayer *playerLayer = [AVPlayerLayer playerLayerWithPlayer:self.player];
+            playerLayer.videoGravity = AVLayerVideoGravityResizeAspectFill;
+            playerLayer.frame = self.bounds;
+            playerLayer.cornerRadius = 14.0;
+            playerLayer.masksToBounds = YES;
+            [self.layer addSublayer:playerLayer];
+            [self.player play];
+        } else {
+            self.fallbackLayer = [CAGradientLayer layer];
+            self.fallbackLayer.colors = @[
+                (__bridge id)FCPPaletteColor(1.00, 0.55, 0.48, 0.98).CGColor,
+                (__bridge id)FCPPaletteColor(0.98, 0.74, 0.39, 0.98).CGColor,
+                (__bridge id)FCPPaletteColor(0.35, 0.85, 0.96, 0.98).CGColor,
+                (__bridge id)FCPPaletteColor(0.63, 0.44, 0.98, 0.98).CGColor
+            ];
+            self.fallbackLayer.startPoint = CGPointMake(0.0, 0.2);
+            self.fallbackLayer.endPoint = CGPointMake(1.0, 0.8);
+            self.fallbackLayer.cornerRadius = 14.0;
+            self.fallbackLayer.frame = self.bounds;
+            [self.layer addSublayer:self.fallbackLayer];
+
+            CABasicAnimation *shift = [CABasicAnimation animationWithKeyPath:@"transform.rotation.z"];
+            shift.fromValue = @0.0;
+            shift.toValue = @(M_PI * 2.0);
+            shift.duration = 14.0;
+            shift.repeatCount = HUGE_VALF;
+            [self.fallbackLayer addAnimation:shift forKey:@"spin"];
+        }
+
+        self.layer.shadowColor = FCPPaletteColor(0.68, 0.77, 1.0, 0.22).CGColor;
+        self.layer.shadowOpacity = 0.55;
+        self.layer.shadowRadius = 16.0;
+        self.layer.shadowOffset = CGSizeZero;
+    }
+    return self;
+}
+
+- (void)layout {
+    [super layout];
+    for (CALayer *layer in self.layer.sublayers) {
+        layer.frame = self.bounds;
+        layer.cornerRadius = 14.0;
+    }
+}
+
+@end
+
+#pragma mark - Glass Row Views
+
+@interface SpliceKitPaletteRowView : NSTableRowView
+@property (nonatomic, assign) BOOL separatorRow;
+@end
+
+@implementation SpliceKitPaletteRowView
+
+- (BOOL)isOpaque {
+    return NO;
+}
+
+- (void)drawSelectionInRect:(NSRect)dirtyRect {
+    // Custom background handles both selected and unselected states.
+}
+
+- (void)drawBackgroundInRect:(NSRect)dirtyRect {
+    if (self.separatorRow) return;
+
+    NSRect cardRect = NSInsetRect(self.bounds, 12.0, 5.0);
+    NSBezierPath *path = [NSBezierPath bezierPathWithRoundedRect:cardRect xRadius:18.0 yRadius:18.0];
+
+    if (self.isSelected) {
+        NSGradient *gradient = [[NSGradient alloc] initWithColors:@[
+            FCPPaletteColor(0.27, 0.35, 0.61, 0.18),
+            FCPPaletteColor(0.17, 0.22, 0.42, 0.26)
+        ]];
+        [gradient drawInBezierPath:path angle:-18.0];
+        [FCPPaletteColor(0.72, 0.84, 1.0, 0.16) setStroke];
+        path.lineWidth = 1.0;
+        [path stroke];
+    } else {
+        [FCPPaletteColor(1.0, 1.0, 1.0, 0.010) setFill];
+        [path fill];
+        [FCPPaletteColor(1.0, 1.0, 1.0, 0.06) setStroke];
+        path.lineWidth = 1.0;
+        [path stroke];
+
+        NSBezierPath *glossLine = [NSBezierPath bezierPath];
+        CGFloat insetX = 18.0;
+        [glossLine moveToPoint:NSMakePoint(NSMinX(cardRect) + insetX, NSMaxY(cardRect) - 1.0)];
+        [glossLine lineToPoint:NSMakePoint(NSMaxX(cardRect) - insetX, NSMaxY(cardRect) - 1.0)];
+        [[FCPPaletteColor(1.0, 1.0, 1.0, 0.05) colorWithAlphaComponent:0.05] setStroke];
+        glossLine.lineWidth = 1.0;
+        [glossLine stroke];
+    }
+}
+
+- (void)drawSeparatorInRect:(NSRect)dirtyRect {
+}
+
+@end
+
 #pragma mark - Command Row View
-// Each row shows: [star] Command Name  [category]
-//                        description    [shortcut]
 
 @interface SpliceKitCommandRowView : NSTableCellView
+@property (nonatomic, strong) NSView *iconPlate;
+@property (nonatomic, strong) NSImageView *iconView;
 @property (nonatomic, strong) NSTextField *starLabel;
 @property (nonatomic, strong) NSTextField *nameLabel;
 @property (nonatomic, strong) NSTextField *detailLabel;
@@ -148,39 +429,49 @@ static CGFloat FCPFuzzyScore(NSString *query, NSString *target) {
 - (instancetype)initWithFrame:(NSRect)frame {
     self = [super initWithFrame:frame];
     if (self) {
-        // Star indicator for favorites
+        self.translatesAutoresizingMaskIntoConstraints = NO;
+
+        _iconPlate = [[NSView alloc] initWithFrame:NSZeroRect];
+        _iconPlate.wantsLayer = YES;
+        _iconPlate.layer.cornerRadius = 13.0;
+        _iconPlate.layer.masksToBounds = YES;
+        _iconPlate.translatesAutoresizingMaskIntoConstraints = NO;
+
+        _iconView = [[NSImageView alloc] initWithFrame:NSZeroRect];
+        _iconView.symbolConfiguration = [NSImageSymbolConfiguration configurationWithPointSize:16 weight:NSFontWeightSemibold];
+        _iconView.translatesAutoresizingMaskIntoConstraints = NO;
+
         _starLabel = [NSTextField labelWithString:@""];
-        _starLabel.font = [NSFont systemFontOfSize:12];
-        _starLabel.textColor = [NSColor systemYellowColor];
+        _starLabel.font = [NSFont systemFontOfSize:11 weight:NSFontWeightSemibold];
+        _starLabel.textColor = FCPPaletteColor(1.00, 0.82, 0.34, 0.95);
         _starLabel.translatesAutoresizingMaskIntoConstraints = NO;
-        [_starLabel setContentHuggingPriority:NSLayoutPriorityRequired forOrientation:NSLayoutConstraintOrientationHorizontal];
 
-        // Command name
         _nameLabel = [NSTextField labelWithString:@""];
-        _nameLabel.font = [NSFont systemFontOfSize:13 weight:NSFontWeightMedium];
-        _nameLabel.textColor = [NSColor labelColor];
+        _nameLabel.font = [NSFont systemFontOfSize:14 weight:NSFontWeightSemibold];
+        _nameLabel.textColor = FCPPaletteColor(1.0, 1.0, 1.0, 0.94);
         _nameLabel.translatesAutoresizingMaskIntoConstraints = NO;
+        _nameLabel.lineBreakMode = NSLineBreakByTruncatingTail;
 
-        // Detail / description
         _detailLabel = [NSTextField labelWithString:@""];
-        _detailLabel.font = [NSFont systemFontOfSize:11];
-        _detailLabel.textColor = [NSColor secondaryLabelColor];
+        _detailLabel.font = [NSFont systemFontOfSize:12 weight:NSFontWeightMedium];
+        _detailLabel.textColor = FCPPaletteColor(0.86, 0.89, 0.96, 0.66);
         _detailLabel.translatesAutoresizingMaskIntoConstraints = NO;
+        _detailLabel.lineBreakMode = NSLineBreakByTruncatingTail;
 
-        // Category badge
         _categoryLabel = [NSTextField labelWithString:@""];
-        _categoryLabel.font = [NSFont systemFontOfSize:10 weight:NSFontWeightMedium];
-        _categoryLabel.textColor = [NSColor tertiaryLabelColor];
+        _categoryLabel.font = [NSFont systemFontOfSize:10 weight:NSFontWeightSemibold];
+        _categoryLabel.textColor = FCPPaletteColor(0.92, 0.95, 1.0, 0.80);
         _categoryLabel.translatesAutoresizingMaskIntoConstraints = NO;
         _categoryLabel.alignment = NSTextAlignmentRight;
 
-        // Shortcut hint
         _shortcutLabel = [NSTextField labelWithString:@""];
-        _shortcutLabel.font = [NSFont monospacedSystemFontOfSize:10 weight:NSFontWeightRegular];
-        _shortcutLabel.textColor = [NSColor tertiaryLabelColor];
+        _shortcutLabel.font = [NSFont monospacedSystemFontOfSize:10 weight:NSFontWeightMedium];
+        _shortcutLabel.textColor = FCPPaletteColor(0.88, 0.92, 1.0, 0.54);
         _shortcutLabel.translatesAutoresizingMaskIntoConstraints = NO;
         _shortcutLabel.alignment = NSTextAlignmentRight;
 
+        [self addSubview:_iconPlate];
+        [_iconPlate addSubview:_iconView];
         [self addSubview:_starLabel];
         [self addSubview:_nameLabel];
         [self addSubview:_detailLabel];
@@ -188,36 +479,54 @@ static CGFloat FCPFuzzyScore(NSString *query, NSString *target) {
         [self addSubview:_shortcutLabel];
 
         [NSLayoutConstraint activateConstraints:@[
-            [_starLabel.leadingAnchor constraintEqualToAnchor:self.leadingAnchor constant:12],
-            [_starLabel.centerYAnchor constraintEqualToAnchor:self.centerYAnchor],
-            [_starLabel.widthAnchor constraintEqualToConstant:14],
+            [_iconPlate.leadingAnchor constraintEqualToAnchor:self.leadingAnchor constant:22.0],
+            [_iconPlate.centerYAnchor constraintEqualToAnchor:self.centerYAnchor],
+            [_iconPlate.widthAnchor constraintEqualToConstant:34.0],
+            [_iconPlate.heightAnchor constraintEqualToConstant:34.0],
 
-            [_nameLabel.leadingAnchor constraintEqualToAnchor:_starLabel.trailingAnchor constant:2],
-            [_nameLabel.topAnchor constraintEqualToAnchor:self.topAnchor constant:4],
-            [_nameLabel.trailingAnchor constraintLessThanOrEqualToAnchor:_categoryLabel.leadingAnchor constant:-8],
+            [_iconView.centerXAnchor constraintEqualToAnchor:_iconPlate.centerXAnchor],
+            [_iconView.centerYAnchor constraintEqualToAnchor:_iconPlate.centerYAnchor],
+            [_iconView.widthAnchor constraintEqualToConstant:18.0],
+            [_iconView.heightAnchor constraintEqualToConstant:18.0],
 
-            [_detailLabel.leadingAnchor constraintEqualToAnchor:_starLabel.trailingAnchor constant:2],
-            [_detailLabel.topAnchor constraintEqualToAnchor:_nameLabel.bottomAnchor constant:1],
-            [_detailLabel.trailingAnchor constraintLessThanOrEqualToAnchor:_shortcutLabel.leadingAnchor constant:-8],
+            [_starLabel.leadingAnchor constraintEqualToAnchor:_iconPlate.trailingAnchor constant:12.0],
+            [_starLabel.topAnchor constraintEqualToAnchor:self.topAnchor constant:14.0],
+            [_starLabel.widthAnchor constraintEqualToConstant:11.0],
 
-            [_categoryLabel.trailingAnchor constraintEqualToAnchor:self.trailingAnchor constant:-12],
-            [_categoryLabel.topAnchor constraintEqualToAnchor:self.topAnchor constant:4],
-            [_categoryLabel.widthAnchor constraintLessThanOrEqualToConstant:100],
+            [_nameLabel.leadingAnchor constraintEqualToAnchor:_starLabel.trailingAnchor constant:6.0],
+            [_nameLabel.topAnchor constraintEqualToAnchor:self.topAnchor constant:12.0],
+            [_nameLabel.trailingAnchor constraintLessThanOrEqualToAnchor:_categoryLabel.leadingAnchor constant:-10.0],
 
-            [_shortcutLabel.trailingAnchor constraintEqualToAnchor:self.trailingAnchor constant:-12],
-            [_shortcutLabel.bottomAnchor constraintEqualToAnchor:self.bottomAnchor constant:-4],
-            [_shortcutLabel.widthAnchor constraintLessThanOrEqualToConstant:100],
+            [_detailLabel.leadingAnchor constraintEqualToAnchor:_nameLabel.leadingAnchor],
+            [_detailLabel.topAnchor constraintEqualToAnchor:_nameLabel.bottomAnchor constant:3.0],
+            [_detailLabel.trailingAnchor constraintLessThanOrEqualToAnchor:_shortcutLabel.leadingAnchor constant:-10.0],
+
+            [_categoryLabel.trailingAnchor constraintEqualToAnchor:self.trailingAnchor constant:-24.0],
+            [_categoryLabel.topAnchor constraintEqualToAnchor:self.topAnchor constant:12.0],
+            [_categoryLabel.widthAnchor constraintLessThanOrEqualToConstant:130.0],
+
+            [_shortcutLabel.trailingAnchor constraintEqualToAnchor:self.trailingAnchor constant:-24.0],
+            [_shortcutLabel.topAnchor constraintEqualToAnchor:_categoryLabel.bottomAnchor constant:6.0],
+            [_shortcutLabel.widthAnchor constraintLessThanOrEqualToConstant:130.0],
         ]];
     }
     return self;
 }
 
 - (void)configureWithCommand:(SpliceKitCommand *)cmd isFavorited:(BOOL)favorited {
+    NSColor *accent = FCPCommandAccentColor(cmd);
     self.nameLabel.stringValue = cmd.name ?: @"";
     self.detailLabel.stringValue = cmd.detail ?: @"";
-    self.categoryLabel.stringValue = cmd.categoryName ?: @"";
+    self.categoryLabel.stringValue = cmd.categoryName.length > 0 ? [cmd.categoryName uppercaseString] : @"";
     self.shortcutLabel.stringValue = cmd.shortcut ?: @"";
-    self.starLabel.stringValue = favorited ? @"\u2605" : @"";
+    self.starLabel.stringValue = favorited ? @"★" : @"";
+
+    NSImage *symbol = [NSImage imageWithSystemSymbolName:FCPCommandSymbolName(cmd) accessibilityDescription:cmd.name];
+    self.iconView.image = symbol;
+    self.iconView.contentTintColor = accent;
+    self.iconPlate.layer.backgroundColor = [accent colorWithAlphaComponent:0.10].CGColor;
+    self.iconPlate.layer.borderColor = [accent colorWithAlphaComponent:0.18].CGColor;
+    self.iconPlate.layer.borderWidth = 1.0;
 }
 
 @end
@@ -225,6 +534,8 @@ static CGFloat FCPFuzzyScore(NSString *query, NSString *target) {
 #pragma mark - AI Result Row
 
 @interface FCPAIResultRowView : NSTableCellView
+@property (nonatomic, strong) NSView *iconPlate;
+@property (nonatomic, strong) NSImageView *iconView;
 @property (nonatomic, strong) NSTextField *label;
 @property (nonatomic, strong) NSProgressIndicator *spinner;
 @end
@@ -234,31 +545,57 @@ static CGFloat FCPFuzzyScore(NSString *query, NSString *target) {
 - (instancetype)initWithFrame:(NSRect)frame {
     self = [super initWithFrame:frame];
     if (self) {
-        _spinner = [[NSProgressIndicator alloc] initWithFrame:NSMakeRect(0, 0, 16, 16)];
+        _iconPlate = [[NSView alloc] initWithFrame:NSZeroRect];
+        _iconPlate.wantsLayer = YES;
+        _iconPlate.layer.cornerRadius = 13.0;
+        _iconPlate.layer.masksToBounds = YES;
+        _iconPlate.layer.backgroundColor = FCPPaletteColor(0.53, 0.61, 0.99, 0.18).CGColor;
+        _iconPlate.layer.borderColor = FCPPaletteColor(0.72, 0.79, 1.0, 0.22).CGColor;
+        _iconPlate.layer.borderWidth = 1.0;
+        _iconPlate.translatesAutoresizingMaskIntoConstraints = NO;
+
+        _iconView = [[NSImageView alloc] initWithFrame:NSZeroRect];
+        _iconView.symbolConfiguration = [NSImageSymbolConfiguration configurationWithPointSize:15 weight:NSFontWeightSemibold];
+        _iconView.image = [NSImage imageWithSystemSymbolName:@"sparkles" accessibilityDescription:@"AI"];
+        _iconView.contentTintColor = FCPPaletteColor(0.86, 0.90, 1.0, 0.92);
+        _iconView.translatesAutoresizingMaskIntoConstraints = NO;
+
+        _spinner = [[NSProgressIndicator alloc] initWithFrame:NSZeroRect];
         _spinner.style = NSProgressIndicatorStyleSpinning;
         _spinner.controlSize = NSControlSizeSmall;
         _spinner.translatesAutoresizingMaskIntoConstraints = NO;
-        [_spinner startAnimation:nil];
 
         _label = [NSTextField wrappingLabelWithString:@""];
-        _label.font = [NSFont systemFontOfSize:12 weight:NSFontWeightMedium];
-        _label.textColor = [NSColor controlAccentColor];
+        _label.font = [NSFont systemFontOfSize:12 weight:NSFontWeightSemibold];
+        _label.textColor = FCPPaletteColor(0.88, 0.92, 0.99, 0.92);
         _label.translatesAutoresizingMaskIntoConstraints = NO;
-        _label.maximumNumberOfLines = 0; // unlimited lines
+        _label.maximumNumberOfLines = 0;
         _label.cell.truncatesLastVisibleLine = YES;
-        // Prevent the label from pushing the panel wider — wrap instead
         [_label setContentCompressionResistancePriority:1 forOrientation:NSLayoutConstraintOrientationHorizontal];
 
-        [self addSubview:_spinner];
+        [self addSubview:_iconPlate];
+        [_iconPlate addSubview:_iconView];
+        [_iconPlate addSubview:_spinner];
         [self addSubview:_label];
 
         [NSLayoutConstraint activateConstraints:@[
-            [_spinner.leadingAnchor constraintEqualToAnchor:self.leadingAnchor constant:12],
-            [_spinner.topAnchor constraintEqualToAnchor:self.topAnchor constant:12],
-            [_label.leadingAnchor constraintEqualToAnchor:_spinner.trailingAnchor constant:8],
-            [_label.trailingAnchor constraintEqualToAnchor:self.trailingAnchor constant:-12],
-            [_label.topAnchor constraintEqualToAnchor:self.topAnchor constant:8],
-            [_label.bottomAnchor constraintLessThanOrEqualToAnchor:self.bottomAnchor constant:-8],
+            [_iconPlate.leadingAnchor constraintEqualToAnchor:self.leadingAnchor constant:22.0],
+            [_iconPlate.topAnchor constraintEqualToAnchor:self.topAnchor constant:10.0],
+            [_iconPlate.widthAnchor constraintEqualToConstant:34.0],
+            [_iconPlate.heightAnchor constraintEqualToConstant:34.0],
+
+            [_iconView.centerXAnchor constraintEqualToAnchor:_iconPlate.centerXAnchor],
+            [_iconView.centerYAnchor constraintEqualToAnchor:_iconPlate.centerYAnchor],
+            [_iconView.widthAnchor constraintEqualToConstant:18.0],
+            [_iconView.heightAnchor constraintEqualToConstant:18.0],
+
+            [_spinner.centerXAnchor constraintEqualToAnchor:_iconPlate.centerXAnchor],
+            [_spinner.centerYAnchor constraintEqualToAnchor:_iconPlate.centerYAnchor],
+
+            [_label.leadingAnchor constraintEqualToAnchor:_iconPlate.trailingAnchor constant:12.0],
+            [_label.trailingAnchor constraintEqualToAnchor:self.trailingAnchor constant:-24.0],
+            [_label.topAnchor constraintEqualToAnchor:self.topAnchor constant:10.0],
+            [_label.bottomAnchor constraintLessThanOrEqualToAnchor:self.bottomAnchor constant:-10.0],
         ]];
     }
     return self;
@@ -272,21 +609,295 @@ static CGFloat FCPFuzzyScore(NSString *query, NSString *target) {
 @end
 
 @implementation FCPSeparatorRowView
+
 - (instancetype)initWithFrame:(NSRect)frame {
     self = [super initWithFrame:frame];
     if (self) {
         NSBox *line = [[NSBox alloc] initWithFrame:NSZeroRect];
         line.boxType = NSBoxSeparator;
+        line.borderColor = FCPPaletteColor(1.0, 1.0, 1.0, 0.08);
         line.translatesAutoresizingMaskIntoConstraints = NO;
         [self addSubview:line];
         [NSLayoutConstraint activateConstraints:@[
-            [line.leadingAnchor constraintEqualToAnchor:self.leadingAnchor constant:12],
-            [line.trailingAnchor constraintEqualToAnchor:self.trailingAnchor constant:-12],
+            [line.leadingAnchor constraintEqualToAnchor:self.leadingAnchor constant:30.0],
+            [line.trailingAnchor constraintEqualToAnchor:self.trailingAnchor constant:-30.0],
             [line.centerYAnchor constraintEqualToAnchor:self.centerYAnchor],
         ]];
     }
     return self;
 }
+
+@end
+
+#pragma mark - Bubble Stage Views
+
+@interface SpliceKitSuggestionBubbleView : NSVisualEffectView
+@property (nonatomic, strong) NSView *iconPlate;
+@property (nonatomic, strong) NSImageView *iconView;
+@property (nonatomic, strong) NSTextField *titleLabel;
+- (void)configureWithCommand:(SpliceKitCommand *)cmd emphasis:(BOOL)emphasis;
+@end
+
+@implementation SpliceKitSuggestionBubbleView
+
+- (instancetype)initWithFrame:(NSRect)frame {
+    self = [super initWithFrame:frame];
+    if (self) {
+        self.material = NSVisualEffectMaterialMenu;
+        self.state = NSVisualEffectStateActive;
+        self.blendingMode = NSVisualEffectBlendingModeBehindWindow;
+        self.wantsLayer = YES;
+        self.layer.cornerRadius = 18.0;
+        self.layer.masksToBounds = YES;
+        self.layer.borderWidth = 1.0;
+        self.layer.borderColor = FCPPaletteColor(1.0, 1.0, 1.0, 0.08).CGColor;
+        self.layer.backgroundColor = FCPPaletteColor(1.0, 1.0, 1.0, 0.012).CGColor;
+        self.translatesAutoresizingMaskIntoConstraints = NO;
+
+        _iconPlate = [[NSView alloc] initWithFrame:NSZeroRect];
+        _iconPlate.wantsLayer = YES;
+        _iconPlate.layer.cornerRadius = 12.0;
+        _iconPlate.layer.masksToBounds = YES;
+        _iconPlate.translatesAutoresizingMaskIntoConstraints = NO;
+
+        _iconView = [[NSImageView alloc] initWithFrame:NSZeroRect];
+        _iconView.symbolConfiguration = [NSImageSymbolConfiguration configurationWithPointSize:14 weight:NSFontWeightSemibold];
+        _iconView.translatesAutoresizingMaskIntoConstraints = NO;
+
+        _titleLabel = [NSTextField labelWithString:@""];
+        _titleLabel.font = [NSFont systemFontOfSize:13 weight:NSFontWeightSemibold];
+        _titleLabel.textColor = FCPPaletteColor(0.97, 0.98, 1.0, 0.92);
+        _titleLabel.lineBreakMode = NSLineBreakByTruncatingTail;
+        _titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
+
+        [self addSubview:_iconPlate];
+        [_iconPlate addSubview:_iconView];
+        [self addSubview:_titleLabel];
+
+        [NSLayoutConstraint activateConstraints:@[
+            [_iconPlate.leadingAnchor constraintEqualToAnchor:self.leadingAnchor constant:14.0],
+            [_iconPlate.centerYAnchor constraintEqualToAnchor:self.centerYAnchor],
+            [_iconPlate.widthAnchor constraintEqualToConstant:28.0],
+            [_iconPlate.heightAnchor constraintEqualToConstant:28.0],
+
+            [_iconView.centerXAnchor constraintEqualToAnchor:_iconPlate.centerXAnchor],
+            [_iconView.centerYAnchor constraintEqualToAnchor:_iconPlate.centerYAnchor],
+            [_iconView.widthAnchor constraintEqualToConstant:16.0],
+            [_iconView.heightAnchor constraintEqualToConstant:16.0],
+
+            [_titleLabel.leadingAnchor constraintEqualToAnchor:_iconPlate.trailingAnchor constant:10.0],
+            [_titleLabel.trailingAnchor constraintEqualToAnchor:self.trailingAnchor constant:-14.0],
+            [_titleLabel.centerYAnchor constraintEqualToAnchor:self.centerYAnchor],
+        ]];
+    }
+    return self;
+}
+
+- (void)configureWithCommand:(SpliceKitCommand *)cmd emphasis:(BOOL)emphasis {
+    NSColor *accent = FCPCommandAccentColor(cmd);
+    self.titleLabel.stringValue = cmd.name ?: @"";
+    self.iconView.image = [NSImage imageWithSystemSymbolName:FCPCommandSymbolName(cmd) accessibilityDescription:cmd.name];
+    self.iconView.contentTintColor = accent;
+    self.iconPlate.layer.backgroundColor = [accent colorWithAlphaComponent:emphasis ? 0.16 : 0.10].CGColor;
+    self.iconPlate.layer.borderWidth = 1.0;
+    self.iconPlate.layer.borderColor = [accent colorWithAlphaComponent:0.18].CGColor;
+    self.layer.backgroundColor = (emphasis
+        ? FCPPaletteColor(0.25, 0.31, 0.55, 0.10)
+        : FCPPaletteColor(1.0, 1.0, 1.0, 0.012)).CGColor;
+    self.layer.borderColor = (emphasis
+        ? [accent colorWithAlphaComponent:0.24].CGColor
+        : FCPPaletteColor(1.0, 1.0, 1.0, 0.12).CGColor);
+}
+
+@end
+
+@interface SpliceKitLatencyPillView : NSVisualEffectView
+@property (nonatomic, strong) NSTextField *titleLabel;
+@property (nonatomic, strong) CAGradientLayer *shimmerLayer;
+- (void)configureWithText:(NSString *)text;
+@end
+
+@implementation SpliceKitLatencyPillView
+
+- (instancetype)initWithFrame:(NSRect)frame {
+    self = [super initWithFrame:frame];
+    if (self) {
+        self.material = NSVisualEffectMaterialMenu;
+        self.state = NSVisualEffectStateActive;
+        self.blendingMode = NSVisualEffectBlendingModeBehindWindow;
+        self.wantsLayer = YES;
+        self.layer.cornerRadius = 20.0;
+        self.layer.masksToBounds = YES;
+        self.layer.borderWidth = 1.0;
+        self.layer.borderColor = FCPPaletteColor(0.72, 0.84, 1.0, 0.18).CGColor;
+        self.layer.backgroundColor = FCPPaletteColor(0.23, 0.29, 0.50, 0.08).CGColor;
+        self.translatesAutoresizingMaskIntoConstraints = NO;
+
+        _titleLabel = [NSTextField labelWithString:@""];
+        _titleLabel.font = [NSFont systemFontOfSize:13 weight:NSFontWeightSemibold];
+        _titleLabel.textColor = FCPPaletteColor(0.97, 0.98, 1.0, 0.94);
+        _titleLabel.alignment = NSTextAlignmentCenter;
+        _titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
+        [self addSubview:_titleLabel];
+
+        [NSLayoutConstraint activateConstraints:@[
+            [_titleLabel.leadingAnchor constraintEqualToAnchor:self.leadingAnchor constant:18.0],
+            [_titleLabel.trailingAnchor constraintEqualToAnchor:self.trailingAnchor constant:-18.0],
+            [_titleLabel.centerYAnchor constraintEqualToAnchor:self.centerYAnchor],
+        ]];
+
+        _shimmerLayer = [CAGradientLayer layer];
+        _shimmerLayer.colors = @[
+            (__bridge id)FCPPaletteColor(1.0, 1.0, 1.0, 0.0).CGColor,
+            (__bridge id)FCPPaletteColor(1.0, 1.0, 1.0, 0.22).CGColor,
+            (__bridge id)FCPPaletteColor(1.0, 1.0, 1.0, 0.0).CGColor
+        ];
+        _shimmerLayer.startPoint = CGPointMake(0.0, 0.5);
+        _shimmerLayer.endPoint = CGPointMake(1.0, 0.5);
+        _shimmerLayer.frame = CGRectMake(-120.0, 0.0, 120.0, 56.0);
+        [self.layer addSublayer:_shimmerLayer];
+
+        CABasicAnimation *shimmer = [CABasicAnimation animationWithKeyPath:@"transform.translation.x"];
+        shimmer.fromValue = @(-140.0);
+        shimmer.toValue = @(360.0);
+        shimmer.duration = 1.15;
+        shimmer.repeatCount = HUGE_VALF;
+        shimmer.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
+        [_shimmerLayer addAnimation:shimmer forKey:@"shimmer"];
+    }
+    return self;
+}
+
+- (void)layout {
+    [super layout];
+    self.shimmerLayer.frame = CGRectMake(-120.0, 0.0, 120.0, NSHeight(self.bounds));
+}
+
+- (void)configureWithText:(NSString *)text {
+    self.titleLabel.stringValue = text.length > 0 ? text : @"Working...";
+}
+
+@end
+
+@interface SpliceKitResultPlatterView : NSVisualEffectView
+@property (nonatomic, strong) NSView *iconPlate;
+@property (nonatomic, strong) NSImageView *iconView;
+@property (nonatomic, strong) NSTextField *badgeLabel;
+@property (nonatomic, strong) NSTextField *titleLabel;
+@property (nonatomic, strong) NSTextField *subtitleLabel;
+@property (nonatomic, strong) NSTextField *footnoteLabel;
+- (void)configureWithTitle:(NSString *)title
+                  subtitle:(NSString *)subtitle
+                     badge:(NSString *)badge
+                  footnote:(NSString *)footnote
+                symbolName:(NSString *)symbolName
+                    accent:(NSColor *)accent;
+@end
+
+@implementation SpliceKitResultPlatterView
+
+- (instancetype)initWithFrame:(NSRect)frame {
+    self = [super initWithFrame:frame];
+    if (self) {
+        self.material = NSVisualEffectMaterialMenu;
+        self.state = NSVisualEffectStateActive;
+        self.blendingMode = NSVisualEffectBlendingModeBehindWindow;
+        self.wantsLayer = YES;
+        self.layer.cornerRadius = 24.0;
+        self.layer.masksToBounds = YES;
+        self.layer.borderWidth = 1.0;
+        self.layer.borderColor = FCPPaletteColor(1.0, 1.0, 1.0, 0.10).CGColor;
+        self.layer.backgroundColor = FCPPaletteColor(1.0, 1.0, 1.0, 0.015).CGColor;
+        self.translatesAutoresizingMaskIntoConstraints = NO;
+
+        _iconPlate = [[NSView alloc] initWithFrame:NSZeroRect];
+        _iconPlate.wantsLayer = YES;
+        _iconPlate.layer.cornerRadius = 16.0;
+        _iconPlate.layer.masksToBounds = YES;
+        _iconPlate.translatesAutoresizingMaskIntoConstraints = NO;
+
+        _iconView = [[NSImageView alloc] initWithFrame:NSZeroRect];
+        _iconView.symbolConfiguration = [NSImageSymbolConfiguration configurationWithPointSize:18 weight:NSFontWeightSemibold];
+        _iconView.translatesAutoresizingMaskIntoConstraints = NO;
+
+        _badgeLabel = [NSTextField labelWithString:@""];
+        _badgeLabel.font = [NSFont systemFontOfSize:10 weight:NSFontWeightBold];
+        _badgeLabel.textColor = FCPPaletteColor(0.89, 0.93, 0.99, 0.74);
+        _badgeLabel.alignment = NSTextAlignmentRight;
+        _badgeLabel.translatesAutoresizingMaskIntoConstraints = NO;
+
+        _titleLabel = [NSTextField labelWithString:@""];
+        _titleLabel.font = [NSFont systemFontOfSize:16 weight:NSFontWeightSemibold];
+        _titleLabel.textColor = FCPPaletteColor(0.98, 0.99, 1.0, 0.96);
+        _titleLabel.lineBreakMode = NSLineBreakByTruncatingTail;
+        _titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
+
+        _subtitleLabel = [NSTextField wrappingLabelWithString:@""];
+        _subtitleLabel.font = [NSFont systemFontOfSize:12 weight:NSFontWeightMedium];
+        _subtitleLabel.textColor = FCPPaletteColor(0.88, 0.92, 0.99, 0.76);
+        _subtitleLabel.maximumNumberOfLines = 2;
+        _subtitleLabel.translatesAutoresizingMaskIntoConstraints = NO;
+
+        _footnoteLabel = [NSTextField labelWithString:@""];
+        _footnoteLabel.font = [NSFont systemFontOfSize:11 weight:NSFontWeightMedium];
+        _footnoteLabel.textColor = FCPPaletteColor(0.76, 0.84, 0.99, 0.68);
+        _footnoteLabel.translatesAutoresizingMaskIntoConstraints = NO;
+
+        [self addSubview:_iconPlate];
+        [_iconPlate addSubview:_iconView];
+        [self addSubview:_badgeLabel];
+        [self addSubview:_titleLabel];
+        [self addSubview:_subtitleLabel];
+        [self addSubview:_footnoteLabel];
+
+        [NSLayoutConstraint activateConstraints:@[
+            [_iconPlate.leadingAnchor constraintEqualToAnchor:self.leadingAnchor constant:18.0],
+            [_iconPlate.topAnchor constraintEqualToAnchor:self.topAnchor constant:18.0],
+            [_iconPlate.widthAnchor constraintEqualToConstant:34.0],
+            [_iconPlate.heightAnchor constraintEqualToConstant:34.0],
+
+            [_iconView.centerXAnchor constraintEqualToAnchor:_iconPlate.centerXAnchor],
+            [_iconView.centerYAnchor constraintEqualToAnchor:_iconPlate.centerYAnchor],
+            [_iconView.widthAnchor constraintEqualToConstant:18.0],
+            [_iconView.heightAnchor constraintEqualToConstant:18.0],
+
+            [_badgeLabel.trailingAnchor constraintEqualToAnchor:self.trailingAnchor constant:-18.0],
+            [_badgeLabel.topAnchor constraintEqualToAnchor:self.topAnchor constant:16.0],
+            [_badgeLabel.widthAnchor constraintLessThanOrEqualToConstant:150.0],
+
+            [_titleLabel.leadingAnchor constraintEqualToAnchor:_iconPlate.trailingAnchor constant:12.0],
+            [_titleLabel.trailingAnchor constraintLessThanOrEqualToAnchor:_badgeLabel.leadingAnchor constant:-12.0],
+            [_titleLabel.topAnchor constraintEqualToAnchor:self.topAnchor constant:17.0],
+
+            [_subtitleLabel.leadingAnchor constraintEqualToAnchor:_titleLabel.leadingAnchor],
+            [_subtitleLabel.trailingAnchor constraintEqualToAnchor:self.trailingAnchor constant:-18.0],
+            [_subtitleLabel.topAnchor constraintEqualToAnchor:_titleLabel.bottomAnchor constant:4.0],
+
+            [_footnoteLabel.leadingAnchor constraintEqualToAnchor:_titleLabel.leadingAnchor],
+            [_footnoteLabel.trailingAnchor constraintEqualToAnchor:self.trailingAnchor constant:-18.0],
+            [_footnoteLabel.topAnchor constraintEqualToAnchor:_subtitleLabel.bottomAnchor constant:8.0],
+        ]];
+    }
+    return self;
+}
+
+- (void)configureWithTitle:(NSString *)title
+                  subtitle:(NSString *)subtitle
+                     badge:(NSString *)badge
+                  footnote:(NSString *)footnote
+                symbolName:(NSString *)symbolName
+                    accent:(NSColor *)accent {
+    self.titleLabel.stringValue = title ?: @"Ready";
+    self.subtitleLabel.stringValue = subtitle ?: @"";
+    self.badgeLabel.stringValue = [badge uppercaseString] ?: @"";
+    self.footnoteLabel.stringValue = footnote ?: @"";
+    self.iconView.image = [NSImage imageWithSystemSymbolName:(symbolName ?: @"sparkles") accessibilityDescription:title];
+    self.iconView.contentTintColor = accent ?: FCPPaletteColor(0.61, 0.61, 0.99, 0.95);
+    self.iconPlate.layer.backgroundColor = [(accent ?: FCPPaletteColor(0.61, 0.61, 0.99, 0.95)) colorWithAlphaComponent:0.14].CGColor;
+    self.iconPlate.layer.borderWidth = 1.0;
+    self.iconPlate.layer.borderColor = [(accent ?: FCPPaletteColor(0.61, 0.61, 0.99, 0.95)) colorWithAlphaComponent:0.22].CGColor;
+}
+
 @end
 
 #pragma mark - SpliceKitCommandPalette
@@ -294,13 +905,34 @@ static CGFloat FCPFuzzyScore(NSString *query, NSString *target) {
 static NSString * const kCommandRowID = @"SpliceKitCommandRow";
 static NSString * const kAIRowID = @"FCPAIRow";
 
+typedef NS_ENUM(NSInteger, SpliceKitPalettePresentationState) {
+    SpliceKitPalettePresentationStateHidden = 0,
+    SpliceKitPalettePresentationStateStarterSuggestions,
+    SpliceKitPalettePresentationStateTypingSuggestions,
+    SpliceKitPalettePresentationStateLatencyPill,
+    SpliceKitPalettePresentationStateResultPlatter,
+};
+
 @interface SpliceKitCommandPalette () <NSTableViewDelegate, NSTableViewDataSource,
                                   NSTextFieldDelegate, NSWindowDelegate, NSMenuDelegate>
 @property (nonatomic, strong) NSPanel *panel;
 @property (nonatomic, strong) NSTextField *searchField;
 @property (nonatomic, strong) NSTableView *tableView;
 @property (nonatomic, strong) NSScrollView *scrollView;
-@property (nonatomic, strong) NSVisualEffectView *backgroundView;
+@property (nonatomic, strong) NSView *backgroundView;
+@property (nonatomic, strong) NSView *searchChromeView;
+@property (nonatomic, strong) NSView *heroStageView;
+@property (nonatomic, strong) NSStackView *heroSuggestionStackView;
+@property (nonatomic, strong) NSStackView *heroContinuerStackView;
+@property (nonatomic, strong) SpliceKitLatencyPillView *heroLatencyPillView;
+@property (nonatomic, strong) SpliceKitResultPlatterView *heroResultPlatterView;
+@property (nonatomic, strong) NSLayoutConstraint *heroStageHeightConstraint;
+@property (nonatomic, strong) CAGradientLayer *shellTintLayer;
+@property (nonatomic, strong) CAGradientLayer *searchBodyLayer;
+@property (nonatomic, strong) CAGradientLayer *searchGlossLayer;
+@property (nonatomic, strong) CAGradientLayer *searchEdgeLayer;
+@property (nonatomic, strong) SpliceKitSiriOrbView *orbView;
+@property (nonatomic, strong) NSButton *dictationButton;
 @property (nonatomic, strong) NSTextField *statusLabel;
 
 @property (nonatomic, strong) NSArray<SpliceKitCommand *> *allCommands;
@@ -328,6 +960,18 @@ static NSString * const kAIRowID = @"FCPAIRow";
 @property (nonatomic, strong) NSArray *gemmaToolSchema;
 @property (nonatomic, assign) BOOL gemmaCancelled;
 @property (nonatomic, strong) NSString *gemmaCurrentTask;
+
+// Live voice dictation
+@property (nonatomic, strong) SFSpeechRecognizer *dictationRecognizer;
+@property (nonatomic, strong) SFSpeechAudioBufferRecognitionRequest *dictationRequest;
+@property (nonatomic, strong) SFSpeechRecognitionTask *dictationTask;
+@property (nonatomic, strong) AVAudioEngine *dictationAudioEngine;
+@property (nonatomic, assign) BOOL dictationActive;
+@property (nonatomic, strong) NSString *dictationSeedQuery;
+@property (nonatomic, assign) SpliceKitPalettePresentationState presentationState;
+@property (nonatomic, assign) NSUInteger presentationGeneration;
+@property (nonatomic, assign) BOOL commandCommitAnimating;
+@property (nonatomic, copy) NSString *heroStageSignature;
 @end
 
 static NSString * const kSpliceKitFavoritesKey = @"SpliceKitCommandPaletteFavorites";
@@ -855,73 +1499,217 @@ static NSString * const kSeparatorRowID = @"FCPSeparatorRow";
 - (void)buildPanelIfNeeded {
     if (self.panel) return;
 
-    // Position slightly above center — feels more natural for a command palette
-    CGFloat width = 560;
-    CGFloat height = 400;
+    CGFloat width = 820;
+    CGFloat height = 430;
     NSRect screenFrame = [[NSScreen mainScreen] visibleFrame];
     CGFloat x = NSMidX(screenFrame) - width / 2;
-    CGFloat y = NSMidY(screenFrame) + 60; // slightly above center
+    CGFloat y = NSMidY(screenFrame) + 36;
     NSRect frame = NSMakeRect(x, y, width, height);
 
-    NSPanel *panel = [[NSPanel alloc] initWithContentRect:frame
-        styleMask:(NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
-                   NSWindowStyleMaskResizable | NSWindowStyleMaskFullSizeContentView)
+    SpliceKitCommandPalettePanel *panel = [[SpliceKitCommandPalettePanel alloc] initWithContentRect:frame
+        styleMask:(NSWindowStyleMaskBorderless | NSWindowStyleMaskFullSizeContentView)
         backing:NSBackingStoreBuffered defer:NO];
-    panel.title = @"";
-    panel.titleVisibility = NSWindowTitleHidden;
-    panel.titlebarAppearsTransparent = YES;
+    panel.title = @"SpliceKit Command Palette";
+    panel.opaque = NO;
     panel.movableByWindowBackground = YES;
     panel.level = NSFloatingWindowLevel;
     panel.floatingPanel = YES;
     panel.becomesKeyOnlyIfNeeded = NO;
     panel.hidesOnDeactivate = NO;
     panel.releasedWhenClosed = NO;
+    panel.hasShadow = YES;
+    panel.collectionBehavior = NSWindowCollectionBehaviorMoveToActiveSpace |
+                               NSWindowCollectionBehaviorTransient |
+                               NSWindowCollectionBehaviorFullScreenAuxiliary;
     panel.delegate = self;
-    panel.minSize = NSMakeSize(400, 200);
-    panel.maxSize = NSMakeSize(620, 800);
+    panel.minSize = NSMakeSize(720, 360);
+    panel.maxSize = NSMakeSize(920, 720);
     panel.backgroundColor = [NSColor clearColor];
+    panel.animationBehavior = NSWindowAnimationBehaviorUtilityWindow;
+    panel.contentView.wantsLayer = YES;
+    panel.contentView.layer.backgroundColor = NSColor.clearColor.CGColor;
 
-    // Vibrancy background
-    NSVisualEffectView *bg = [[NSVisualEffectView alloc] initWithFrame:panel.contentView.bounds];
+    NSView *bg = FCPCreateGlassContainerView(panel.contentView.bounds, NSVisualEffectMaterialHUDWindow, 30.0);
     bg.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
-    bg.material = NSVisualEffectMaterialMenu;
-    bg.state = NSVisualEffectStateActive;
-    bg.blendingMode = NSVisualEffectBlendingModeBehindWindow;
-    bg.wantsLayer = YES;
-    bg.layer.cornerRadius = 12;
-    bg.layer.masksToBounds = YES;
+    bg.layer.borderWidth = 1.0;
+    bg.layer.borderColor = FCPPaletteColor(1.0, 1.0, 1.0, 0.10).CGColor;
+    bg.layer.backgroundColor = FCPPaletteColor(0.02, 0.03, 0.06, 0.035).CGColor;
+    bg.layer.shadowColor = NSColor.blackColor.CGColor;
+    bg.layer.shadowOpacity = 0.14;
+    bg.layer.shadowRadius = 24.0;
+    bg.layer.shadowOffset = CGSizeMake(0.0, -6.0);
     [panel.contentView addSubview:bg];
     self.backgroundView = bg;
 
-    // Search field
+    CAGradientLayer *shellTint = [CAGradientLayer layer];
+    shellTint.frame = bg.bounds;
+    shellTint.colors = @[
+        (__bridge id)FCPPaletteColor(0.20, 0.24, 0.40, 0.05).CGColor,
+        (__bridge id)FCPPaletteColor(0.10, 0.12, 0.20, 0.025).CGColor,
+        (__bridge id)FCPPaletteColor(0.05, 0.06, 0.10, 0.012).CGColor
+    ];
+    shellTint.startPoint = CGPointMake(0.0, 1.0);
+    shellTint.endPoint = CGPointMake(1.0, 0.0);
+    shellTint.autoresizingMask = kCALayerWidthSizable | kCALayerHeightSizable;
+    [bg.layer addSublayer:shellTint];
+    self.shellTintLayer = shellTint;
+
+    NSView *searchChrome = FCPCreateGlassContainerView(NSZeroRect, NSVisualEffectMaterialMenu, 24.0);
+    searchChrome.layer.borderWidth = 1.0;
+    searchChrome.layer.borderColor = FCPPaletteColor(1.0, 1.0, 1.0, 0.12).CGColor;
+    searchChrome.layer.backgroundColor = FCPPaletteColor(0.10, 0.12, 0.22, 0.04).CGColor;
+    searchChrome.layer.shadowColor = NSColor.blackColor.CGColor;
+    searchChrome.layer.shadowOpacity = 0.08;
+    searchChrome.layer.shadowRadius = 14.0;
+    searchChrome.layer.shadowOffset = CGSizeMake(0.0, -8.0);
+    searchChrome.translatesAutoresizingMaskIntoConstraints = NO;
+    [bg addSubview:searchChrome];
+    self.searchChromeView = searchChrome;
+
+    CAGradientLayer *searchBody = [CAGradientLayer layer];
+    searchBody.frame = CGRectMake(0.0, 0.0, width - 36.0, 58.0);
+    searchBody.colors = @[
+        (__bridge id)FCPPaletteColor(0.26, 0.31, 0.54, 0.06).CGColor,
+        (__bridge id)FCPPaletteColor(0.15, 0.18, 0.31, 0.03).CGColor,
+        (__bridge id)FCPPaletteColor(0.09, 0.11, 0.18, 0.015).CGColor
+    ];
+    searchBody.startPoint = CGPointMake(0.0, 1.0);
+    searchBody.endPoint = CGPointMake(1.0, 0.0);
+    searchBody.cornerRadius = 24.0;
+    searchBody.autoresizingMask = kCALayerWidthSizable | kCALayerHeightSizable;
+    [searchChrome.layer insertSublayer:searchBody atIndex:0];
+    self.searchBodyLayer = searchBody;
+
+    CAGradientLayer *searchGloss = [CAGradientLayer layer];
+    searchGloss.frame = CGRectMake(1.0, 1.0, width - 38.0, 24.0);
+    searchGloss.colors = @[
+        (__bridge id)FCPPaletteColor(1.0, 1.0, 1.0, 0.18).CGColor,
+        (__bridge id)FCPPaletteColor(0.84, 0.90, 1.0, 0.06).CGColor,
+        (__bridge id)FCPPaletteColor(1.0, 1.0, 1.0, 0.0).CGColor
+    ];
+    searchGloss.startPoint = CGPointMake(0.0, 1.0);
+    searchGloss.endPoint = CGPointMake(1.0, 0.0);
+    searchGloss.cornerRadius = 22.0;
+    searchGloss.autoresizingMask = kCALayerWidthSizable;
+    [searchChrome.layer addSublayer:searchGloss];
+    self.searchGlossLayer = searchGloss;
+
+    CABasicAnimation *glossDrift = [CABasicAnimation animationWithKeyPath:@"transform.translation.x"];
+    glossDrift.fromValue = @(-18.0);
+    glossDrift.toValue = @(28.0);
+    glossDrift.duration = 5.8;
+    glossDrift.autoreverses = YES;
+    glossDrift.repeatCount = HUGE_VALF;
+    glossDrift.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
+    [searchGloss addAnimation:glossDrift forKey:@"glossDrift"];
+
+    CAGradientLayer *searchEdge = [CAGradientLayer layer];
+    searchEdge.frame = CGRectMake(0.0, 0.0, width - 36.0, 58.0);
+    searchEdge.colors = @[
+        (__bridge id)FCPPaletteColor(0.74, 0.82, 1.0, 0.12).CGColor,
+        (__bridge id)FCPPaletteColor(1.0, 1.0, 1.0, 0.02).CGColor,
+        (__bridge id)FCPPaletteColor(0.42, 0.52, 0.96, 0.06).CGColor
+    ];
+    searchEdge.startPoint = CGPointMake(0.0, 0.5);
+    searchEdge.endPoint = CGPointMake(1.0, 0.5);
+    searchEdge.cornerRadius = 24.0;
+    searchEdge.borderWidth = 1.0;
+    searchEdge.borderColor = FCPPaletteColor(1.0, 1.0, 1.0, 0.10).CGColor;
+    searchEdge.autoresizingMask = kCALayerWidthSizable | kCALayerHeightSizable;
+    [searchChrome.layer addSublayer:searchEdge];
+    self.searchEdgeLayer = searchEdge;
+
+    SpliceKitSiriOrbView *orbView = [[SpliceKitSiriOrbView alloc] initWithFrame:NSZeroRect];
+    orbView.translatesAutoresizingMaskIntoConstraints = NO;
+    [searchChrome addSubview:orbView];
+    self.orbView = orbView;
+
     SpliceKitCommandSearchField *searchField = [[SpliceKitCommandSearchField alloc] initWithFrame:NSZeroRect];
-    searchField.placeholderString = @"Type a command or describe what you want to do...";
-    searchField.font = [NSFont systemFontOfSize:16];
+    searchField.placeholderAttributedString = [[NSAttributedString alloc] initWithString:@"Ask SpliceKit or type a command"
+                                                                              attributes:@{
+        NSForegroundColorAttributeName: FCPPaletteColor(0.92, 0.95, 1.0, 0.42),
+        NSFontAttributeName: [NSFont systemFontOfSize:20 weight:NSFontWeightSemibold]
+    }];
+    searchField.font = [NSFont systemFontOfSize:20 weight:NSFontWeightSemibold];
+    searchField.textColor = FCPPaletteColor(0.97, 0.98, 1.0, 0.95);
     searchField.bordered = NO;
     searchField.focusRingType = NSFocusRingTypeNone;
     searchField.drawsBackground = NO;
     searchField.translatesAutoresizingMaskIntoConstraints = NO;
     searchField.delegate = self;
-    [bg addSubview:searchField];
+    [searchChrome addSubview:searchField];
     self.searchField = searchField;
 
-    // Separator line
-    NSBox *separator = [[NSBox alloc] initWithFrame:NSZeroRect];
-    separator.boxType = NSBoxSeparator;
-    separator.translatesAutoresizingMaskIntoConstraints = NO;
-    [bg addSubview:separator];
+    NSButton *dictationButton = [NSButton buttonWithImage:[NSImage imageWithSystemSymbolName:@"mic.fill"
+                                                                          accessibilityDescription:@"Voice dictation"]
+                                                   target:self
+                                                   action:@selector(toggleDictation:)];
+    dictationButton.bordered = NO;
+    dictationButton.buttonType = NSButtonTypeMomentaryPushIn;
+    dictationButton.translatesAutoresizingMaskIntoConstraints = NO;
+    dictationButton.contentTintColor = FCPPaletteColor(0.96, 0.97, 1.0, 0.68);
+    dictationButton.wantsLayer = YES;
+    dictationButton.layer.cornerRadius = 18.0;
+    dictationButton.layer.masksToBounds = YES;
+    dictationButton.layer.backgroundColor = FCPPaletteColor(1.0, 1.0, 1.0, 0.03).CGColor;
+    dictationButton.layer.borderWidth = 1.0;
+    dictationButton.layer.borderColor = FCPPaletteColor(1.0, 1.0, 1.0, 0.12).CGColor;
+    dictationButton.toolTip = @"Start Siri-style voice dictation";
+    [searchChrome addSubview:dictationButton];
+    self.dictationButton = dictationButton;
 
-    // Table view for results
+    NSView *heroStage = [[NSView alloc] initWithFrame:NSZeroRect];
+    heroStage.translatesAutoresizingMaskIntoConstraints = NO;
+    heroStage.wantsLayer = YES;
+    heroStage.layer.backgroundColor = NSColor.clearColor.CGColor;
+    [bg addSubview:heroStage];
+    self.heroStageView = heroStage;
+    NSLayoutConstraint *heroStageHeightConstraint = [heroStage.heightAnchor constraintEqualToConstant:60.0];
+    self.heroStageHeightConstraint = heroStageHeightConstraint;
+
+    NSStackView *suggestionStack = [[NSStackView alloc] initWithFrame:NSZeroRect];
+    suggestionStack.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    suggestionStack.alignment = NSLayoutAttributeCenterY;
+    suggestionStack.distribution = NSStackViewDistributionFillEqually;
+    suggestionStack.spacing = 12.0;
+    suggestionStack.translatesAutoresizingMaskIntoConstraints = NO;
+    [heroStage addSubview:suggestionStack];
+    self.heroSuggestionStackView = suggestionStack;
+
+    SpliceKitLatencyPillView *latencyPill = [[SpliceKitLatencyPillView alloc] initWithFrame:NSZeroRect];
+    latencyPill.hidden = YES;
+    latencyPill.alphaValue = 0.0;
+    [heroStage addSubview:latencyPill];
+    self.heroLatencyPillView = latencyPill;
+
+    SpliceKitResultPlatterView *resultPlatter = [[SpliceKitResultPlatterView alloc] initWithFrame:NSZeroRect];
+    resultPlatter.hidden = YES;
+    resultPlatter.alphaValue = 0.0;
+    [heroStage addSubview:resultPlatter];
+    self.heroResultPlatterView = resultPlatter;
+
+    NSStackView *continuerStack = [[NSStackView alloc] initWithFrame:NSZeroRect];
+    continuerStack.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    continuerStack.alignment = NSLayoutAttributeCenterY;
+    continuerStack.distribution = NSStackViewDistributionFillEqually;
+    continuerStack.spacing = 12.0;
+    continuerStack.translatesAutoresizingMaskIntoConstraints = NO;
+    continuerStack.hidden = YES;
+    continuerStack.alphaValue = 0.0;
+    [heroStage addSubview:continuerStack];
+    self.heroContinuerStackView = continuerStack;
+
     NSTableColumn *column = [[NSTableColumn alloc] initWithIdentifier:@"main"];
     column.resizingMask = NSTableColumnAutoresizingMask;
 
     NSTableView *tableView = [[NSTableView alloc] initWithFrame:NSZeroRect];
     [tableView addTableColumn:column];
     tableView.headerView = nil;
-    tableView.rowHeight = 40;
-    tableView.intercellSpacing = NSMakeSize(0, 1);
+    tableView.rowHeight = 62.0;
+    tableView.intercellSpacing = NSMakeSize(0.0, 0.0);
     tableView.backgroundColor = [NSColor clearColor];
-    tableView.selectionHighlightStyle = NSTableViewSelectionHighlightStyleRegular;
+    tableView.selectionHighlightStyle = NSTableViewSelectionHighlightStyleNone;
+    tableView.usesAlternatingRowBackgroundColors = NO;
     tableView.delegate = self;
     tableView.dataSource = self;
     tableView.doubleAction = @selector(executeSelectedCommand:);
@@ -938,21 +1726,21 @@ static NSString * const kSeparatorRowID = @"FCPSeparatorRow";
     NSScrollView *scroll = [[NSScrollView alloc] initWithFrame:NSZeroRect];
     scroll.documentView = tableView;
     scroll.hasVerticalScroller = YES;
+    scroll.scrollerStyle = NSScrollerStyleOverlay;
     scroll.drawsBackground = NO;
+    scroll.wantsLayer = YES;
     scroll.translatesAutoresizingMaskIntoConstraints = NO;
     [bg addSubview:scroll];
     self.scrollView = scroll;
 
-    // Status label
     NSTextField *statusLabel = [NSTextField labelWithString:@""];
-    statusLabel.font = [NSFont systemFontOfSize:10];
-    statusLabel.textColor = [NSColor tertiaryLabelColor];
+    statusLabel.font = [NSFont systemFontOfSize:11 weight:NSFontWeightMedium];
+    statusLabel.textColor = FCPPaletteColor(0.88, 0.92, 0.99, 0.56);
     statusLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    statusLabel.alignment = NSTextAlignmentCenter;
+    statusLabel.alignment = NSTextAlignmentLeft;
     [bg addSubview:statusLabel];
     self.statusLabel = statusLabel;
 
-    // AI engine popup (Apple Intelligence / Gemma 4)
     NSPopUpButton *aiPopup = [[NSPopUpButton alloc] init];
     aiPopup.translatesAutoresizingMaskIntoConstraints = NO;
     [aiPopup addItemsWithTitles:@[@"Apple Intelligence", @"Gemma 4", @"Apple Intelligence+"]];
@@ -960,47 +1748,85 @@ static NSString * const kSeparatorRowID = @"FCPSeparatorRow";
     aiPopup.action = @selector(aiEngineChanged:);
     aiPopup.font = [NSFont systemFontOfSize:10];
     aiPopup.controlSize = NSControlSizeMini;
+    aiPopup.bordered = NO;
     [aiPopup setContentHuggingPriority:NSLayoutPriorityDefaultHigh forOrientation:NSLayoutConstraintOrientationHorizontal];
     [aiPopup selectItemAtIndex:(NSInteger)self.aiEngine];
     [bg addSubview:aiPopup];
     self.aiEnginePopup = aiPopup;
 
-    // Layout
     [NSLayoutConstraint activateConstraints:@[
-        [searchField.topAnchor constraintEqualToAnchor:bg.topAnchor constant:38],
-        [searchField.leadingAnchor constraintEqualToAnchor:bg.leadingAnchor constant:16],
-        [searchField.trailingAnchor constraintEqualToAnchor:bg.trailingAnchor constant:-16],
-        [searchField.heightAnchor constraintEqualToConstant:28],
+        [searchChrome.topAnchor constraintEqualToAnchor:bg.topAnchor constant:18.0],
+        [searchChrome.leadingAnchor constraintEqualToAnchor:bg.leadingAnchor constant:18.0],
+        [searchChrome.trailingAnchor constraintEqualToAnchor:bg.trailingAnchor constant:-18.0],
+        [searchChrome.heightAnchor constraintEqualToConstant:58.0],
 
-        [separator.topAnchor constraintEqualToAnchor:searchField.bottomAnchor constant:8],
-        [separator.leadingAnchor constraintEqualToAnchor:bg.leadingAnchor],
-        [separator.trailingAnchor constraintEqualToAnchor:bg.trailingAnchor],
+        [orbView.leadingAnchor constraintEqualToAnchor:searchChrome.leadingAnchor constant:14.0],
+        [orbView.centerYAnchor constraintEqualToAnchor:searchChrome.centerYAnchor],
+        [orbView.widthAnchor constraintEqualToConstant:28.0],
+        [orbView.heightAnchor constraintEqualToConstant:28.0],
 
-        [scroll.topAnchor constraintEqualToAnchor:separator.bottomAnchor constant:0],
-        [scroll.leadingAnchor constraintEqualToAnchor:bg.leadingAnchor],
-        [scroll.trailingAnchor constraintEqualToAnchor:bg.trailingAnchor],
-        [scroll.bottomAnchor constraintEqualToAnchor:statusLabel.topAnchor constant:-2],
+        [dictationButton.trailingAnchor constraintEqualToAnchor:searchChrome.trailingAnchor constant:-14.0],
+        [dictationButton.centerYAnchor constraintEqualToAnchor:searchChrome.centerYAnchor],
+        [dictationButton.widthAnchor constraintEqualToConstant:36.0],
+        [dictationButton.heightAnchor constraintEqualToConstant:36.0],
 
-        [statusLabel.leadingAnchor constraintEqualToAnchor:bg.leadingAnchor constant:12],
-        [statusLabel.trailingAnchor constraintEqualToAnchor:aiPopup.leadingAnchor constant:-8],
-        [statusLabel.bottomAnchor constraintEqualToAnchor:bg.bottomAnchor constant:-4],
-        [statusLabel.heightAnchor constraintEqualToConstant:16],
+        [searchField.leadingAnchor constraintEqualToAnchor:orbView.trailingAnchor constant:14.0],
+        [searchField.trailingAnchor constraintEqualToAnchor:dictationButton.leadingAnchor constant:-12.0],
+        [searchField.topAnchor constraintEqualToAnchor:searchChrome.topAnchor constant:10.0],
+        [searchField.bottomAnchor constraintEqualToAnchor:searchChrome.bottomAnchor constant:-10.0],
 
-        [aiPopup.trailingAnchor constraintEqualToAnchor:bg.trailingAnchor constant:-12],
+        [heroStage.topAnchor constraintEqualToAnchor:searchChrome.bottomAnchor constant:8.0],
+        [heroStage.leadingAnchor constraintEqualToAnchor:bg.leadingAnchor constant:18.0],
+        [heroStage.trailingAnchor constraintEqualToAnchor:bg.trailingAnchor constant:-18.0],
+        heroStageHeightConstraint,
+
+        [suggestionStack.leadingAnchor constraintEqualToAnchor:heroStage.leadingAnchor],
+        [suggestionStack.trailingAnchor constraintEqualToAnchor:heroStage.trailingAnchor],
+        [suggestionStack.topAnchor constraintEqualToAnchor:heroStage.topAnchor constant:4.0],
+        [suggestionStack.heightAnchor constraintEqualToConstant:52.0],
+
+        [latencyPill.centerXAnchor constraintEqualToAnchor:heroStage.centerXAnchor],
+        [latencyPill.centerYAnchor constraintEqualToAnchor:heroStage.centerYAnchor constant:-10.0],
+        [latencyPill.widthAnchor constraintLessThanOrEqualToConstant:360.0],
+        [latencyPill.widthAnchor constraintGreaterThanOrEqualToConstant:180.0],
+        [latencyPill.heightAnchor constraintEqualToConstant:44.0],
+
+        [resultPlatter.leadingAnchor constraintEqualToAnchor:heroStage.leadingAnchor],
+        [resultPlatter.trailingAnchor constraintEqualToAnchor:heroStage.trailingAnchor],
+        [resultPlatter.topAnchor constraintEqualToAnchor:heroStage.topAnchor constant:2.0],
+        [resultPlatter.heightAnchor constraintEqualToConstant:88.0],
+
+        [continuerStack.leadingAnchor constraintEqualToAnchor:heroStage.leadingAnchor],
+        [continuerStack.trailingAnchor constraintEqualToAnchor:heroStage.trailingAnchor],
+        [continuerStack.topAnchor constraintEqualToAnchor:resultPlatter.bottomAnchor constant:10.0],
+        [continuerStack.heightAnchor constraintEqualToConstant:44.0],
+
+        [scroll.topAnchor constraintEqualToAnchor:heroStage.bottomAnchor constant:8.0],
+        [scroll.leadingAnchor constraintEqualToAnchor:bg.leadingAnchor constant:6.0],
+        [scroll.trailingAnchor constraintEqualToAnchor:bg.trailingAnchor constant:-6.0],
+        [scroll.bottomAnchor constraintEqualToAnchor:statusLabel.topAnchor constant:-10.0],
+
+        [statusLabel.leadingAnchor constraintEqualToAnchor:bg.leadingAnchor constant:22.0],
+        [statusLabel.trailingAnchor constraintEqualToAnchor:aiPopup.leadingAnchor constant:-8.0],
+        [statusLabel.bottomAnchor constraintEqualToAnchor:bg.bottomAnchor constant:-14.0],
+        [statusLabel.heightAnchor constraintEqualToConstant:18.0],
+
+        [aiPopup.trailingAnchor constraintEqualToAnchor:bg.trailingAnchor constant:-18.0],
         [aiPopup.centerYAnchor constraintEqualToAnchor:statusLabel.centerYAnchor],
     ]];
 
     self.panel = panel;
-
-    // Update status
     [self updateStatusLabel];
+    [self updatePaletteChromeAnimated:NO];
 }
 
 - (void)updateStatusLabel {
     NSUInteger count = self.filteredCommands.count;
-    NSString *text = [NSString stringWithFormat:@"%lu command%@ | Return to execute | Tab for AI | Esc to close",
+    NSString *text = [NSString stringWithFormat:@"%lu command%@ ready  |  Return executes  |  Tab asks AI",
                       (unsigned long)count, count == 1 ? @"" : @"s"];
-    if (self.aiLoading) {
+    if (self.dictationActive) {
+        text = @"Listening... Speak naturally to search or ask SpliceKit.";
+    } else if (self.aiLoading) {
         if ((self.aiEngine == SpliceKitAIEngineGemma4 || self.aiEngine == SpliceKitAIEngineAppleAgentic)
             && self.gemmaCurrentTask.length > 0) {
             text = self.gemmaCurrentTask;
@@ -1021,8 +1847,448 @@ static NSString * const kSeparatorRowID = @"FCPSeparatorRow";
             text = [NSString stringWithFormat:@"AI suggested %lu action%@ | Return to execute",
                     (unsigned long)self.aiResults.count, self.aiResults.count == 1 ? @"" : @"s"];
         }
+    } else if (self.searchField.stringValue.length == 0 && !self.inBrowseMode) {
+        text = @"Try “blade clip”, “open transcript”, or tap the mic for Siri-style dictation.";
     }
     self.statusLabel.stringValue = text;
+    [self updatePaletteChromeAnimated:YES];
+}
+
+- (void)updatePaletteChromeAnimated:(BOOL)animated {
+    if (!self.searchChromeView || !self.dictationButton) return;
+
+    NSColor *border = self.dictationActive
+        ? FCPPaletteColor(0.58, 0.80, 1.0, 0.34)
+        : (self.aiLoading ? FCPPaletteColor(0.69, 0.73, 1.0, 0.24) : FCPPaletteColor(1.0, 1.0, 1.0, 0.18));
+    NSColor *background = self.dictationActive
+        ? FCPPaletteColor(0.20, 0.25, 0.40, 0.08)
+        : FCPPaletteColor(0.10, 0.12, 0.22, 0.03);
+
+    self.searchChromeView.layer.borderColor = border.CGColor;
+    self.searchChromeView.layer.backgroundColor = background.CGColor;
+    self.searchChromeView.layer.shadowOpacity = self.dictationActive ? 0.20 : (self.aiLoading ? 0.16 : 0.12);
+
+    NSArray *bodyColors = self.dictationActive
+        ? @[
+            (__bridge id)FCPPaletteColor(0.28, 0.37, 0.62, 0.10).CGColor,
+            (__bridge id)FCPPaletteColor(0.16, 0.22, 0.40, 0.05).CGColor,
+            (__bridge id)FCPPaletteColor(0.10, 0.13, 0.24, 0.02).CGColor
+        ]
+        : (self.aiLoading
+            ? @[
+                (__bridge id)FCPPaletteColor(0.34, 0.34, 0.60, 0.08).CGColor,
+                (__bridge id)FCPPaletteColor(0.18, 0.18, 0.34, 0.04).CGColor,
+                (__bridge id)FCPPaletteColor(0.10, 0.10, 0.18, 0.015).CGColor
+            ]
+            : @[
+                (__bridge id)FCPPaletteColor(0.26, 0.31, 0.54, 0.06).CGColor,
+                (__bridge id)FCPPaletteColor(0.15, 0.18, 0.31, 0.03).CGColor,
+                (__bridge id)FCPPaletteColor(0.09, 0.11, 0.18, 0.015).CGColor
+            ]);
+    self.searchBodyLayer.colors = bodyColors;
+    self.searchEdgeLayer.borderColor = border.CGColor;
+    self.searchGlossLayer.opacity = self.dictationActive ? 0.78 : (self.aiLoading ? 0.68 : 0.56);
+    self.shellTintLayer.opacity = self.dictationActive ? 0.45 : 0.28;
+
+    NSString *symbolName = self.dictationActive ? @"stop.fill" : @"mic.fill";
+    self.dictationButton.image = [NSImage imageWithSystemSymbolName:symbolName accessibilityDescription:@"Voice dictation"];
+    self.dictationButton.contentTintColor = self.dictationActive
+        ? FCPPaletteColor(0.96, 0.98, 1.0, 0.96)
+        : FCPPaletteColor(0.96, 0.97, 1.0, 0.68);
+    self.dictationButton.layer.backgroundColor = self.dictationActive
+        ? FCPPaletteColor(0.42, 0.61, 0.98, 0.20).CGColor
+        : FCPPaletteColor(1.0, 1.0, 1.0, 0.03).CGColor;
+    self.dictationButton.layer.borderColor = self.dictationActive
+        ? FCPPaletteColor(0.70, 0.84, 1.0, 0.30).CGColor
+        : FCPPaletteColor(1.0, 1.0, 1.0, 0.12).CGColor;
+
+    if (self.dictationActive && ![self.dictationButton.layer animationForKey:@"pulse"]) {
+        CABasicAnimation *pulse = [CABasicAnimation animationWithKeyPath:@"transform.scale"];
+        pulse.fromValue = @1.0;
+        pulse.toValue = @1.08;
+        pulse.autoreverses = YES;
+        pulse.repeatCount = HUGE_VALF;
+        pulse.duration = 0.85;
+        pulse.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
+        [self.dictationButton.layer addAnimation:pulse forKey:@"pulse"];
+    } else if (!self.dictationActive) {
+        [self.dictationButton.layer removeAnimationForKey:@"pulse"];
+    }
+}
+
+- (SpliceKitCommand *)commandNamed:(NSString *)name {
+    if (name.length == 0) return nil;
+    for (SpliceKitCommand *cmd in self.masterCommands) {
+        if ([cmd.name isEqualToString:name]) return cmd;
+    }
+    return nil;
+}
+
+- (NSArray<SpliceKitCommand *> *)starterSuggestionCommands {
+    NSMutableArray<SpliceKitCommand *> *starter = [NSMutableArray array];
+    for (NSString *name in @[@"Blade", @"Open Transcript Editor", @"Remove Silences"]) {
+        SpliceKitCommand *cmd = [self commandNamed:name];
+        if (cmd) [starter addObject:cmd];
+    }
+    return starter;
+}
+
+- (NSArray<SpliceKitCommand *> *)topDisplayCommandsWithLimit:(NSUInteger)limit {
+    NSMutableArray<SpliceKitCommand *> *results = [NSMutableArray array];
+    for (SpliceKitCommand *cmd in self.filteredCommands) {
+        if (cmd.isSeparatorRow) continue;
+        [results addObject:cmd];
+        if (results.count >= limit) break;
+    }
+    return results;
+}
+
+- (NSArray<SpliceKitCommand *> *)continuerCommandsForCommand:(SpliceKitCommand *)command limit:(NSUInteger)limit {
+    NSMutableArray<SpliceKitCommand *> *results = [NSMutableArray array];
+    if (!command) return results;
+    for (SpliceKitCommand *candidate in self.masterCommands) {
+        if (candidate == command || candidate.isSeparatorRow) continue;
+        if (candidate.category == command.category) {
+            [results addObject:candidate];
+            if (results.count >= limit) break;
+        }
+    }
+    return results;
+}
+
+- (void)clearBubbleStack:(NSStackView *)stack {
+    NSArray<NSView *> *views = stack.arrangedSubviews.copy;
+    for (NSView *view in views) {
+        [stack removeArrangedSubview:view];
+        [view removeFromSuperview];
+    }
+}
+
+- (void)populateBubbleStack:(NSStackView *)stack
+               withCommands:(NSArray<SpliceKitCommand *> *)commands
+                   animated:(BOOL)animated
+                   emphasis:(BOOL)emphasis {
+    [self clearBubbleStack:stack];
+    for (NSUInteger idx = 0; idx < commands.count; idx++) {
+        SpliceKitSuggestionBubbleView *bubble = [[SpliceKitSuggestionBubbleView alloc] initWithFrame:NSZeroRect];
+        [bubble configureWithCommand:commands[idx] emphasis:(emphasis && idx == 0)];
+        [stack addArrangedSubview:bubble];
+        [bubble.heightAnchor constraintEqualToConstant:48.0].active = YES;
+        if (animated) {
+            bubble.alphaValue = 0.0;
+            bubble.hidden = NO;
+            bubble.wantsLayer = YES;
+            bubble.layer.transform = CATransform3DMakeTranslation(0.0, 10.0, 0.0);
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.03 * idx * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                [NSAnimationContext runAnimationGroup:^(NSAnimationContext *context) {
+                    context.duration = 0.22;
+                    context.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseOut];
+                    bubble.animator.alphaValue = 1.0;
+                } completionHandler:nil];
+                [CATransaction begin];
+                [CATransaction setAnimationDuration:0.26];
+                bubble.layer.transform = CATransform3DIdentity;
+                [CATransaction commit];
+            });
+        }
+    }
+}
+
+- (void)animatePresentationView:(NSView *)view
+                        visible:(BOOL)visible
+                       animated:(BOOL)animated
+                          delay:(NSTimeInterval)delay
+                        yOffset:(CGFloat)yOffset
+                          scale:(CGFloat)scale {
+    if (!view) return;
+    view.wantsLayer = YES;
+    if (!animated) {
+        view.hidden = !visible;
+        view.alphaValue = visible ? 1.0 : 0.0;
+        view.layer.transform = CATransform3DIdentity;
+        return;
+    }
+
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        if (visible) {
+            view.hidden = NO;
+            view.alphaValue = 0.0;
+            view.layer.transform = CATransform3DConcat(CATransform3DMakeTranslation(0.0, yOffset, 0.0),
+                                                       CATransform3DMakeScale(scale, scale, 1.0));
+            [NSAnimationContext runAnimationGroup:^(NSAnimationContext *context) {
+                context.duration = 0.22;
+                context.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseOut];
+                view.animator.alphaValue = 1.0;
+            } completionHandler:nil];
+            [CATransaction begin];
+            [CATransaction setAnimationDuration:0.28];
+            [CATransaction setAnimationTimingFunction:[CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseOut]];
+            view.layer.transform = CATransform3DIdentity;
+            [CATransaction commit];
+        } else if (!view.hidden) {
+            [NSAnimationContext runAnimationGroup:^(NSAnimationContext *context) {
+                context.duration = 0.14;
+                context.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseIn];
+                view.animator.alphaValue = 0.0;
+            } completionHandler:^{
+                view.hidden = YES;
+            }];
+            [CATransaction begin];
+            [CATransaction setAnimationDuration:0.16];
+            [CATransaction setAnimationTimingFunction:[CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseIn]];
+            view.layer.transform = CATransform3DConcat(CATransform3DMakeTranslation(0.0, yOffset, 0.0),
+                                                       CATransform3DMakeScale(scale, scale, 1.0));
+            [CATransaction commit];
+        }
+    });
+}
+
+- (NSString *)aiEngineDisplayName {
+    switch (self.aiEngine) {
+        case SpliceKitAIEngineGemma4: return @"Gemma 4";
+        case SpliceKitAIEngineAppleAgentic: return @"Apple Intelligence+";
+        case SpliceKitAIEngineAppleIntelligence:
+        default: return @"Apple Intelligence";
+    }
+}
+
+- (void)updateHeroStageAnimated:(BOOL)animated {
+    if (!self.heroStageView || self.commandCommitAnimating) return;
+
+    NSString *query = [self.searchField.stringValue stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    SpliceKitPalettePresentationState targetState = SpliceKitPalettePresentationStateStarterSuggestions;
+    NSArray<SpliceKitCommand *> *heroSuggestions = @[];
+    NSArray<SpliceKitCommand *> *heroContinuer = @[];
+    NSString *latencyText = @"";
+    NSString *resultTitle = @"";
+    NSString *resultSubtitle = @"";
+    NSString *resultBadge = @"";
+    NSString *resultFootnote = @"";
+    NSString *resultSymbol = @"sparkles";
+    NSColor *resultAccent = FCPPaletteColor(0.61, 0.61, 0.99, 0.95);
+
+    if (self.aiLoading || self.dictationActive) {
+        targetState = SpliceKitPalettePresentationStateLatencyPill;
+    } else if (self.aiResults.count > 0) {
+        targetState = SpliceKitPalettePresentationStateResultPlatter;
+    } else if (query.length > 0) {
+        targetState = SpliceKitPalettePresentationStateTypingSuggestions;
+    }
+
+    self.presentationState = targetState;
+
+    CGFloat scrollAlpha = 1.0;
+    CGFloat heroStageHeight = 60.0;
+    switch (targetState) {
+        case SpliceKitPalettePresentationStateStarterSuggestions: {
+            heroSuggestions = [self starterSuggestionCommands];
+            [self animatePresentationView:self.heroSuggestionStackView visible:YES animated:animated delay:0.0 yOffset:8.0 scale:0.98];
+            [self animatePresentationView:self.heroLatencyPillView visible:NO animated:animated delay:0.0 yOffset:-8.0 scale:0.96];
+            [self animatePresentationView:self.heroResultPlatterView visible:NO animated:animated delay:0.0 yOffset:-10.0 scale:0.96];
+            [self animatePresentationView:self.heroContinuerStackView visible:NO animated:animated delay:0.0 yOffset:6.0 scale:0.98];
+            scrollAlpha = 1.0;
+            break;
+        }
+        case SpliceKitPalettePresentationStateTypingSuggestions: {
+            heroStageHeight = 138.0;
+            NSArray<SpliceKitCommand *> *commands = [self topDisplayCommandsWithLimit:4];
+            SpliceKitCommand *preview = commands.firstObject;
+            heroContinuer = commands.count > 1
+                ? [commands subarrayWithRange:NSMakeRange(1, MIN((NSUInteger)3, commands.count - 1))]
+                : [self starterSuggestionCommands];
+            resultTitle = preview.name ?: @"No exact command yet";
+            resultSubtitle = preview.detail ?: @"Press Tab to ask Apple Intelligence+ or keep typing.";
+            resultBadge = preview.categoryName ?: @"Suggestions";
+            resultFootnote = preview ? @"Return executes · arrows browse" : @"Tab asks AI when the command list runs out";
+            resultSymbol = preview ? FCPCommandSymbolName(preview) : @"sparkles";
+            resultAccent = preview ? FCPCommandAccentColor(preview) : FCPPaletteColor(0.61, 0.61, 0.99, 0.95);
+            [self animatePresentationView:self.heroSuggestionStackView visible:NO animated:animated delay:0.0 yOffset:-8.0 scale:0.97];
+            [self animatePresentationView:self.heroLatencyPillView visible:NO animated:animated delay:0.0 yOffset:-8.0 scale:0.96];
+            [self animatePresentationView:self.heroResultPlatterView visible:YES animated:animated delay:0.0 yOffset:10.0 scale:0.97];
+            [self animatePresentationView:self.heroContinuerStackView visible:YES animated:animated delay:0.05 yOffset:8.0 scale:0.98];
+            scrollAlpha = 0.92;
+            break;
+        }
+        case SpliceKitPalettePresentationStateLatencyPill: {
+            heroStageHeight = 60.0;
+            latencyText = query.length > 0 ? query : (self.gemmaCurrentTask ?: @"Working...");
+            [self animatePresentationView:self.heroSuggestionStackView visible:NO animated:animated delay:0.0 yOffset:-8.0 scale:0.97];
+            [self animatePresentationView:self.heroResultPlatterView visible:NO animated:animated delay:0.0 yOffset:-8.0 scale:0.95];
+            [self animatePresentationView:self.heroContinuerStackView visible:NO animated:animated delay:0.0 yOffset:8.0 scale:0.98];
+            [self animatePresentationView:self.heroLatencyPillView visible:YES animated:animated delay:0.02 yOffset:12.0 scale:0.94];
+            scrollAlpha = 0.74;
+            break;
+        }
+        case SpliceKitPalettePresentationStateResultPlatter: {
+            heroStageHeight = 138.0;
+            NSString *title = @"AI Result";
+            NSString *subtitle = @"Done.";
+            NSString *badge = [self aiEngineDisplayName];
+            if (self.aiResults.count == 1 && [self.aiResults[0][@"type"] isEqualToString:@"gemma_summary"]) {
+                subtitle = self.aiResults[0][@"summary"] ?: @"Done.";
+            } else if (self.aiResults.count > 0) {
+                title = [NSString stringWithFormat:@"%lu action%@ ready",
+                         (unsigned long)self.aiResults.count, self.aiResults.count == 1 ? @"" : @"s"];
+                subtitle = @"Press Return to execute the generated action chain.";
+            }
+            heroContinuer = [self topDisplayCommandsWithLimit:3];
+            resultTitle = title;
+            resultSubtitle = subtitle;
+            resultBadge = badge;
+            resultFootnote = @"Return executes · Tab refines";
+            [self animatePresentationView:self.heroSuggestionStackView visible:NO animated:animated delay:0.0 yOffset:-8.0 scale:0.97];
+            [self animatePresentationView:self.heroLatencyPillView visible:NO animated:animated delay:0.0 yOffset:-10.0 scale:0.92];
+            [self animatePresentationView:self.heroResultPlatterView visible:YES animated:animated delay:0.02 yOffset:10.0 scale:0.95];
+            [self animatePresentationView:self.heroContinuerStackView visible:YES animated:animated delay:0.08 yOffset:8.0 scale:0.98];
+            scrollAlpha = 0.76;
+            break;
+        }
+        case SpliceKitPalettePresentationStateHidden:
+        default:
+            break;
+    }
+
+    NSString *signature = [NSString stringWithFormat:@"%ld|%@|%@|%@|%@|%@|%@|%@|%.3f",
+                           (long)targetState,
+                           query,
+                           latencyText,
+                           resultTitle,
+                           resultSubtitle,
+                           FCPCommandListSignature(heroSuggestions),
+                           FCPCommandListSignature(heroContinuer),
+                           resultBadge,
+                           scrollAlpha];
+    if ([self.heroStageSignature isEqualToString:signature]) {
+        if (!animated) {
+            self.scrollView.alphaValue = scrollAlpha;
+        }
+        return;
+    }
+    self.heroStageSignature = signature;
+
+    if (heroSuggestions.count > 0) {
+        [self populateBubbleStack:self.heroSuggestionStackView
+                     withCommands:heroSuggestions
+                         animated:animated
+                         emphasis:NO];
+    } else {
+        [self clearBubbleStack:self.heroSuggestionStackView];
+    }
+    if (heroContinuer.count > 0) {
+        [self populateBubbleStack:self.heroContinuerStackView withCommands:heroContinuer animated:animated emphasis:YES];
+    } else {
+        [self clearBubbleStack:self.heroContinuerStackView];
+    }
+    if (latencyText.length > 0) {
+        [self.heroLatencyPillView configureWithText:latencyText];
+    }
+    if (resultTitle.length > 0 || resultSubtitle.length > 0) {
+        [self.heroResultPlatterView configureWithTitle:resultTitle
+                                              subtitle:resultSubtitle
+                                                 badge:resultBadge
+                                              footnote:resultFootnote
+                                            symbolName:resultSymbol
+                                                accent:resultAccent];
+    }
+
+    if (animated) {
+        [NSAnimationContext runAnimationGroup:^(NSAnimationContext *context) {
+            context.duration = 0.20;
+            context.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
+            self.heroStageHeightConstraint.animator.constant = heroStageHeight;
+        } completionHandler:nil];
+    } else {
+        self.heroStageHeightConstraint.constant = heroStageHeight;
+    }
+
+    if (animated) {
+        [NSAnimationContext runAnimationGroup:^(NSAnimationContext *context) {
+            context.duration = 0.18;
+            context.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
+            self.scrollView.animator.alphaValue = scrollAlpha;
+        } completionHandler:nil];
+    } else {
+        self.scrollView.alphaValue = scrollAlpha;
+    }
+}
+
+- (void)performAnimatedExecutionForCommand:(SpliceKitCommand *)cmd {
+    if (!cmd || self.commandCommitAnimating) return;
+
+    self.commandCommitAnimating = YES;
+    self.presentationGeneration += 1;
+    NSUInteger generation = self.presentationGeneration;
+    self.searchField.stringValue = cmd.name ?: @"";
+    [self.heroLatencyPillView configureWithText:cmd.name ?: @"Working..."];
+    [self animatePresentationView:self.heroSuggestionStackView visible:NO animated:YES delay:0.0 yOffset:-8.0 scale:0.97];
+    [self animatePresentationView:self.heroContinuerStackView visible:NO animated:YES delay:0.0 yOffset:8.0 scale:0.98];
+    [self animatePresentationView:self.heroResultPlatterView visible:NO animated:YES delay:0.0 yOffset:-8.0 scale:0.95];
+    [self animatePresentationView:self.heroLatencyPillView visible:YES animated:YES delay:0.0 yOffset:12.0 scale:0.94];
+    [NSAnimationContext runAnimationGroup:^(NSAnimationContext *context) {
+        context.duration = 0.16;
+        self.scrollView.animator.alphaValue = 0.70;
+    } completionHandler:nil];
+
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.22 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        if (generation != self.presentationGeneration) return;
+        NSArray<SpliceKitCommand *> *continuer = [self continuerCommandsForCommand:cmd limit:3];
+        [self.heroResultPlatterView configureWithTitle:(cmd.name ?: @"Ready")
+                                              subtitle:(cmd.detail ?: @"Command prepared.")
+                                                 badge:(cmd.categoryName ?: @"Command")
+                                              footnote:@"Executing now"
+                                            symbolName:FCPCommandSymbolName(cmd)
+                                                accent:FCPCommandAccentColor(cmd)];
+        [self populateBubbleStack:self.heroContinuerStackView withCommands:continuer animated:YES emphasis:YES];
+        [self animatePresentationView:self.heroLatencyPillView visible:NO animated:YES delay:0.0 yOffset:-10.0 scale:0.92];
+        [self animatePresentationView:self.heroResultPlatterView visible:YES animated:YES delay:0.0 yOffset:10.0 scale:0.95];
+        [self animatePresentationView:self.heroContinuerStackView visible:YES animated:YES delay:0.06 yOffset:8.0 scale:0.98];
+    });
+
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.64 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        if (generation != self.presentationGeneration) return;
+        self.commandCommitAnimating = NO;
+        [self hidePalette];
+        [self executeCommand:cmd.action type:cmd.type];
+    });
+}
+
+- (void)animateResultsRefresh {
+    if (!self.scrollView) return;
+    self.scrollView.alphaValue = 0.88;
+    self.scrollView.layer.transform = CATransform3DMakeTranslation(0.0, -4.0, 0.0);
+    [NSAnimationContext runAnimationGroup:^(NSAnimationContext *context) {
+        context.duration = 0.18;
+        context.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
+        self.scrollView.animator.alphaValue = 1.0;
+    } completionHandler:nil];
+    [CATransaction begin];
+    [CATransaction setAnimationDuration:0.18];
+    self.scrollView.layer.transform = CATransform3DIdentity;
+    [CATransaction commit];
+}
+
+- (void)animatePaletteShow {
+    self.panel.alphaValue = 0.0;
+    self.backgroundView.layer.transform = CATransform3DMakeScale(0.985, 0.985, 1.0);
+    [self.panel makeKeyAndOrderFront:nil];
+    [NSAnimationContext runAnimationGroup:^(NSAnimationContext *context) {
+        context.duration = 0.16;
+        context.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseOut];
+        self.panel.animator.alphaValue = 1.0;
+    } completionHandler:nil];
+    [CATransaction begin];
+    [CATransaction setAnimationDuration:0.20];
+    self.backgroundView.layer.transform = CATransform3DIdentity;
+    [CATransaction commit];
+}
+
+- (void)animatePaletteHideWithCompletion:(dispatch_block_t)completion {
+    [NSAnimationContext runAnimationGroup:^(NSAnimationContext *context) {
+        context.duration = 0.12;
+        self.panel.animator.alphaValue = 0.0;
+    } completionHandler:^{
+        if (completion) completion();
+    }];
 }
 
 #pragma mark - Show / Hide
@@ -1030,7 +2296,11 @@ static NSString * const kSeparatorRowID = @"FCPSeparatorRow";
 - (void)showPalette {
     [self buildPanelIfNeeded];
     self.searchField.stringValue = @"";
-    self.searchField.placeholderString = @"Type a command or describe what you want to do...";
+    self.searchField.placeholderAttributedString = [[NSAttributedString alloc] initWithString:@"Ask SpliceKit or type a command"
+                                                                                  attributes:@{
+        NSForegroundColorAttributeName: FCPPaletteColor(0.92, 0.95, 1.0, 0.42),
+        NSFontAttributeName: [NSFont systemFontOfSize:20 weight:NSFontWeightSemibold]
+    }];
     self.inBrowseMode = NO;
     self.allCommands = self.masterCommands;
     self.filteredCommands = self.allCommands;
@@ -1040,6 +2310,9 @@ static NSString * const kSeparatorRowID = @"FCPSeparatorRow";
     self.aiError = nil;
     self.gemmaCancelled = NO;
     self.gemmaCurrentTask = nil;
+    self.commandCommitAnimating = NO;
+    self.heroStageSignature = nil;
+    self.presentationGeneration += 1;
     [self.tableView reloadData];
     [self updateStatusLabel];
 
@@ -1057,7 +2330,9 @@ static NSString * const kSeparatorRowID = @"FCPSeparatorRow";
         [self.panel setFrameOrigin:NSMakePoint(x, y)];
     }
 
-    [self.panel makeKeyAndOrderFront:nil];
+    [self updatePaletteChromeAnimated:NO];
+    [self updateHeroStageAnimated:NO];
+    [self animatePaletteShow];
     [self.panel makeFirstResponder:self.searchField];
 
     // Select first row
@@ -1066,7 +2341,6 @@ static NSString * const kSeparatorRowID = @"FCPSeparatorRow";
                     byExtendingSelection:NO];
     }
 
-    // Install local event monitor for Escape and Return
     if (!self.localEventMonitor) {
         __weak typeof(self) weakSelf = self;
         self.localEventMonitor = [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskKeyDown
@@ -1080,7 +2354,9 @@ static NSString * const kSeparatorRowID = @"FCPSeparatorRow";
                         weakSelf.gemmaCancelled = YES;
                         return nil;
                     }
-                    if (weakSelf.inBrowseMode) {
+                    if (weakSelf.dictationActive) {
+                        [weakSelf stopDictation];
+                    } else if (weakSelf.inBrowseMode) {
                         [weakSelf exitBrowseMode];
                     } else {
                         [weakSelf hidePalette];
@@ -1132,14 +2408,18 @@ static NSString * const kSeparatorRowID = @"FCPSeparatorRow";
 }
 
 - (void)hidePalette {
-    // Save position and size
     [[NSUserDefaults standardUserDefaults] setObject:[self.panel stringWithSavedFrame]
                                               forKey:@"SpliceKitCommandPaletteFrame"];
-    [self.panel orderOut:nil];
-    if (self.localEventMonitor) {
-        [NSEvent removeMonitor:self.localEventMonitor];
-        self.localEventMonitor = nil;
-    }
+    self.presentationGeneration += 1;
+    self.commandCommitAnimating = NO;
+    [self stopDictation];
+    [self animatePaletteHideWithCompletion:^{
+        [self.panel orderOut:nil];
+        if (self.localEventMonitor) {
+            [NSEvent removeMonitor:self.localEventMonitor];
+            self.localEventMonitor = nil;
+        }
+    }];
 }
 
 - (void)togglePalette {
@@ -1159,6 +2439,7 @@ static NSString * const kSeparatorRowID = @"FCPSeparatorRow";
 - (void)windowWillClose:(NSNotification *)notification {
     [[NSUserDefaults standardUserDefaults] setObject:[self.panel stringWithSavedFrame]
                                               forKey:@"SpliceKitCommandPaletteFrame"];
+    [self stopDictation];
     if (self.localEventMonitor) {
         [NSEvent removeMonitor:self.localEventMonitor];
         self.localEventMonitor = nil;
@@ -1208,7 +2489,9 @@ static NSString * const kSeparatorRowID = @"FCPSeparatorRow";
         return YES;
     }
     if (commandSelector == @selector(cancelOperation:)) {
-        if (self.inBrowseMode) {
+        if (self.dictationActive) {
+            [self stopDictation];
+        } else if (self.inBrowseMode) {
             [self exitBrowseMode];
         } else {
             [self hidePalette];
@@ -1287,7 +2570,7 @@ static NSString *FCPStripStopWords(NSString *query) {
     return results;
 }
 
-- (void)controlTextDidChange:(NSNotification *)notification {
+- (void)refreshSearchResultsForCurrentQuery {
     NSString *query = self.searchField.stringValue;
     if (self.inBrowseMode && self.rawBrowseCommands) {
         if (query.length > 0) {
@@ -1312,6 +2595,8 @@ static NSString *FCPStripStopWords(NSString *query) {
 
     [self.tableView reloadData];
     [self updateStatusLabel];
+    [self updateHeroStageAnimated:YES];
+    [self animateResultsRefresh];
 
     // Auto-select first row
     if (self.filteredCommands.count > 0) {
@@ -1321,8 +2606,9 @@ static NSString *FCPStripStopWords(NSString *query) {
 
     // Debounced AI auto-trigger: only after 0.8s pause, no matches, and not already answered
     [self.aiDebounceTimer invalidate];
-    if (query.length > 10 && [query containsString:@" "] &&
+        if (query.length > 10 && [query containsString:@" "] &&
         self.filteredCommands.count == 0 && !self.aiLoading &&
+        !self.dictationActive &&
         ![query isEqualToString:self.aiCompletedQuery]) {
         self.aiDebounceTimer = [NSTimer scheduledTimerWithTimeInterval:0.8
             target:self selector:@selector(aiDebounceTimerFired:)
@@ -1330,11 +2616,173 @@ static NSString *FCPStripStopWords(NSString *query) {
     }
 }
 
+- (void)controlTextDidChange:(NSNotification *)notification {
+    [self refreshSearchResultsForCurrentQuery];
+}
+
 - (void)aiDebounceTimerFired:(NSTimer *)timer {
     NSString *query = timer.userInfo;
     if ([query isEqualToString:self.searchField.stringValue] && !self.aiLoading) {
         [self triggerAI:query];
     }
+}
+
+#pragma mark - Voice Dictation
+
+- (void)toggleDictation:(id)sender {
+    if (self.dictationActive) {
+        [self stopDictation];
+    } else {
+        [self startDictation];
+    }
+}
+
+- (void)requestDictationPermissions:(void (^)(BOOL, NSString *))completion {
+    [SFSpeechRecognizer requestAuthorization:^(SFSpeechRecognizerAuthorizationStatus status) {
+        if (status != SFSpeechRecognizerAuthorizationStatusAuthorized) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                completion(NO, @"Speech recognition permission is disabled for this Final Cut Pro build.");
+            });
+            return;
+        }
+
+        AVAuthorizationStatus micStatus = [AVCaptureDevice authorizationStatusForMediaType:AVMediaTypeAudio];
+        if (micStatus == AVAuthorizationStatusAuthorized) {
+            dispatch_async(dispatch_get_main_queue(), ^{ completion(YES, nil); });
+            return;
+        }
+        if (micStatus == AVAuthorizationStatusDenied || micStatus == AVAuthorizationStatusRestricted) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                completion(NO, @"Microphone permission is disabled for this Final Cut Pro build.");
+            });
+            return;
+        }
+
+        [AVCaptureDevice requestAccessForMediaType:AVMediaTypeAudio completionHandler:^(BOOL granted) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                completion(granted, granted ? nil : @"Microphone permission is required for palette dictation.");
+            });
+        }];
+    }];
+}
+
+- (void)startDictation {
+    if (self.dictationActive) return;
+
+    __weak typeof(self) weakSelf = self;
+    [self requestDictationPermissions:^(BOOL granted, NSString *message) {
+        if (!granted) {
+            weakSelf.aiError = message;
+            [weakSelf updateStatusLabel];
+            return;
+        }
+
+        [weakSelf stopDictation];
+
+        weakSelf.dictationRecognizer = [[SFSpeechRecognizer alloc] initWithLocale:[NSLocale currentLocale]];
+        if (!weakSelf.dictationRecognizer || !weakSelf.dictationRecognizer.isAvailable) {
+            weakSelf.aiError = @"Apple speech dictation is unavailable right now.";
+            [weakSelf updateStatusLabel];
+            return;
+        }
+
+        weakSelf.dictationSeedQuery = [weakSelf.searchField.stringValue stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        weakSelf.dictationRequest = [[SFSpeechAudioBufferRecognitionRequest alloc] init];
+        weakSelf.dictationRequest.shouldReportPartialResults = YES;
+        weakSelf.dictationRequest.requiresOnDeviceRecognition = YES;
+        weakSelf.dictationRequest.taskHint = SFSpeechRecognitionTaskHintDictation;
+        SEL punctuationSel = NSSelectorFromString(@"setAddsPunctuation:");
+        if ([weakSelf.dictationRequest respondsToSelector:punctuationSel]) {
+            ((void (*)(id, SEL, BOOL))objc_msgSend)(weakSelf.dictationRequest, punctuationSel, YES);
+        }
+
+        weakSelf.dictationAudioEngine = [[AVAudioEngine alloc] init];
+        AVAudioInputNode *inputNode = weakSelf.dictationAudioEngine.inputNode;
+        if (!inputNode) {
+            weakSelf.aiError = @"No audio input device is available for dictation.";
+            [weakSelf updateStatusLabel];
+            return;
+        }
+
+        AVAudioFormat *format = [inputNode outputFormatForBus:0];
+        [inputNode removeTapOnBus:0];
+        [inputNode installTapOnBus:0
+                        bufferSize:1024
+                            format:format
+                             block:^(AVAudioPCMBuffer *buffer, AVAudioTime *when) {
+            [weakSelf.dictationRequest appendAudioPCMBuffer:buffer];
+        }];
+
+        NSError *startError = nil;
+        [weakSelf.dictationAudioEngine prepare];
+        if (![weakSelf.dictationAudioEngine startAndReturnError:&startError]) {
+            [inputNode removeTapOnBus:0];
+            weakSelf.aiError = startError.localizedDescription ?: @"Could not start audio engine for dictation.";
+            [weakSelf updateStatusLabel];
+            return;
+        }
+
+        weakSelf.dictationActive = YES;
+        weakSelf.aiError = nil;
+        [weakSelf updateStatusLabel];
+        [weakSelf updateHeroStageAnimated:YES];
+        [weakSelf.panel makeFirstResponder:weakSelf.searchField];
+
+        weakSelf.dictationTask = [weakSelf.dictationRecognizer recognitionTaskWithRequest:weakSelf.dictationRequest
+                                                                            resultHandler:^(SFSpeechRecognitionResult *result, NSError *error) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (result) {
+                    [weakSelf handleDictationText:result.bestTranscription.formattedString
+                                            final:result.isFinal];
+                }
+                if (error) {
+                    weakSelf.aiError = error.localizedDescription ?: @"Voice dictation stopped unexpectedly.";
+                }
+                if (error || result.isFinal) {
+                    [weakSelf stopDictation];
+                }
+            });
+        }];
+    }];
+}
+
+- (void)handleDictationText:(NSString *)text final:(BOOL)isFinal {
+    NSString *spoken = [text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    NSString *combined = spoken ?: @"";
+    if (self.dictationSeedQuery.length > 0) {
+        combined = spoken.length > 0
+            ? [NSString stringWithFormat:@"%@ %@", self.dictationSeedQuery, spoken]
+            : self.dictationSeedQuery;
+    }
+
+    self.searchField.stringValue = combined ?: @"";
+    [self refreshSearchResultsForCurrentQuery];
+    [self.panel makeFirstResponder:self.searchField];
+
+    if (isFinal && combined.length > 0) {
+        self.aiError = nil;
+    }
+}
+
+- (void)stopDictation {
+    if (self.dictationAudioEngine) {
+        AVAudioInputNode *inputNode = self.dictationAudioEngine.inputNode;
+        [inputNode removeTapOnBus:0];
+        if (self.dictationAudioEngine.isRunning) {
+            [self.dictationAudioEngine stop];
+        }
+    }
+
+    [self.dictationRequest endAudio];
+    [self.dictationTask cancel];
+    self.dictationTask = nil;
+    self.dictationRequest = nil;
+    self.dictationRecognizer = nil;
+    self.dictationAudioEngine = nil;
+    self.dictationSeedQuery = nil;
+    self.dictationActive = NO;
+    [self updateStatusLabel];
+    [self updateHeroStageAnimated:YES];
 }
 
 #pragma mark - NSTableView DataSource / Delegate
@@ -1419,6 +2867,13 @@ static NSString *FCPStripStopWords(NSString *query) {
     return cell;
 }
 
+- (NSTableRowView *)tableView:(NSTableView *)tableView rowViewForRow:(NSInteger)row {
+    SpliceKitPaletteRowView *rowView = [[SpliceKitPaletteRowView alloc] initWithFrame:NSZeroRect];
+    SpliceKitCommand *cmd = [self commandForDisplayRow:row];
+    rowView.separatorRow = cmd.isSeparatorRow;
+    return rowView;
+}
+
 - (CGFloat)tableView:(NSTableView *)tableView heightOfRow:(NSInteger)row {
     SpliceKitCommand *cmd = [self commandForDisplayRow:row];
     if (cmd && cmd.isSeparatorRow) return 20;
@@ -1435,16 +2890,20 @@ static NSString *FCPStripStopWords(NSString *query) {
                                               attributes:@{NSFontAttributeName: font}
                                                  context:nil];
         CGFloat height = ceil(boundingRect.size.height) + 20; // 8 top + 8 bottom + 4 padding
-        return MAX(height, 40);
+        return MAX(height, 48);
     }
 
-    return 40;
+    return 62;
 }
 
 - (BOOL)tableView:(NSTableView *)tableView shouldSelectRow:(NSInteger)row {
     SpliceKitCommand *cmd = [self commandForDisplayRow:row];
     if (cmd && cmd.isSeparatorRow) return NO;
     return YES;
+}
+
+- (void)tableViewSelectionDidChange:(NSNotification *)notification {
+    // The hero stage is derived from query/AI state, not transient table selection.
 }
 
 #pragma mark - Execute
@@ -1486,8 +2945,7 @@ static NSString *FCPStripStopWords(NSString *query) {
         [self enterFavoritesBrowseMode];
         return;
     }
-    [self hidePalette];
-    [self executeCommand:cmd.action type:cmd.type];
+    [self performAnimatedExecutionForCommand:cmd];
 }
 
 - (NSDictionary *)executeCommand:(NSString *)action type:(NSString *)type {
@@ -3228,6 +4686,7 @@ static NSString *FCPFavoriteKey(NSString *type, NSString *action) {
     self.aiError = nil;
     [self.tableView reloadData];
     [self updateStatusLabel];
+    [self updateHeroStageAnimated:YES];
 
     // Intercept repetitive patterns (all engines) — models can't reliably loop 40+ times
     if ([self handleRepeatPatternIfNeeded:query completion:^(NSString *summary, NSString *error) {
@@ -3240,6 +4699,7 @@ static NSString *FCPFavoriteKey(NSString *type, NSString *action) {
         }
         [self.tableView reloadData];
         [self updateStatusLabel];
+        [self updateHeroStageAnimated:YES];
     }]) return;
 
     // Dispatch to Gemma 4 if selected
@@ -3261,6 +4721,7 @@ static NSString *FCPFavoriteKey(NSString *type, NSString *action) {
             }
             [self.tableView reloadData];
             [self updateStatusLabel];
+            [self updateHeroStageAnimated:YES];
             if (self.aiResults.count > 0) {
                 [self.tableView selectRowIndexes:[NSIndexSet indexSetWithIndex:0]
                             byExtendingSelection:NO];
@@ -3287,6 +4748,7 @@ static NSString *FCPFavoriteKey(NSString *type, NSString *action) {
             }
             [self.tableView reloadData];
             [self updateStatusLabel];
+            [self updateHeroStageAnimated:YES];
             if (self.aiResults.count > 0) {
                 [self.tableView selectRowIndexes:[NSIndexSet indexSetWithIndex:0]
                             byExtendingSelection:NO];
@@ -3310,6 +4772,7 @@ static NSString *FCPFavoriteKey(NSString *type, NSString *action) {
         self.aiError = @"Apple Intelligence can only execute actions, not answer questions. Switch to Gemma 4 for questions.";
         [self.tableView reloadData];
         [self updateStatusLabel];
+        [self updateHeroStageAnimated:YES];
         SpliceKit_log(@"[AppleAI] Question detected — Apple Intelligence cannot answer questions, suggesting Gemma 4");
         return;
     }
@@ -3343,6 +4806,7 @@ static NSString *FCPFavoriteKey(NSString *type, NSString *action) {
         }
         [self.tableView reloadData];
         [self updateStatusLabel];
+        [self updateHeroStageAnimated:YES];
         if (self.aiResults.count > 0) {
             [self.tableView selectRowIndexes:[NSIndexSet indexSetWithIndex:0]
                         byExtendingSelection:NO];

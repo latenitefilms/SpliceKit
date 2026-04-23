@@ -905,9 +905,9 @@ class PatcherModel: ObservableObject {
             """
         try entPlist.write(toFile: entitlements, atomically: true, encoding: .utf8)
 
-        shell("/usr/libexec/PlistBuddy -c \"Add :NSSpeechRecognitionUsageDescription string 'SpliceKit uses speech recognition to transcribe timeline audio for text-based editing.'\" '\(moddedApp)/Contents/Info.plist' 2>/dev/null")
-        shell("/usr/libexec/PlistBuddy -c \"Add :NSCameraUsageDescription string 'SpliceKit LiveCam uses the camera for native webcam recording inside Final Cut Pro.'\" '\(moddedApp)/Contents/Info.plist' 2>/dev/null")
-        shell("/usr/libexec/PlistBuddy -c \"Add :NSMicrophoneUsageDescription string 'SpliceKit LiveCam uses the microphone for native webcam capture inside Final Cut Pro.'\" '\(moddedApp)/Contents/Info.plist' 2>/dev/null")
+        shell("/usr/libexec/PlistBuddy -c \"Set :NSSpeechRecognitionUsageDescription 'SpliceKit uses speech recognition for transcript editing and command palette voice dictation inside Final Cut Pro.'\" '\(moddedApp)/Contents/Info.plist' 2>/dev/null || /usr/libexec/PlistBuddy -c \"Add :NSSpeechRecognitionUsageDescription string 'SpliceKit uses speech recognition for transcript editing and command palette voice dictation inside Final Cut Pro.'\" '\(moddedApp)/Contents/Info.plist' 2>/dev/null")
+        shell("/usr/libexec/PlistBuddy -c \"Set :NSCameraUsageDescription 'SpliceKit LiveCam uses the camera for native webcam recording inside Final Cut Pro.'\" '\(moddedApp)/Contents/Info.plist' 2>/dev/null || /usr/libexec/PlistBuddy -c \"Add :NSCameraUsageDescription string 'SpliceKit LiveCam uses the camera for native webcam recording inside Final Cut Pro.'\" '\(moddedApp)/Contents/Info.plist' 2>/dev/null")
+        shell("/usr/libexec/PlistBuddy -c \"Set :NSMicrophoneUsageDescription 'SpliceKit uses the microphone for LiveCam capture and command palette voice dictation inside Final Cut Pro.'\" '\(moddedApp)/Contents/Info.plist' 2>/dev/null || /usr/libexec/PlistBuddy -c \"Add :NSMicrophoneUsageDescription string 'SpliceKit uses the microphone for LiveCam capture and command palette voice dictation inside Final Cut Pro.'\" '\(moddedApp)/Contents/Info.plist' 2>/dev/null")
 
         let quotedIdentity = shellQuote(signIdentity)
         // Sign inside-out: any nested SpliceKit plug-in bundles → framework → app.

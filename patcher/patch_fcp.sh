@@ -323,7 +323,7 @@ fi
 info "Compiling ${#SOURCES[@]} source files..."
 clang -arch arm64 -arch x86_64 \
     -mmacosx-version-min=14.0 \
-    -framework Foundation -framework AppKit -framework AVFoundation -framework CoreServices \
+    -framework Foundation -framework AppKit -framework AVFoundation -framework Speech -framework CoreServices \
     -fobjc-arc -fmodules -Wno-deprecated-declarations \
     -undefined dynamic_lookup -dynamiclib \
     -install_name @rpath/SpliceKit.framework/Versions/A/SpliceKit \
@@ -486,9 +486,10 @@ defaults write com.apple.FinalCut CloudContentFirstLaunchCompleted -bool true 2>
 defaults write com.apple.FinalCut FFCloudContentDisabled -bool true 2>/dev/null || true
 log "CloudContent defaults set"
 
-# Add speech recognition usage description for transcript feature
-/usr/libexec/PlistBuddy -c "Add :NSSpeechRecognitionUsageDescription string 'SpliceKit uses speech recognition to transcribe timeline audio for text-based editing.'" "$MODDED_APP/Contents/Info.plist" 2>/dev/null || true
-log "Speech recognition permission configured"
+# Add speech and microphone usage descriptions for transcript + command palette dictation
+/usr/libexec/PlistBuddy -c "Set :NSSpeechRecognitionUsageDescription 'SpliceKit uses speech recognition for transcript editing and command palette voice dictation inside Final Cut Pro.'" "$MODDED_APP/Contents/Info.plist" 2>/dev/null || /usr/libexec/PlistBuddy -c "Add :NSSpeechRecognitionUsageDescription string 'SpliceKit uses speech recognition for transcript editing and command palette voice dictation inside Final Cut Pro.'" "$MODDED_APP/Contents/Info.plist" 2>/dev/null || true
+/usr/libexec/PlistBuddy -c "Set :NSMicrophoneUsageDescription 'SpliceKit uses the microphone for LiveCam capture and command palette voice dictation inside Final Cut Pro.'" "$MODDED_APP/Contents/Info.plist" 2>/dev/null || /usr/libexec/PlistBuddy -c "Add :NSMicrophoneUsageDescription string 'SpliceKit uses the microphone for LiveCam capture and command palette voice dictation inside Final Cut Pro.'" "$MODDED_APP/Contents/Info.plist" 2>/dev/null || true
+log "Speech recognition and microphone permissions configured"
 
 # ============================================================
 # Step 7: Create MCP config

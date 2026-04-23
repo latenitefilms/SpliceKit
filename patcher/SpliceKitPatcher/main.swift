@@ -428,11 +428,14 @@ class PatcherModel: ObservableObject {
             <key>com.apple.security.cs.disable-library-validation</key><true/>
             <key>com.apple.security.cs.allow-dyld-environment-variables</key><true/>
             <key>com.apple.security.get-task-allow</key><true/>
+            <key>com.apple.security.device.microphone</key><true/>
+            <key>com.apple.security.device.audio-input</key><true/>
             </dict></plist>
             """
         try entPlist.write(toFile: entitlements, atomically: true, encoding: .utf8)
 
-        shell("/usr/libexec/PlistBuddy -c \"Add :NSSpeechRecognitionUsageDescription string 'SpliceKit uses speech recognition to transcribe timeline audio for text-based editing.'\" '\(moddedApp)/Contents/Info.plist' 2>/dev/null")
+        shell("/usr/libexec/PlistBuddy -c \"Set :NSSpeechRecognitionUsageDescription 'SpliceKit uses speech recognition for transcript editing and command palette voice dictation inside Final Cut Pro.'\" '\(moddedApp)/Contents/Info.plist' 2>/dev/null || /usr/libexec/PlistBuddy -c \"Add :NSSpeechRecognitionUsageDescription string 'SpliceKit uses speech recognition for transcript editing and command palette voice dictation inside Final Cut Pro.'\" '\(moddedApp)/Contents/Info.plist' 2>/dev/null")
+        shell("/usr/libexec/PlistBuddy -c \"Set :NSMicrophoneUsageDescription 'SpliceKit uses the microphone for LiveCam capture and command palette voice dictation inside Final Cut Pro.'\" '\(moddedApp)/Contents/Info.plist' 2>/dev/null || /usr/libexec/PlistBuddy -c \"Add :NSMicrophoneUsageDescription string 'SpliceKit uses the microphone for LiveCam capture and command palette voice dictation inside Final Cut Pro.'\" '\(moddedApp)/Contents/Info.plist' 2>/dev/null")
 
         // Only sign the SpliceKit framework (ours) and the main app bundle.
         // Leave all Apple frameworks, plugins, and helpers with their original

@@ -13,8 +13,32 @@ static BOOL sRuntimeEnabled = NO;
 static NSString *sRuntimeLaunchPhase = @"constructor";
 static NSString *sRuntimeLastRPCMethod = nil;
 static NSDictionary *sRuntimeConfig = nil;
+static NSString *sRuntimeConfigSource = nil;
 static NSString * const kSpliceKitSentryDSN =
     @"https://56fa8ecde3c66d354606805ac2064c54@o4511243520966656.ingest.us.sentry.io/4511243525423104";
+
+static BOOL SpliceKit_sentryParseBool(id value, BOOL defaultValue) {
+    if ([value isKindOfClass:[NSNumber class]]) {
+        return [value boolValue];
+    }
+    if ([value isKindOfClass:[NSString class]]) {
+        NSString *normalized = [[(NSString *)value stringByTrimmingCharactersInSet:
+                                 [NSCharacterSet whitespaceAndNewlineCharacterSet]] lowercaseString];
+        if ([normalized isEqualToString:@"1"] ||
+            [normalized isEqualToString:@"true"] ||
+            [normalized isEqualToString:@"yes"] ||
+            [normalized isEqualToString:@"on"]) {
+            return YES;
+        }
+        if ([normalized isEqualToString:@"0"] ||
+            [normalized isEqualToString:@"false"] ||
+            [normalized isEqualToString:@"no"] ||
+            [normalized isEqualToString:@"off"]) {
+            return NO;
+        }
+    }
+    return defaultValue;
+}
 
 static NSString *SpliceKit_sentryScrubString(NSString *value) {
     if (![value isKindOfClass:[NSString class]]) {
@@ -77,10 +101,10 @@ static NSDictionary *SpliceKit_loadRuntimeConfig(void) {
 
     NSArray<NSString *> *candidates = @[
         NSProcessInfo.processInfo.environment[@"SPLICEKIT_SENTRY_CONFIG"] ?: @"",
-        SpliceKit_sentryFrameworkResourcePath() ?: @"",
-        [[[NSBundle mainBundle] resourcePath] stringByAppendingPathComponent:@"SpliceKitSentryConfig.plist"] ?: @"",
         [[NSHomeDirectory() stringByAppendingPathComponent:@"Library/Application Support/SpliceKit"]
-            stringByAppendingPathComponent:@"SpliceKitSentryConfig.plist"]
+            stringByAppendingPathComponent:@"SpliceKitSentryConfig.plist"],
+        SpliceKit_sentryFrameworkResourcePath() ?: @"",
+        [[[NSBundle mainBundle] resourcePath] stringByAppendingPathComponent:@"SpliceKitSentryConfig.plist"] ?: @""
     ];
 
     for (NSString *candidate in candidates) {
@@ -88,12 +112,17 @@ static NSDictionary *SpliceKit_loadRuntimeConfig(void) {
         NSDictionary *loaded = [NSDictionary dictionaryWithContentsOfFile:candidate];
         if (loaded.count > 0) {
             [config addEntriesFromDictionary:loaded];
+            sRuntimeConfigSource = [candidate copy];
             break;
         }
     }
 
     NSString *environment = NSProcessInfo.processInfo.environment[@"SPLICEKIT_SENTRY_ENVIRONMENT"];
     if (environment.length > 0) config[@"Environment"] = environment;
+    NSString *disabled = NSProcessInfo.processInfo.environment[@"SPLICEKIT_SENTRY_DISABLED"];
+    if (disabled.length > 0) config[@"Enabled"] = @(!SpliceKit_sentryParseBool(disabled, NO));
+    NSString *enabled = NSProcessInfo.processInfo.environment[@"SPLICEKIT_SENTRY_ENABLED"];
+    if (enabled.length > 0) config[@"Enabled"] = @(SpliceKit_sentryParseBool(enabled, YES));
 
     if (![config[@"ReleaseName"] isKindOfClass:[NSString class]] || [config[@"ReleaseName"] length] == 0) {
         config[@"ReleaseName"] = [NSString stringWithFormat:@"splicekit@%s", SPLICEKIT_VERSION];
@@ -101,8 +130,14 @@ static NSDictionary *SpliceKit_loadRuntimeConfig(void) {
     if (![config[@"Environment"] isKindOfClass:[NSString class]] || [config[@"Environment"] length] == 0) {
         config[@"Environment"] = @"production";
     }
+    if (config[@"Enabled"] == nil) {
+        config[@"Enabled"] = @YES;
+    }
 
     sRuntimeConfig = [config copy];
+    if (sRuntimeConfigSource.length == 0) {
+        sRuntimeConfigSource = @"defaults";
+    }
     return sRuntimeConfig;
 }
 
@@ -214,6 +249,19 @@ BOOL SpliceKit_sentryRuntimeEnabled(void) {
     return sRuntimeEnabled;
 }
 
+NSDictionary *SpliceKit_sentryRuntimeStatus(void) {
+    NSDictionary *config = SpliceKit_loadRuntimeConfig();
+    return @{
+        @"started": @(sRuntimeStarted),
+        @"enabled": @(sRuntimeEnabled),
+        @"sdkEnabled": @([SentrySDK isEnabled]),
+        @"launchPhase": sRuntimeLaunchPhase ?: @"unknown",
+        @"lastRPCMethod": sRuntimeLastRPCMethod ?: @"",
+        @"configSource": sRuntimeConfigSource ?: @"",
+        @"config": config ?: @{},
+    };
+}
+
 void SpliceKit_sentrySetLaunchPhase(NSString *phase) {
     sRuntimeLaunchPhase = phase.length > 0 ? [phase copy] : @"unknown";
     if (!sRuntimeEnabled) return;
@@ -277,9 +325,19 @@ void SpliceKit_sentryStartRuntime(void) {
     NSDictionary *config = SpliceKit_loadRuntimeConfig();
     NSString *releaseName = config[@"ReleaseName"];
     NSString *environment = config[@"Environment"];
+    BOOL sentryEnabled = SpliceKit_sentryParseBool(config[@"Enabled"], YES);
     NSString *cacheDirectoryPath = SpliceKit_runtimeCacheDirectory();
     __block BOOL crashedLastRun = NO;
     __block NSDictionary *crashSummary = nil;
+
+    if (!sentryEnabled) {
+        sRuntimeEnabled = NO;
+        if ([SentrySDK respondsToSelector:@selector(close)]) {
+            [SentrySDK close];
+        }
+        SpliceKit_log(@"Sentry runtime disabled by config (%@)", sRuntimeConfigSource ?: @"unknown");
+        return;
+    }
 
     [SentrySDK startWithConfigureOptions:^(SentryOptions *options) {
         options.dsn = kSpliceKitSentryDSN;

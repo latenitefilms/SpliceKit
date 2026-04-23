@@ -376,18 +376,29 @@ class PatcherModel: ObservableObject {
         let alreadyInjected = shell("otool -L '\(binary)' 2>/dev/null | grep SpliceKit")
         if alreadyInjected.isEmpty {
             let insertDylib = "/tmp/splicekit_insert_dylib"
-            if !FileManager.default.fileExists(atPath: insertDylib) {
+            if !FileManager.default.isExecutableFile(atPath: insertDylib) {
                 await logAsync("Building insert_dylib tool...")
-                shell("""
+                let buildResult = shellResult("""
                     cd /tmp && rm -rf _insert_dylib_build && mkdir _insert_dylib_build && cd _insert_dylib_build && \
-                    curl -sL https://github.com/tyilo/insert_dylib/archive/refs/heads/master.zip -o insert_dylib.zip && \
+                    curl -fLsS https://github.com/tyilo/insert_dylib/archive/refs/heads/master.zip -o insert_dylib.zip && \
                     unzip -qo insert_dylib.zip && \
-                    clang -o '\(insertDylib)' insert_dylib-master/insert_dylib/main.c -framework Foundation 2>/dev/null && \
+                    clang -o '\(insertDylib)' insert_dylib-master/insert_dylib/main.c -framework Foundation && \
                     cd /tmp && rm -rf _insert_dylib_build
                     """)
+                guard buildResult.status == 0, FileManager.default.isExecutableFile(atPath: insertDylib) else {
+                    throw PatchError.msg("Failed to build insert_dylib:\n\(buildResult.output)")
+                }
             }
-            shell("'\(insertDylib)' --inplace --all-yes '@rpath/SpliceKit.framework/Versions/A/SpliceKit' '\(binary)' 2>&1")
-            await logAsync("Injected LC_LOAD_DYLIB")
+            let injectResult = shellResult("'\(insertDylib)' --inplace --all-yes '@rpath/SpliceKit.framework/Versions/A/SpliceKit' '\(binary)' 2>&1")
+            guard injectResult.status == 0 else {
+                throw PatchError.msg("insert_dylib failed:\n\(injectResult.output)")
+            }
+            let loadCommand = shell("otool -L '\(binary)' 2>/dev/null | grep '@rpath/SpliceKit.framework/Versions/A/SpliceKit'")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !loadCommand.isEmpty else {
+                throw PatchError.msg("insert_dylib reported success, but the SpliceKit load command is still missing from the patched Final Cut Pro binary.")
+            }
+            await logAsync("Injected LC_LOAD_DYLIB: \(loadCommand)")
         } else {
             await logAsync("Already injected (skipping)")
         }

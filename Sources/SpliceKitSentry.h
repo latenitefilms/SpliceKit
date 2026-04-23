@@ -9,6 +9,7 @@
 #import <Foundation/Foundation.h>
 
 BOOL SpliceKit_sentryRuntimeEnabled(void);
+NSDictionary *SpliceKit_sentryRuntimeStatus(void);
 void SpliceKit_sentryStartRuntime(void);
 void SpliceKit_sentrySetLaunchPhase(NSString *phase);
 void SpliceKit_sentrySetLastRPCMethod(NSString *method);

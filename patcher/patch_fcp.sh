@@ -382,18 +382,34 @@ if otool -L "$BINARY" 2>/dev/null | grep -q SpliceKit; then
 else
     # Build insert_dylib if needed
     INSERT_DYLIB="/tmp/splicekit_insert_dylib"
-    if [[ ! -f "$INSERT_DYLIB" ]]; then
+    if [[ ! -x "$INSERT_DYLIB" ]]; then
         info "Building insert_dylib tool..."
         TMPDIR_ID=$(mktemp -d)
-        git clone --quiet https://github.com/tyilo/insert_dylib.git "$TMPDIR_ID/insert_dylib" 2>/dev/null
-        clang -o "$INSERT_DYLIB" "$TMPDIR_ID/insert_dylib/insert_dylib/main.c" -framework Foundation 2>/dev/null
+        if ! git clone --quiet https://github.com/tyilo/insert_dylib.git "$TMPDIR_ID/insert_dylib" 2>&1; then
+            rm -rf "$TMPDIR_ID"
+            err "Failed to download insert_dylib"
+            exit 1
+        fi
+        if ! clang -o "$INSERT_DYLIB" "$TMPDIR_ID/insert_dylib/insert_dylib/main.c" -framework Foundation 2>&1; then
+            rm -rf "$TMPDIR_ID"
+            err "Failed to build insert_dylib"
+            exit 1
+        fi
         rm -rf "$TMPDIR_ID"
         log "insert_dylib built"
     fi
 
-    "$INSERT_DYLIB" --inplace --all-yes \
+    if ! "$INSERT_DYLIB" --inplace --all-yes \
         "@rpath/SpliceKit.framework/Versions/A/SpliceKit" \
-        "$BINARY" 2>/dev/null
+        "$BINARY" 2>&1; then
+        err "insert_dylib failed"
+        exit 1
+    fi
+
+    if ! otool -L "$BINARY" 2>/dev/null | grep -q "@rpath/SpliceKit.framework/Versions/A/SpliceKit"; then
+        err "insert_dylib completed but the SpliceKit load command is still missing"
+        exit 1
+    fi
 
     log "LC_LOAD_DYLIB injected"
 fi

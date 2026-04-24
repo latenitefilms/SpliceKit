@@ -50,6 +50,7 @@ extern void SpliceKitVP9_Bootstrap(void);
 static NSString *sLogPath = nil;
 static NSFileHandle *sLogHandle = nil;
 static dispatch_queue_t sLogQueue = nil;
+static int sLogFD = -1;
 
 static NSString *SpliceKit_logTimestamp(void) {
     struct timespec ts;
@@ -80,6 +81,7 @@ static void SpliceKit_initLogging(void) {
     [fm createFileAtPath:sLogPath contents:nil attributes:nil];
     sLogHandle = [NSFileHandle fileHandleForWritingAtPath:sLogPath];
     [sLogHandle seekToEndOfFile];
+    sLogFD = [sLogHandle fileDescriptor];
 }
 
 void SpliceKit_log(NSString *format, ...) {
@@ -151,12 +153,16 @@ static void SpliceKit_logCloudContentGuardSummary(NSString *phase) {
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
     BOOL firstLaunchDone = [defaults boolForKey:@"CloudContentFirstLaunchCompleted"];
     BOOL cloudContentDisabled = [defaults boolForKey:@"FFCloudContentDisabled"];
-    SpliceKit_log(@"CloudContent guard (%@): firstLaunch=%@ disabled=%@ featureFlag=%@ catalog=%@ helper=%@ helperCompletion=%@",
+    SpliceKit_log(@"CloudContent guard (%@): firstLaunch=%@ disabled=%@ featureFlag=%@ firstLaunchFlag=%@ catalogUpdate=%@ catalogEnabled=%@ catalogSubscription=%@ activeListener=%@ helper=%@ helperCompletion=%@",
                   phase,
                   firstLaunchDone ? @"YES" : @"NO",
                   cloudContentDisabled ? @"YES" : @"NO",
                   SpliceKit_swizzleStateDescription(@"CloudContentFeatureFlag.isEnabled"),
+                  SpliceKit_swizzleStateDescription(@"CloudContentFeatureFlag.shouldShowFirstLaunchExperience"),
                   SpliceKit_swizzleStateDescription(@"CloudContentCatalog.updateCatalogAndRegistry"),
+                  SpliceKit_swizzleStateDescription(@"CloudContentCatalog.isCloudContentEnabled"),
+                  SpliceKit_swizzleStateDescription(@"CloudContentCatalog.isRunningSubscriptionApp"),
+                  SpliceKit_swizzleStateDescription(@"CloudContentCatalog.activeListener"),
                   SpliceKit_swizzleStateDescription(@"CloudContentFirstLaunchHelper.setupAndPresent"),
                   SpliceKit_swizzleStateDescription(@"CloudContentFirstLaunchHelper.setupAndPresent(completion:)"));
 }
@@ -199,7 +205,7 @@ static void SpliceKit_signalHandler(int sig) {
     }
 
     // Can't use SpliceKit_log (not async-signal-safe), write directly.
-    if (sLogHandle) {
+    if (sLogFD >= 0) {
         void *frames[64];
         int count = backtrace(frames, 64);
         char **symbols = backtrace_symbols(frames, count);
@@ -207,17 +213,17 @@ static void SpliceKit_signalHandler(int sig) {
         char header[256];
         snprintf(header, sizeof(header),
                  "\n!!! FATAL SIGNAL: %s (signal %d) !!!\nStack trace:\n", sigName, sig);
-        write([sLogHandle fileDescriptor], header, strlen(header));
+        write(sLogFD, header, strlen(header));
 
         if (symbols) {
             for (int i = 0; i < count; i++) {
-                write([sLogHandle fileDescriptor], "  ", 2);
-                write([sLogHandle fileDescriptor], symbols[i], strlen(symbols[i]));
-                write([sLogHandle fileDescriptor], "\n", 1);
+                write(sLogFD, "  ", 2);
+                write(sLogFD, symbols[i], strlen(symbols[i]));
+                write(sLogFD, "\n", 1);
             }
             free(symbols);
         }
-        fsync([sLogHandle fileDescriptor]);
+        fsync(sLogFD);
     }
 
     // Re-raise with default handler so macOS crash reporter also gets it
@@ -418,6 +424,7 @@ static void SpliceKit_checkCompatibility(void) {
 - (void)toggleTranscriptPanel:(id)sender;
 - (void)toggleCaptionPanel:(id)sender;
 - (void)toggleLiveCamPanel:(id)sender;
+- (void)toggleImmersiveViewer:(id)sender;
 - (void)toggleSections:(id)sender;
 - (void)toggleOverviewBar:(id)sender;
 - (void)toggleCommandPalette:(id)sender;
@@ -529,6 +536,16 @@ static void SpliceKit_checkCompatibility(void) {
         ((void (*)(id, SEL))objc_msgSend)(panel, @selector(showPanel));
     }
     [self updateLiveCamToolbarButtonState:!visible];
+}
+
+- (void)toggleImmersiveViewer:(id)sender {
+    SpliceKitImmersivePreviewPanel *panel = [SpliceKitImmersivePreviewPanel sharedPanel];
+
+    NSError *error = nil;
+    if (![panel showInViewerForCurrentSelection:&error]) {
+        SpliceKit_log(@"[ImmersiveViewer] native FCP viewer show failed: %@", error.localizedDescription ?: @"unknown error");
+        NSBeep();
+    }
 }
 
 - (void)toggleVisionProPanel:(id)sender {
@@ -2441,6 +2458,13 @@ static void SpliceKit_installMenu(void) {
     liveCamItem.target = [SpliceKitMenuController shared];
     [bridgeMenu addItem:liveCamItem];
 
+    NSMenuItem *immersiveViewerItem = [[NSMenuItem alloc]
+        initWithTitle:@"FCP 360 Viewer"
+               action:@selector(toggleImmersiveViewer:)
+        keyEquivalent:@""];
+    immersiveViewerItem.target = [SpliceKitMenuController shared];
+    [bridgeMenu addItem:immersiveViewerItem];
+
     NSMenuItem *visionProItem = [[NSMenuItem alloc]
         initWithTitle:@"Vision Pro Preview"
                action:@selector(toggleVisionProPanel:)
@@ -3295,9 +3319,7 @@ static void SpliceKit_appDidLaunch(void) {
     // Install toolbar button in FCP's main window
     [SpliceKitMenuController installToolbarButton];
 
-    SpliceKit_safeInstall("ImmersiveViewerBridge", ^{
-        SpliceKit_installImmersiveViewerBridge();
-    });
+    SpliceKit_log(@"[ImmersiveViewer] Built-in show360 bridge install skipped at launch; use SpliceKit immersive preview commands instead");
 
     [[NSNotificationCenter defaultCenter] addObserverForName:SpliceKitLiveCamVisibilityDidChangeNotification
                                                       object:nil
@@ -3452,6 +3474,19 @@ static void noopMethodWithArg(id self, SEL _cmd, id arg) {
     SpliceKit_log(@"BLOCKED: -[%@ %@]", NSStringFromClass([self class]), NSStringFromSelector(_cmd));
 }
 
+static void noopCloudContentFirstLaunchWithCompletion(id self, SEL _cmd, id completion) {
+    SpliceKit_log(@"BLOCKED CloudContent first launch: -[%@ %@]",
+                  NSStringFromClass([self class]), NSStringFromSelector(_cmd));
+    if (!completion) return;
+
+    @try {
+        void (^completionBlock)(NSError *) = completion;
+        completionBlock(nil);
+    } @catch (NSException *e) {
+        SpliceKit_log(@"CloudContent first-launch completion callback failed: %@ %@", e.name, e.reason);
+    }
+}
+
 static BOOL returnNO(id self, SEL _cmd) {
     SpliceKit_log(@"BLOCKED (returning NO): +[%@ %@]",
                   NSStringFromClass(object_getClass(self)), NSStringFromSelector(_cmd));
@@ -3482,84 +3517,169 @@ static void SpliceKit_fixShutdownHang(void) {
     }
 }
 
-// Brute-force CloudContent neutralizer: enumerates all registered ObjC classes and
-// swizzles any class whose name contains "CloudContent" or "CloudContentCatalog" etc.
-// This avoids guessing Swift mangled names which vary by FCP version.
-// Called at constructor time AND at WillFinishLaunching (Swift lazy class registration
-// means classes may not be available until frameworks finish loading).
+static BOOL SpliceKit_replaceInstanceMethod(Class cls,
+                                            SEL sel,
+                                            IMP imp,
+                                            const char *phase,
+                                            NSString *trackingKey) {
+    Method method = class_getInstanceMethod(cls, sel);
+    if (!method) return NO;
+
+    method_setImplementation(method, imp);
+    SpliceKit_log(@"  [%s] Swizzled %s -%@", phase, class_getName(cls), NSStringFromSelector(sel));
+    if (trackingKey.length > 0) {
+        SpliceKit_trackSwizzle(trackingKey, YES);
+    }
+    return YES;
+}
+
+static BOOL SpliceKit_replaceClassMethod(Class cls,
+                                         SEL sel,
+                                         IMP imp,
+                                         const char *phase,
+                                         NSString *trackingKey) {
+    Method method = class_getClassMethod(cls, sel);
+    if (!method) return NO;
+
+    method_setImplementation(method, imp);
+    SpliceKit_log(@"  [%s] Swizzled %s +%@", phase, class_getName(cls), NSStringFromSelector(sel));
+    if (trackingKey.length > 0) {
+        SpliceKit_trackSwizzle(trackingKey, YES);
+    }
+    return YES;
+}
+
+static void SpliceKit_logCloudContentMethods(Class cls) {
+    unsigned int methodCount = 0;
+    Method *methods = class_copyMethodList(cls, &methodCount);
+    for (unsigned int j = 0; j < methodCount && j < 30; j++) {
+        SpliceKit_log(@"    method: %@", NSStringFromSelector(method_getName(methods[j])));
+    }
+    if (methods) free(methods);
+}
+
+static void SpliceKit_swizzleCloudContentClass(Class cls, const char *phase) {
+    if (!cls) return;
+
+    const char *name = class_getName(cls);
+    if (!name) return;
+
+    if (strstr(name, "CCFirstLaunchHelper") || strstr(name, "CloudContentFirstLaunchHelper")) {
+        SpliceKit_log(@"  [%s] Found class: %s", phase, name);
+
+        BOOL handled = NO;
+        SEL asyncCompletionSel = NSSelectorFromString(@"setupAndPresentFirstLaunchIfNeededWithCompletionHandler:");
+        handled |= SpliceKit_replaceInstanceMethod(cls,
+                                                   asyncCompletionSel,
+                                                   (IMP)noopCloudContentFirstLaunchWithCompletion,
+                                                   phase,
+                                                   @"CloudContentFirstLaunchHelper.setupAndPresent(completion:)");
+
+        SEL directSel = NSSelectorFromString(@"setupAndPresentFirstLaunchIfNeeded");
+        handled |= SpliceKit_replaceInstanceMethod(cls,
+                                                   directSel,
+                                                   (IMP)noopMethod,
+                                                   phase,
+                                                   @"CloudContentFirstLaunchHelper.setupAndPresent");
+
+        if (!handled) {
+            SpliceKit_log(@"  [%s] WARNING: %s exists but first-launch selectors were not found", phase, name);
+            SpliceKit_logCloudContentMethods(cls);
+            SpliceKit_trackSwizzle(@"CloudContentFirstLaunchHelper.setupAndPresent", NO);
+            SpliceKit_trackSwizzle(@"CloudContentFirstLaunchHelper.setupAndPresent(completion:)", NO);
+        }
+    }
+
+    if (strstr(name, "CloudContentCatalog") && !strstr(name, "RegistryManifest")) {
+        SpliceKit_log(@"  [%s] Found class: %s", phase, name);
+
+        SpliceKit_replaceInstanceMethod(cls,
+                                        NSSelectorFromString(@"isCloudContentEnabled"),
+                                        (IMP)returnNO_silent,
+                                        phase,
+                                        @"CloudContentCatalog.isCloudContentEnabled");
+        SpliceKit_replaceInstanceMethod(cls,
+                                        NSSelectorFromString(@"isRunningSubscriptionApp"),
+                                        (IMP)returnNO_silent,
+                                        phase,
+                                        @"CloudContentCatalog.isRunningSubscriptionApp");
+        SpliceKit_replaceInstanceMethod(cls,
+                                        NSSelectorFromString(@"startListeningForApplicationDidBecomeActiveNotifications"),
+                                        (IMP)noopMethod,
+                                        phase,
+                                        @"CloudContentCatalog.activeListener");
+
+        SEL updateSel = NSSelectorFromString(@"updateCatalogAndRegistry");
+        Method updateMethod = class_getInstanceMethod(cls, updateSel);
+        if (updateMethod) {
+            method_setImplementation(updateMethod, (IMP)noopMethod);
+            SpliceKit_log(@"  [%s] Swizzled %s -updateCatalogAndRegistry", phase, name);
+            SpliceKit_trackSwizzle(@"CloudContentCatalog.updateCatalogAndRegistry", YES);
+        } else {
+            SpliceKit_log(@"  [%s] NOTE: %s has no ObjC -updateCatalogAndRegistry selector; guarded related ObjC entry points instead", phase, name);
+            SpliceKit_trackSwizzle(@"CloudContentCatalog.updateCatalogAndRegistry", NO);
+        }
+    }
+
+    // CloudContentFeatureFlag — prevent user-visible first-launch UI paths.
+    if (strstr(name, "CloudContentFeatureFlag")) {
+        SpliceKit_log(@"  [%s] Found class: %s", phase, name);
+        BOOL handled = NO;
+        handled |= SpliceKit_replaceClassMethod(cls,
+                                                @selector(isEnabled),
+                                                (IMP)returnNO,
+                                                phase,
+                                                @"CloudContentFeatureFlag.isEnabled");
+        handled |= SpliceKit_replaceClassMethod(cls,
+                                                NSSelectorFromString(@"shouldShowFirstLaunchExperience"),
+                                                (IMP)returnNO_silent,
+                                                phase,
+                                                @"CloudContentFeatureFlag.shouldShowFirstLaunchExperience");
+        if (!handled) {
+            SpliceKit_log(@"  [%s] WARNING: %s exists but known feature-flag selectors were not found", phase, name);
+            SpliceKit_trackSwizzle(@"CloudContentFeatureFlag.isEnabled", NO);
+        }
+    }
+}
+
+static void SpliceKit_swizzleKnownCloudContentClasses(const char *phase) {
+    const char *classNames[] = {
+        "CCFirstLaunchHelper",
+        "_TtC13Final_Cut_Pro29CloudContentFirstLaunchHelper",
+        "_TtC17Final_Cut_Pro_App29CloudContentFirstLaunchHelper",
+        "_TtC13Final_Cut_Pro19CloudContentCatalog",
+        "_TtC17Final_Cut_Pro_App19CloudContentCatalog",
+        "_TtC13Final_Cut_Pro23CloudContentFeatureFlag",
+        "_TtC17Final_Cut_Pro_App23CloudContentFeatureFlag",
+        NULL
+    };
+
+    for (int i = 0; classNames[i] != NULL; i++) {
+        SpliceKit_swizzleCloudContentClass(objc_getClass(classNames[i]), phase);
+    }
+}
+
+// Brute-force CloudContent neutralizer: first targets the known Swift/ObjC
+// classes by exact runtime name, then enumerates registered classes to catch
+// Apple renames between FCP editions and point releases.
 static void SpliceKit_swizzleCloudContentClasses(const char *phase) {
+    SpliceKit_swizzleKnownCloudContentClasses(phase);
+
     int numClasses = objc_getClassList(NULL, 0);
     if (numClasses <= 0) return;
 
     Class *classes = (Class *)malloc(sizeof(Class) * numClasses);
+    if (!classes) return;
     objc_getClassList(classes, numClasses);
 
     for (int i = 0; i < numClasses; i++) {
         const char *name = class_getName(classes[i]);
         if (!name) continue;
-
-        // CloudContentFirstLaunchHelper (or any future rename containing this)
-        if (strstr(name, "CloudContentFirstLaunchHelper")) {
-            SpliceKit_log(@"  [%s] Found class: %s", phase, name);
-            SEL sel1 = NSSelectorFromString(@"setupAndPresentFirstLaunchIfNeeded");
-            Method m1 = class_getInstanceMethod(classes[i], sel1);
-            if (m1) {
-                method_setImplementation(m1, (IMP)noopMethod);
-                SpliceKit_log(@"  [%s] Swizzled %s -setupAndPresentFirstLaunchIfNeeded", phase, name);
-                SpliceKit_trackSwizzle(@"CloudContentFirstLaunchHelper.setupAndPresent", YES);
-            } else {
-                SpliceKit_log(@"  [%s] WARNING: %s exists but -setupAndPresentFirstLaunchIfNeeded not found", phase, name);
-                // Dump all instance methods so we can see what's available
-                unsigned int methodCount = 0;
-                Method *methods = class_copyMethodList(classes[i], &methodCount);
-                for (unsigned int j = 0; j < methodCount && j < 30; j++) {
-                    SpliceKit_log(@"    method: %@", NSStringFromSelector(method_getName(methods[j])));
-                }
-                if (methods) free(methods);
-                SpliceKit_trackSwizzle(@"CloudContentFirstLaunchHelper.setupAndPresent", NO);
-            }
-            SEL sel2 = NSSelectorFromString(@"setupAndPresentFirstLaunchIfNeededWithCompletionHandler:");
-            Method m2 = class_getInstanceMethod(classes[i], sel2);
-            if (m2) {
-                method_setImplementation(m2, (IMP)noopMethodWithArg);
-                SpliceKit_log(@"  [%s] Swizzled %s -setupAndPresentFirstLaunchIfNeeded(completion:)", phase, name);
-                SpliceKit_trackSwizzle(@"CloudContentFirstLaunchHelper.setupAndPresent(completion:)", YES);
-            }
-        }
-
-        // CloudContentCatalog — the actual crashing method
-        if (strstr(name, "CloudContentCatalog")) {
-            SpliceKit_log(@"  [%s] Found class: %s", phase, name);
-            SEL sel = NSSelectorFromString(@"updateCatalogAndRegistry");
-            Method m = class_getInstanceMethod(classes[i], sel);
-            if (m) {
-                method_setImplementation(m, (IMP)noopMethod);
-                SpliceKit_log(@"  [%s] Swizzled %s -updateCatalogAndRegistry", phase, name);
-                SpliceKit_trackSwizzle(@"CloudContentCatalog.updateCatalogAndRegistry", YES);
-            } else {
-                SpliceKit_log(@"  [%s] WARNING: %s exists but -updateCatalogAndRegistry not found", phase, name);
-                unsigned int methodCount = 0;
-                Method *methods = class_copyMethodList(classes[i], &methodCount);
-                for (unsigned int j = 0; j < methodCount && j < 30; j++) {
-                    SpliceKit_log(@"    method: %@", NSStringFromSelector(method_getName(methods[j])));
-                }
-                if (methods) free(methods);
-                SpliceKit_trackSwizzle(@"CloudContentCatalog.updateCatalogAndRegistry", NO);
-            }
-        }
-
-        // CloudContentFeatureFlag — prevent the entire code path
-        if (strstr(name, "CloudContentFeatureFlag")) {
-            SpliceKit_log(@"  [%s] Found class: %s", phase, name);
-            Method m = class_getClassMethod(classes[i], @selector(isEnabled));
-            if (m) {
-                method_setImplementation(m, (IMP)returnNO);
-                SpliceKit_log(@"  [%s] Swizzled %s +isEnabled -> NO", phase, name);
-                SpliceKit_trackSwizzle(@"CloudContentFeatureFlag.isEnabled", YES);
-            } else {
-                SpliceKit_log(@"  [%s] WARNING: %s exists but +isEnabled not found", phase, name);
-                SpliceKit_trackSwizzle(@"CloudContentFeatureFlag.isEnabled", NO);
-            }
+        if (strstr(name, "CCFirstLaunchHelper") ||
+            strstr(name, "CloudContentFirstLaunchHelper") ||
+            strstr(name, "CloudContentCatalog") ||
+            strstr(name, "CloudContentFeatureFlag")) {
+            SpliceKit_swizzleCloudContentClass(classes[i], phase);
         }
     }
 

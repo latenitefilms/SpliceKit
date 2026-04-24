@@ -56,6 +56,10 @@ int SpliceKit_asyncCurrentFd(void) {
 }
 
 void SpliceKit_asyncCleanupFd(int fd) {
+    SpliceKit_asyncInitKey();
+    if (SpliceKit_asyncCurrentFd() == fd) {
+        pthread_setspecific(sCurrentFdKey, NULL);
+    }
     if (!sStateQueue) return;
     dispatch_async(sStateQueue, ^{
         [sFdSubscriptions removeObjectForKey:@(fd)];

@@ -286,6 +286,8 @@ static id SpliceKit_serializeReturnValue(NSInvocation *invocation, BOOL returnHa
 
 static NSMutableArray *sConnectedClients = nil;
 static dispatch_queue_t sClientQueue = nil;
+static char sClientQueueSpecificKey;
+static char sClientWriteQueueSpecificKey;
 
 // Per-client write serialization. Events broadcast from the async queue and
 // RPC replies from the per-client accept thread both target the same fd;
@@ -299,24 +301,81 @@ static dispatch_queue_t sClientQueue = nil;
 // Keyed by NSNumber(fd), guarded by sClientQueue.
 static NSMutableDictionary<NSNumber *, dispatch_queue_t> *sClientWriteQueues = nil;
 
+static BOOL SpliceKit_isOnClientQueue(void) {
+    return dispatch_get_specific(&sClientQueueSpecificKey) == &sClientQueueSpecificKey;
+}
+
+static BOOL SpliceKit_isOnWriteQueueForClientFd(int fd) {
+    if (fd < 0) return NO;
+    uintptr_t current = (uintptr_t)dispatch_get_specific(&sClientWriteQueueSpecificKey);
+    return current == (uintptr_t)(fd + 1);
+}
+
+static void SpliceKit_addConnectedClientFd(int fd) {
+    if (!sClientQueue || fd < 0) return;
+    void (^block)(void) = ^{
+        [sConnectedClients addObject:@(fd)];
+    };
+    if (SpliceKit_isOnClientQueue()) {
+        block();
+    } else {
+        dispatch_sync(sClientQueue, block);
+    }
+}
+
+static void SpliceKit_removeConnectedClientFd(int fd) {
+    if (!sClientQueue || fd < 0) return;
+    void (^block)(void) = ^{
+        [sConnectedClients removeObject:@(fd)];
+    };
+    if (SpliceKit_isOnClientQueue()) {
+        block();
+    } else {
+        dispatch_sync(sClientQueue, block);
+    }
+}
+
 static dispatch_queue_t SpliceKit_writeQueueForClientFd(int fd) {
+    if (!sClientQueue || !sClientWriteQueues || fd < 0) return nil;
     __block dispatch_queue_t q = nil;
-    dispatch_sync(sClientQueue, ^{
+
+    void (^lookupOrCreate)(void) = ^{
         q = sClientWriteQueues[@(fd)];
         if (!q) {
             char label[64];
             snprintf(label, sizeof(label), "com.splicekit.client.write.%d", fd);
             q = dispatch_queue_create(label, DISPATCH_QUEUE_SERIAL);
+            dispatch_queue_set_specific(q, &sClientWriteQueueSpecificKey,
+                                        (void *)(uintptr_t)(fd + 1), NULL);
             sClientWriteQueues[@(fd)] = q;
         }
-    });
+    };
+
+    if (SpliceKit_isOnClientQueue()) {
+        lookupOrCreate();
+    } else {
+        dispatch_sync(sClientQueue, lookupOrCreate);
+    }
     return q;
 }
 
 static void SpliceKit_releaseWriteQueueForClientFd(int fd) {
-    dispatch_async(sClientQueue, ^{
+    if (!sClientQueue || fd < 0) return;
+    void (^block)(void) = ^{
         [sClientWriteQueues removeObjectForKey:@(fd)];
-    });
+    };
+    if (SpliceKit_isOnClientQueue()) {
+        block();
+    } else {
+        dispatch_sync(sClientQueue, block);
+    }
+}
+
+static void SpliceKit_drainWriteQueueForClientFd(int fd) {
+    if (fd < 0 || SpliceKit_isOnWriteQueueForClientFd(fd)) return;
+    dispatch_queue_t q = SpliceKit_writeQueueForClientFd(fd);
+    if (!q) return;
+    dispatch_sync(q, ^{});
 }
 
 // Raw write with EINTR handling. Call ONLY from the fd's serial queue so
@@ -344,10 +403,16 @@ static BOOL SpliceKit_rawWriteAll(int fd, NSData *line) {
 static BOOL SpliceKit_writeLineToClientFd(int fd, NSData *line) {
     if (fd < 0 || !line || line.length == 0) return NO;
     dispatch_queue_t q = SpliceKit_writeQueueForClientFd(fd);
+    if (!q) return NO;
     __block BOOL ok = NO;
-    dispatch_sync(q, ^{
+    void (^writeBlock)(void) = ^{
         ok = SpliceKit_rawWriteAll(fd, line);
-    });
+    };
+    if (SpliceKit_isOnWriteQueueForClientFd(fd)) {
+        writeBlock();
+    } else {
+        dispatch_sync(q, writeBlock);
+    }
     return ok;
 }
 
@@ -356,9 +421,14 @@ static BOOL SpliceKit_writeLineToClientFd(int fd, NSData *line) {
 static void SpliceKit_writeLineToClientFdAsync(int fd, NSData *line) {
     if (fd < 0 || !line || line.length == 0) return;
     dispatch_queue_t q = SpliceKit_writeQueueForClientFd(fd);
-    dispatch_async(q, ^{
+    if (!q) return;
+    if (SpliceKit_isOnWriteQueueForClientFd(fd)) {
         SpliceKit_rawWriteAll(fd, line);
-    });
+    } else {
+        dispatch_async(q, ^{
+            SpliceKit_rawWriteAll(fd, line);
+        });
+    }
 }
 
 void SpliceKit_broadcastEvent(NSDictionary *event) {
@@ -28043,9 +28113,7 @@ NSDictionary *SpliceKit_handleRequest(NSDictionary *request) {
 //
 
 static void SpliceKit_handleClient(int clientFd) {
-    dispatch_async(sClientQueue, ^{
-        [sConnectedClients addObject:@(clientFd)];
-    });
+    SpliceKit_addConnectedClientFd(clientFd);
 
     // Publish the fd for this thread so handlers like events.subscribe can
     // identify which connection they're running for. Cleared via asyncCleanupFd
@@ -28060,8 +28128,8 @@ static void SpliceKit_handleClient(int clientFd) {
 
     CFAbsoluteTime connectedAt = CFAbsoluteTimeGetCurrent();
     NSUInteger requestCount = 0;
-    NSString *firstMethod = nil;
-    NSString *lastMethod = nil;
+    char firstMethod[128] = {0};
+    char lastMethod[128] = {0};
 
     char buffer[65536];
     while (fgets(buffer, sizeof(buffer), stream)) {
@@ -28087,8 +28155,11 @@ static void SpliceKit_handleClient(int clientFd) {
                     ? request[@"method"] : nil;
                 if (method.length > 0) {
                     requestCount += 1;
-                    if (!firstMethod) firstMethod = [method copy];
-                    lastMethod = [method copy];
+                    const char *methodName = [method UTF8String] ?: "<unknown>";
+                    if (firstMethod[0] == '\0') {
+                        strlcpy(firstMethod, methodName, sizeof(firstMethod));
+                    }
+                    strlcpy(lastMethod, methodName, sizeof(lastMethod));
                 }
                 @try {
                     NSDictionary *result = SpliceKit_handleRequest(request);
@@ -28130,18 +28201,18 @@ static void SpliceKit_handleClient(int clientFd) {
     if (requestCount > 0) {
         NSTimeInterval duration = CFAbsoluteTimeGetCurrent() - connectedAt;
         if (requestCount == 1) {
-            SpliceKit_log(@"Client session ended (fd=%d requests=1 method=%@ duration=%.2fs)",
-                          clientFd, firstMethod ?: @"<unknown>", duration);
+            SpliceKit_log(@"Client session ended (fd=%d requests=1 method=%s duration=%.2fs)",
+                          clientFd, firstMethod[0] ? firstMethod : "<unknown>", duration);
         } else {
-            SpliceKit_log(@"Client session ended (fd=%d requests=%lu first=%@ last=%@ duration=%.2fs)",
-                          clientFd, (unsigned long)requestCount, firstMethod ?: @"<unknown>",
-                          lastMethod ?: @"<unknown>", duration);
+            SpliceKit_log(@"Client session ended (fd=%d requests=%lu first=%s last=%s duration=%.2fs)",
+                          clientFd, (unsigned long)requestCount,
+                          firstMethod[0] ? firstMethod : "<unknown>",
+                          lastMethod[0] ? lastMethod : "<unknown>", duration);
         }
     }
-    dispatch_async(sClientQueue, ^{
-        [sConnectedClients removeObject:@(clientFd)];
-    });
+    SpliceKit_removeConnectedClientFd(clientFd);
     SpliceKit_asyncCleanupFd(clientFd);
+    SpliceKit_drainWriteQueueForClientFd(clientFd);
     SpliceKit_releaseWriteQueueForClientFd(clientFd);
     fclose(stream);
 }
@@ -28159,6 +28230,8 @@ static void SpliceKit_handleClient(int clientFd) {
 
 void SpliceKit_startControlServer(void) {
     sClientQueue = dispatch_queue_create("com.splicekit.clients", DISPATCH_QUEUE_SERIAL);
+    dispatch_queue_set_specific(sClientQueue, &sClientQueueSpecificKey,
+                                &sClientQueueSpecificKey, NULL);
     sConnectedClients = [NSMutableArray array];
     sClientWriteQueues = [NSMutableDictionary dictionary];
 
@@ -28207,6 +28280,8 @@ void SpliceKit_startControlServer(void) {
     dispatch_source_set_event_handler(acceptSource, ^{
         int clientFd = accept(serverFd, NULL, NULL);
         if (clientFd < 0) return;
+        int noSigPipe = 1;
+        setsockopt(clientFd, SOL_SOCKET, SO_NOSIGPIPE, &noSigPipe, sizeof(noSigPipe));
         dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
             SpliceKit_handleClient(clientFd);
         });

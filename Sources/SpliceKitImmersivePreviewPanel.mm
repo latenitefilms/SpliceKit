@@ -31,8 +31,293 @@ static inline CFTimeInterval SKIPNow(void) {
     return CACurrentMediaTime();
 }
 
+static NSError *SKIPImmersivePreviewError(NSInteger code, NSString *message) {
+    return [NSError errorWithDomain:@"SpliceKitImmersivePreview"
+                               code:code
+                           userInfo:@{NSLocalizedDescriptionKey: message ?: @"Immersive preview failed"}];
+}
+
+static id SKIPActiveEditorContainerForPreview(void) {
+    if (![NSThread isMainThread]) return nil;
+
+    @try {
+        id app = [NSApplication sharedApplication];
+        id delegate = [app delegate];
+        if (!delegate) return nil;
+
+        SEL activeEditorContainerSel = @selector(activeEditorContainer);
+        if ([delegate respondsToSelector:activeEditorContainerSel]) {
+            id editorContainer = ((id (*)(id, SEL))objc_msgSend)(delegate, activeEditorContainerSel);
+            if (editorContainer) return editorContainer;
+        }
+
+        SEL mainEditorContainerSel = NSSelectorFromString(@"mainEditorContainer");
+        if ([delegate respondsToSelector:mainEditorContainerSel]) {
+            return ((id (*)(id, SEL))objc_msgSend)(delegate, mainEditorContainerSel);
+        }
+    } @catch (NSException *exception) {
+        SpliceKit_log(@"[ImmersivePreview] Active editor container lookup failed: %@",
+                      exception.reason ?: exception.name);
+    }
+
+    return nil;
+}
+
+static id SKIPActivePlayerContainerModuleForPreview(void) {
+    if (![NSThread isMainThread]) return nil;
+
+    @try {
+        id editorContainer = SKIPActiveEditorContainerForPreview();
+        SEL targetModulesSel = NSSelectorFromString(@"targetModules");
+        if (!editorContainer || ![editorContainer respondsToSelector:targetModulesSel]) {
+            return nil;
+        }
+
+        id modules = ((id (*)(id, SEL))objc_msgSend)(editorContainer, targetModulesSel);
+        if (![modules isKindOfClass:[NSArray class]]) return nil;
+
+        for (id module in (NSArray *)modules) {
+            NSString *className = NSStringFromClass([module class]);
+            if ([className isEqualToString:@"PEPlayerContainerModule"]) {
+                return module;
+            }
+            if ([module respondsToSelector:@selector(mode)] &&
+                [module respondsToSelector:NSSelectorFromString(@"setMode:")] &&
+                [module respondsToSelector:NSSelectorFromString(@"playerModules")]) {
+                return module;
+            }
+        }
+    } @catch (NSException *exception) {
+        SpliceKit_log(@"[ImmersivePreview] Player container lookup failed: %@",
+                      exception.reason ?: exception.name);
+    }
+
+    return nil;
+}
+
+static BOOL SKIPNativeFCP360ViewerIsVisible(void) {
+    if (![NSThread isMainThread]) return NO;
+
+    @try {
+        id playerContainer = SKIPActivePlayerContainerModuleForPreview();
+        if (!playerContainer || ![playerContainer respondsToSelector:@selector(mode)]) return NO;
+        NSInteger mode = ((NSInteger (*)(id, SEL))objc_msgSend)(playerContainer, @selector(mode));
+        return mode == 8;
+    } @catch (__unused NSException *exception) {
+        return NO;
+    }
+}
+
+static BOOL SKIPOpenNativeFCP360Viewer(BOOL forceRebuild, NSError **error) {
+    __block BOOL ok = NO;
+    __block NSString *failure = nil;
+    void (^openBlock)(void) = ^{
+        NSApplication *app = [NSApplication sharedApplication];
+        SEL show360Sel = NSSelectorFromString(@"show360:");
+        SEL setModeSel = NSSelectorFromString(@"setMode:");
+        id playerContainer = SKIPActivePlayerContainerModuleForPreview();
+        @try {
+            if (playerContainer &&
+                [playerContainer respondsToSelector:@selector(mode)] &&
+                [playerContainer respondsToSelector:setModeSel]) {
+                NSInteger currentMode = ((NSInteger (*)(id, SEL))objc_msgSend)(playerContainer, @selector(mode));
+                if (currentMode == 8 && forceRebuild) {
+                    NSInteger fallbackMode = 0;
+                    if ([playerContainer respondsToSelector:@selector(defaultMode)]) {
+                        fallbackMode = ((NSInteger (*)(id, SEL))objc_msgSend)(playerContainer, @selector(defaultMode));
+                    }
+                    if (fallbackMode == 8) fallbackMode = 0;
+                    ((void (*)(id, SEL, NSInteger))objc_msgSend)(playerContainer, setModeSel, fallbackMode);
+                    currentMode = fallbackMode;
+                }
+                if (currentMode != 8) {
+                    ((void (*)(id, SEL, NSInteger))objc_msgSend)(playerContainer, setModeSel, 8);
+                }
+                ok = YES;
+                return;
+            }
+
+            id delegate = app.delegate;
+            if (delegate && [delegate respondsToSelector:show360Sel]) {
+                ((void (*)(id, SEL, id))objc_msgSend)(delegate, show360Sel, nil);
+                ok = YES;
+                return;
+            }
+            ok = [app sendAction:show360Sel to:nil from:nil];
+            if (!ok) {
+                failure = @"FCP's native 360 viewer action is not available in the current state";
+            }
+        } @catch (NSException *exception) {
+            failure = exception.reason ?: @"FCP's native 360 viewer action threw an exception";
+            ok = NO;
+        }
+    };
+
+    if ([NSThread isMainThread]) {
+        openBlock();
+    } else {
+        SpliceKit_executeOnMainThread(openBlock);
+    }
+
+    if (!ok && error) {
+        *error = SKIPImmersivePreviewError(-40, failure ?: @"Unable to open FCP's native 360 viewer");
+    }
+    return ok;
+}
+
+static void SKIPCloseNativeFCP360Viewer(void) {
+    if (![NSThread isMainThread]) {
+        SpliceKit_executeOnMainThread(^{ SKIPCloseNativeFCP360Viewer(); });
+        return;
+    }
+
+    @try {
+        id playerContainer = SKIPActivePlayerContainerModuleForPreview();
+        SEL setModeSel = NSSelectorFromString(@"setMode:");
+        if (!playerContainer ||
+            ![playerContainer respondsToSelector:@selector(mode)] ||
+            ![playerContainer respondsToSelector:setModeSel]) {
+            return;
+        }
+
+        NSInteger currentMode = ((NSInteger (*)(id, SEL))objc_msgSend)(playerContainer, @selector(mode));
+        if (currentMode != 8) return;
+
+        NSInteger fallbackMode = 0;
+        if ([playerContainer respondsToSelector:@selector(defaultMode)]) {
+            fallbackMode = ((NSInteger (*)(id, SEL))objc_msgSend)(playerContainer, @selector(defaultMode));
+        }
+        if (fallbackMode == 8) fallbackMode = 0;
+        ((void (*)(id, SEL, NSInteger))objc_msgSend)(playerContainer, setModeSel, fallbackMode);
+    } @catch (NSException *exception) {
+        SpliceKit_log(@"[ImmersivePreview] Native 360 viewer close failed: %@",
+                      exception.reason ?: exception.name);
+    }
+}
+
 static inline double SKIPSecondsFromCMTime(SKIP_CMTime time) {
     return time.timescale > 0 ? ((double)time.value / (double)time.timescale) : 0.0;
+}
+
+static BOOL SKIPInvokeCMTimeNoArgs(id target, SEL selector, SKIP_CMTime *outTime) {
+    if (outTime) *outTime = (SKIP_CMTime){0, 0, 0, 0};
+    if (!target || !selector || ![target respondsToSelector:selector]) return NO;
+
+    NSMethodSignature *signature = [target methodSignatureForSelector:selector];
+    if (!signature || signature.methodReturnLength != sizeof(SKIP_CMTime)) return NO;
+
+    @try {
+        NSInvocation *invocation = [NSInvocation invocationWithMethodSignature:signature];
+        invocation.target = target;
+        invocation.selector = selector;
+        [invocation invoke];
+        SKIP_CMTime value = {0, 0, 0, 0};
+        [invocation getReturnValue:&value];
+        if (value.timescale <= 0) return NO;
+        if (outTime) *outTime = value;
+        return YES;
+    } @catch (__unused NSException *exception) {
+        return NO;
+    }
+}
+
+static BOOL SKIPInvokeCMTimeWithTimeAndObject(id target,
+                                             SEL selector,
+                                             SKIP_CMTime time,
+                                             id object,
+                                             SKIP_CMTime *outTime) {
+    if (outTime) *outTime = (SKIP_CMTime){0, 0, 0, 0};
+    if (!target || !selector || ![target respondsToSelector:selector]) return NO;
+
+    NSMethodSignature *signature = [target methodSignatureForSelector:selector];
+    if (!signature || signature.numberOfArguments < 4 ||
+        signature.methodReturnLength != sizeof(SKIP_CMTime)) {
+        return NO;
+    }
+
+    @try {
+        NSInvocation *invocation = [NSInvocation invocationWithMethodSignature:signature];
+        invocation.target = target;
+        invocation.selector = selector;
+        [invocation setArgument:&time atIndex:2];
+        id objectArg = object;
+        [invocation setArgument:&objectArg atIndex:3];
+        [invocation invoke];
+        SKIP_CMTime value = {0, 0, 0, 0};
+        [invocation getReturnValue:&value];
+        if (value.timescale <= 0) return NO;
+        if (outTime) *outTime = value;
+        return YES;
+    } @catch (__unused NSException *exception) {
+        return NO;
+    }
+}
+
+static BOOL SKIPInvokeCMTimeRangeWithObject(id target,
+                                            SEL selector,
+                                            id object,
+                                            SKIP_CMTimeRange *outRange) {
+    if (outRange) *outRange = (SKIP_CMTimeRange){{0, 0, 0, 0}, {0, 0, 0, 0}};
+    if (!target || !selector || ![target respondsToSelector:selector]) return NO;
+
+    NSMethodSignature *signature = [target methodSignatureForSelector:selector];
+    if (!signature || signature.numberOfArguments < 3 ||
+        signature.methodReturnLength != sizeof(SKIP_CMTimeRange)) {
+        return NO;
+    }
+
+    @try {
+        NSInvocation *invocation = [NSInvocation invocationWithMethodSignature:signature];
+        invocation.target = target;
+        invocation.selector = selector;
+        id objectArg = object;
+        [invocation setArgument:&objectArg atIndex:2];
+        [invocation invoke];
+        SKIP_CMTimeRange range = {{0, 0, 0, 0}, {0, 0, 0, 0}};
+        [invocation getReturnValue:&range];
+        if (range.start.timescale <= 0 || range.duration.timescale <= 0) return NO;
+        if (outRange) *outRange = range;
+        return YES;
+    } @catch (__unused NSException *exception) {
+        return NO;
+    }
+}
+
+static id SKIPActiveTimelineModuleForPreview(void) {
+    if (![NSThread isMainThread]) return nil;
+
+    @try {
+        id app = [NSApplication sharedApplication];
+        id delegate = [app delegate];
+        if (!delegate) return nil;
+
+        id editorContainer = nil;
+        SEL activeEditorContainerSel = @selector(activeEditorContainer);
+        if ([delegate respondsToSelector:activeEditorContainerSel]) {
+            editorContainer = ((id (*)(id, SEL))objc_msgSend)(delegate, activeEditorContainerSel);
+        }
+
+        SEL mainEditorContainerSel = NSSelectorFromString(@"mainEditorContainer");
+        if (!editorContainer && [delegate respondsToSelector:mainEditorContainerSel]) {
+            editorContainer = ((id (*)(id, SEL))objc_msgSend)(delegate, mainEditorContainerSel);
+        }
+
+        SEL timelineModuleSel = NSSelectorFromString(@"timelineModule");
+        if (editorContainer && [editorContainer respondsToSelector:timelineModuleSel]) {
+            id timeline = ((id (*)(id, SEL))objc_msgSend)(editorContainer, timelineModuleSel);
+            if (timeline) return timeline;
+        }
+
+        SEL activeEditorModuleSel = @selector(activeEditorModule);
+        if ([delegate respondsToSelector:activeEditorModuleSel]) {
+            return ((id (*)(id, SEL))objc_msgSend)(delegate, activeEditorModuleSel);
+        }
+    } @catch (NSException *exception) {
+        SpliceKit_log(@"[ImmersivePreview] Active timeline lookup failed: %@",
+                      exception.reason ?: exception.name);
+    }
+
+    return nil;
 }
 
 static BOOL SKIPExpectedDecodeDimensions(NSDictionary *clipSummary,
@@ -94,6 +379,12 @@ static NSData *SKIPCopyPackedBGRADataFromPixelBuffer(CVPixelBufferRef pixelBuffe
     void *baseAddress = CVPixelBufferGetBaseAddress(pixelBuffer);
     size_t bytesPerRow = CVPixelBufferGetBytesPerRow(pixelBuffer);
     if (!baseAddress || bytesPerRow == 0) {
+        CVPixelBufferUnlockBaseAddress(pixelBuffer, kCVPixelBufferLock_ReadOnly);
+        return nil;
+    }
+    size_t requiredSourceBytes = (size_t)(height - 1) * bytesPerRow + (size_t)width * 4;
+    size_t dataSize = CVPixelBufferGetDataSize(pixelBuffer);
+    if (bytesPerRow < (size_t)width * 4 || (dataSize > 0 && dataSize < requiredSourceBytes)) {
         CVPixelBufferUnlockBaseAddress(pixelBuffer, kCVPixelBufferLock_ReadOnly);
         return nil;
     }
@@ -188,17 +479,27 @@ static NSData *SKIPDecodeEyeBytes(NSString *path,
 }
 
 static NSDictionary *SKIPDescribeImmersiveClipAtPath(NSString *path, NSError **error) {
-    if (path.length == 0) {
-        if (error) {
-            *error = [NSError errorWithDomain:@"SpliceKitImmersivePreview"
-                                         code:-21
-                                     userInfo:@{NSLocalizedDescriptionKey: @"No immersive BRAW path was provided"}];
-        }
+    NSString *standardizedPath = path.stringByStandardizingPath ?: @"";
+    if (standardizedPath.length == 0) {
+        if (error) *error = SKIPImmersivePreviewError(-21, @"No immersive BRAW path was provided");
+        return nil;
+    }
+    if (!standardizedPath.isAbsolutePath) {
+        if (error) *error = SKIPImmersivePreviewError(-21, @"Immersive BRAW path must be absolute");
+        return nil;
+    }
+    if (![[standardizedPath.pathExtension lowercaseString] isEqualToString:@"braw"]) {
+        if (error) *error = SKIPImmersivePreviewError(-21, @"Immersive preview only supports .braw files");
+        return nil;
+    }
+    BOOL isDirectory = NO;
+    if (![[NSFileManager defaultManager] fileExistsAtPath:standardizedPath isDirectory:&isDirectory] || isDirectory) {
+        if (error) *error = SKIPImmersivePreviewError(-21, @"Immersive BRAW file does not exist");
         return nil;
     }
 
     NSDictionary *description = SpliceKit_handleBRAWDescribeImmersive(@{
-        @"path": path ?: @"",
+        @"path": standardizedPath,
         @"motionPreviewCount": @4,
     });
     NSArray *clips = [description[@"clips"] isKindOfClass:[NSArray class]] ? description[@"clips"] : nil;
@@ -206,11 +507,10 @@ static NSDictionary *SKIPDescribeImmersiveClipAtPath(NSString *path, NSError **e
     NSString *clipError = [clip[@"error"] isKindOfClass:[NSString class]] ? clip[@"error"] : nil;
     if (!clip || clipError.length > 0) {
         if (error) {
-            *error = [NSError errorWithDomain:@"SpliceKitImmersivePreview"
-                                         code:-22
-                                     userInfo:@{NSLocalizedDescriptionKey: clipError.length > 0
-                                                    ? clipError
-                                                    : @"Unable to describe immersive BRAW clip"}];
+            *error = SKIPImmersivePreviewError(-22,
+                                               clipError.length > 0
+                                                ? clipError
+                                                : @"Unable to describe immersive BRAW clip");
         }
         return nil;
     }
@@ -933,8 +1233,10 @@ static BOOL SKIPItemBoundsInContext(id context, id item, double *outStart, doubl
     SEL startSel = @selector(timelineStartTime);
     SEL durSel = @selector(duration);
     if ([item respondsToSelector:startSel] && [item respondsToSelector:durSel]) {
-        SKIP_CMTime start = ((SKIP_CMTime (*)(id, SEL))SKIP_STRET_MSG)(item, startSel);
-        SKIP_CMTime duration = ((SKIP_CMTime (*)(id, SEL))SKIP_STRET_MSG)(item, durSel);
+        SKIP_CMTime start = {0, 0, 0, 0};
+        SKIP_CMTime duration = {0, 0, 0, 0};
+        SKIPInvokeCMTimeNoArgs(item, startSel, &start);
+        SKIPInvokeCMTimeNoArgs(item, durSel, &duration);
         if (start.timescale > 0 && duration.timescale > 0) {
             *outStart = (double)start.value / (double)start.timescale;
             *outEnd = *outStart + ((double)duration.value / (double)duration.timescale);
@@ -945,8 +1247,8 @@ static BOOL SKIPItemBoundsInContext(id context, id item, double *outStart, doubl
     SEL rangeSel = NSSelectorFromString(@"effectiveRangeOfObject:");
     if (![context respondsToSelector:rangeSel]) return NO;
 
-    SKIP_CMTimeRange range =
-        ((SKIP_CMTimeRange (*)(id, SEL, id))SKIP_STRET_MSG)(context, rangeSel, item);
+    SKIP_CMTimeRange range = {{0, 0, 0, 0}, {0, 0, 0, 0}};
+    SKIPInvokeCMTimeRangeWithObject(context, rangeSel, item, &range);
     if (range.start.timescale <= 0 || range.duration.timescale <= 0) return NO;
 
     *outStart = (double)range.start.value / (double)range.start.timescale;
@@ -959,7 +1261,7 @@ static BOOL SKIPCurrentTimelineTimeAndContext(SKIP_CMTime *outPlayhead, id *outC
     if (outContext) *outContext = nil;
     if (outSequence) *outSequence = nil;
 
-    id timeline = SpliceKit_getActiveTimelineModule();
+    id timeline = SKIPActiveTimelineModuleForPreview();
     if (!timeline) return NO;
 
     id sequence = [timeline respondsToSelector:@selector(sequence)]
@@ -977,7 +1279,8 @@ static BOOL SKIPCurrentTimelineTimeAndContext(SKIP_CMTime *outPlayhead, id *outC
     }
     if (![timeline respondsToSelector:timeSel]) return NO;
 
-    SKIP_CMTime playhead = ((SKIP_CMTime (*)(id, SEL))SKIP_STRET_MSG)(timeline, timeSel);
+    SKIP_CMTime playhead = {0, 0, 0, 0};
+    SKIPInvokeCMTimeNoArgs(timeline, timeSel, &playhead);
     if (playhead.timescale <= 0) return NO;
 
     if (outPlayhead) *outPlayhead = playhead;
@@ -992,7 +1295,8 @@ static BOOL SKIPClipTrimStartSeconds(id item, double *outTrimStartSeconds) {
 
     SEL trimmedOffsetSel = NSSelectorFromString(@"trimmedOffset");
     if ([item respondsToSelector:trimmedOffsetSel]) {
-        SKIP_CMTime trimmedOffset = ((SKIP_CMTime (*)(id, SEL))SKIP_STRET_MSG)(item, trimmedOffsetSel);
+        SKIP_CMTime trimmedOffset = {0, 0, 0, 0};
+        SKIPInvokeCMTimeNoArgs(item, trimmedOffsetSel, &trimmedOffset);
         if (trimmedOffset.timescale > 0) {
             if (outTrimStartSeconds) *outTrimStartSeconds = SKIPSecondsFromCMTime(trimmedOffset);
             return YES;
@@ -1001,7 +1305,18 @@ static BOOL SKIPClipTrimStartSeconds(id item, double *outTrimStartSeconds) {
 
     SEL clippedRangeSel = NSSelectorFromString(@"clippedRange");
     if ([item respondsToSelector:clippedRangeSel]) {
-        SKIP_CMTimeRange clippedRange = ((SKIP_CMTimeRange (*)(id, SEL))SKIP_STRET_MSG)(item, clippedRangeSel);
+        SKIP_CMTimeRange clippedRange = {{0, 0, 0, 0}, {0, 0, 0, 0}};
+        NSMethodSignature *signature = [item methodSignatureForSelector:clippedRangeSel];
+        if (signature && signature.methodReturnLength == sizeof(SKIP_CMTimeRange)) {
+            @try {
+                NSInvocation *invocation = [NSInvocation invocationWithMethodSignature:signature];
+                invocation.target = item;
+                invocation.selector = clippedRangeSel;
+                [invocation invoke];
+                [invocation getReturnValue:&clippedRange];
+            } @catch (__unused NSException *exception) {
+            }
+        }
         if (clippedRange.start.timescale > 0) {
             if (outTrimStartSeconds) *outTrimStartSeconds = SKIPSecondsFromCMTime(clippedRange.start);
             return YES;
@@ -1010,7 +1325,8 @@ static BOOL SKIPClipTrimStartSeconds(id item, double *outTrimStartSeconds) {
 
     SEL trimStartSel = NSSelectorFromString(@"trimStartTime");
     if ([item respondsToSelector:trimStartSel]) {
-        SKIP_CMTime trimStart = ((SKIP_CMTime (*)(id, SEL))SKIP_STRET_MSG)(item, trimStartSel);
+        SKIP_CMTime trimStart = {0, 0, 0, 0};
+        SKIPInvokeCMTimeNoArgs(item, trimStartSel, &trimStart);
         if (trimStart.timescale > 0) {
             if (outTrimStartSeconds) *outTrimStartSeconds = SKIPSecondsFromCMTime(trimStart);
             return YES;
@@ -1046,8 +1362,8 @@ static BOOL SKIPClipSourceSecondsAtPlayhead(id item,
     BOOL hasSaneLocalSeconds = NO;
     SEL localTimeSel = NSSelectorFromString(@"containerToLocalTime:container:");
     if ([item respondsToSelector:localTimeSel]) {
-        SKIP_CMTime localTime =
-            ((SKIP_CMTime (*)(id, SEL, SKIP_CMTime, id))SKIP_STRET_MSG)(item, localTimeSel, playhead, context);
+        SKIP_CMTime localTime = {0, 0, 0, 0};
+        SKIPInvokeCMTimeWithTimeAndObject(item, localTimeSel, playhead, context, &localTime);
         if (localTime.timescale > 0) {
             localSeconds = SKIPSecondsFromCMTime(localTime);
             hasSaneLocalSeconds = (localSeconds >= -0.001 &&
@@ -1083,7 +1399,7 @@ static BOOL SKIPClipSourceSecondsAtPlayhead(id item,
 }
 
 static id SKIPTimelineClipNearPlayhead(void) {
-    id timeline = SpliceKit_getActiveTimelineModule();
+    id timeline = SKIPActiveTimelineModuleForPreview();
     if (!timeline) return nil;
 
     id sequence = [timeline respondsToSelector:@selector(sequence)]
@@ -1113,7 +1429,8 @@ static id SKIPTimelineClipNearPlayhead(void) {
     }
     if (![timeline respondsToSelector:timeSel]) return items.firstObject;
 
-    SKIP_CMTime playhead = ((SKIP_CMTime (*)(id, SEL))SKIP_STRET_MSG)(timeline, timeSel);
+    SKIP_CMTime playhead = {0, 0, 0, 0};
+    SKIPInvokeCMTimeNoArgs(timeline, timeSel, &playhead);
     if (playhead.timescale <= 0) return items.firstObject;
     double playheadSeconds = (double)playhead.value / (double)playhead.timescale;
 
@@ -1154,19 +1471,274 @@ NSString *SpliceKit_copyTimelineClipPathNearPlayhead(void) {
 }
 
 static NSString *SKIPResolveFirstPathFromSelection(void) {
-    SpliceKit_log(@"[ImmersivePreview] loadSelected resolving timeline path");
-    NSString *timelinePath = SpliceKit_copyTimelineClipPathNearPlayhead();
-    if (timelinePath.length == 0) {
-        SpliceKit_log(@"[ImmersivePreview] loadSelected resolved no timeline path");
+    @try {
+        NSString *timelinePath = SpliceKit_copyTimelineClipPathNearPlayhead() ?: @"";
+        if (timelinePath.length == 0) return nil;
+
+        NSString *path = SpliceKitBRAWResolveOriginalPathForPublic(timelinePath) ?: @"";
+        if (path.length == 0 || ![[path.pathExtension lowercaseString] isEqualToString:@"braw"]) {
+            return nil;
+        }
+
+        return [[NSURL fileURLWithPath:path] URLByResolvingSymlinksInPath].path.stringByStandardizingPath;
+    } @catch (__unused NSException *exception) {
         return nil;
     }
-    SpliceKit_log(@"[ImmersivePreview] loadSelected raw timelinePath=%@", timelinePath);
-    SpliceKit_log(@"[ImmersivePreview] loadSelected resolving original path");
-    NSString *path = SpliceKitBRAWResolveOriginalPathForPublic(timelinePath);
-    path = [[NSURL fileURLWithPath:path] URLByResolvingSymlinksInPath].path.stringByStandardizingPath;
-    SpliceKit_log(@"[ImmersivePreview] loadSelected timelinePath=%@ resolvedPath=%@", timelinePath, path ?: @"");
-    if (path.length == 0 || ![[path.pathExtension lowercaseString] isEqualToString:@"braw"]) return nil;
-    return path;
+}
+
+static NSInteger SKIPCameraModeForVideoProps(id videoProps) {
+    if (!videoProps || ![videoProps respondsToSelector:@selector(cameraMode)]) return 0;
+    @try {
+        return ((NSInteger (*)(id, SEL))objc_msgSend)(videoProps, @selector(cameraMode));
+    } @catch (__unused NSException *exception) {
+        return 0;
+    }
+}
+
+static BOOL SKIPSetIntegerIfSupported(id target, NSString *selectorName, NSInteger value) {
+    if (!target || selectorName.length == 0) return NO;
+    SEL selector = NSSelectorFromString(selectorName);
+    if (![target respondsToSelector:selector]) return NO;
+    @try {
+        ((void (*)(id, SEL, NSInteger))objc_msgSend)(target, selector, value);
+        return YES;
+    } @catch (NSException *exception) {
+        SpliceKit_log(@"[ImmersivePreview] %@ failed on %@: %@",
+                      selectorName,
+                      NSStringFromClass([target class]),
+                      exception.reason ?: exception.name);
+        return NO;
+    }
+}
+
+static NSDictionary *SKIPNormalizeNativeFCP360PlayerModules(NSDictionary *clipSummary) {
+    if (![NSThread isMainThread]) {
+        __block NSDictionary *result = nil;
+        SpliceKit_executeOnMainThread(^{
+            result = SKIPNormalizeNativeFCP360PlayerModules(clipSummary);
+        });
+        return result ?: @{};
+    }
+
+    NSInteger width = [clipSummary[@"width"] respondsToSelector:@selector(integerValue)] ? [clipSummary[@"width"] integerValue] : 0;
+    NSInteger height = [clipSummary[@"height"] respondsToSelector:@selector(integerValue)] ? [clipSummary[@"height"] integerValue] : 0;
+    if (width <= 0 || height <= 0) return @{};
+
+    id playerContainer = SKIPActivePlayerContainerModuleForPreview();
+    SEL playerModulesSel = NSSelectorFromString(@"playerModules");
+    if (!playerContainer || ![playerContainer respondsToSelector:playerModulesSel]) return @{};
+
+    id playerModules = nil;
+    @try {
+        playerModules = ((id (*)(id, SEL))objc_msgSend)(playerContainer, playerModulesSel);
+    } @catch (__unused NSException *exception) {
+        return @{};
+    }
+    if (![playerModules isKindOfClass:[NSArray class]]) return @{};
+
+    NSMutableArray *players = [NSMutableArray array];
+    CGRect rectangularBounds = CGRectMake(0.0, 0.0, (CGFloat)width, (CGFloat)height);
+    SEL videoModuleSel = NSSelectorFromString(@"videoModule");
+    SEL is360ViewerSel = NSSelectorFromString(@"is360Viewer");
+    SEL sequenceCameraModeSel = NSSelectorFromString(@"sequenceCameraMode");
+    SEL setSequenceCameraModeSel = NSSelectorFromString(@"setSequenceCameraMode:");
+    SEL setSequenceBoundsSel = NSSelectorFromString(@"setSequenceBounds:");
+    SEL sequenceFormatChangedSel = NSSelectorFromString(@"_sequenceFormatChanged:");
+
+    for (id playerModule in (NSArray *)playerModules) {
+        NSMutableDictionary *entry = [@{
+            @"playerClass": NSStringFromClass([playerModule class]) ?: @"",
+        } mutableCopy];
+
+        @try {
+            id videoModule = ([playerModule respondsToSelector:videoModuleSel])
+                ? ((id (*)(id, SEL))objc_msgSend)(playerModule, videoModuleSel)
+                : nil;
+            if (!videoModule) {
+                entry[@"status"] = @"noVideoModule";
+                [players addObject:entry];
+                continue;
+            }
+
+            BOOL is360Viewer = [videoModule respondsToSelector:is360ViewerSel]
+                ? ((BOOL (*)(id, SEL))objc_msgSend)(videoModule, is360ViewerSel)
+                : NO;
+            entry[@"videoClass"] = NSStringFromClass([videoModule class]) ?: @"";
+            entry[@"is360Viewer"] = @(is360Viewer);
+
+            if ([videoModule respondsToSelector:setSequenceCameraModeSel]) {
+                int cameraMode = is360Viewer ? 1 : 0;
+                ((void (*)(id, SEL, int))objc_msgSend)(videoModule, setSequenceCameraModeSel, cameraMode);
+                entry[@"targetCameraMode"] = @(cameraMode);
+            }
+
+            if (!is360Viewer && [videoModule respondsToSelector:setSequenceBoundsSel]) {
+                ((void (*)(id, SEL, CGRect))objc_msgSend)(videoModule, setSequenceBoundsSel, rectangularBounds);
+                entry[@"targetSequenceBounds"] = @{
+                    @"x": @(rectangularBounds.origin.x),
+                    @"y": @(rectangularBounds.origin.y),
+                    @"width": @(rectangularBounds.size.width),
+                    @"height": @(rectangularBounds.size.height),
+                };
+            }
+
+            if ([videoModule respondsToSelector:sequenceFormatChangedSel]) {
+                ((void (*)(id, SEL, id))objc_msgSend)(videoModule, sequenceFormatChangedSel, nil);
+            }
+
+            if ([videoModule respondsToSelector:sequenceCameraModeSel]) {
+                int finalCameraMode = ((int (*)(id, SEL))objc_msgSend)(videoModule, sequenceCameraModeSel);
+                entry[@"sequenceCameraMode"] = @(finalCameraMode);
+            }
+            entry[@"status"] = @"ok";
+        } @catch (NSException *exception) {
+            entry[@"status"] = @"error";
+            entry[@"error"] = exception.reason ?: exception.name ?: @"unknown error";
+        }
+
+        [players addObject:entry];
+    }
+
+    return @{
+        @"status": @"ok",
+        @"rectangularWidth": @(width),
+        @"rectangularHeight": @(height),
+        @"players": players,
+    };
+}
+
+static NSDictionary *SKIPPrepareNativeFCP360ForImmersiveBRAW(NSString *resolvedPath,
+                                                            NSDictionary *clipSummary,
+                                                            NSError **error) {
+    if (![NSThread isMainThread]) {
+        __block NSDictionary *result = nil;
+        __block NSError *mainError = nil;
+        SpliceKit_executeOnMainThread(^{
+            result = SKIPPrepareNativeFCP360ForImmersiveBRAW(resolvedPath, clipSummary, &mainError);
+        });
+        if (!result && error) *error = mainError;
+        return result;
+    }
+
+    NSDictionary *immersive = [clipSummary[@"immersive"] isKindOfClass:[NSDictionary class]]
+        ? clipSummary[@"immersive"]
+        : nil;
+    BOOL immersiveAvailable = [immersive[@"available"] respondsToSelector:@selector(boolValue)]
+        ? [immersive[@"available"] boolValue]
+        : NO;
+    if (!immersiveAvailable) {
+        if (error) {
+            *error = SKIPImmersivePreviewError(-33,
+                                               @"Selected BRAW is not immersive; leaving normal BRAW viewer settings unchanged");
+        }
+        return nil;
+    }
+
+    id timeline = SKIPActiveTimelineModuleForPreview();
+    id sequence = (timeline && [timeline respondsToSelector:@selector(sequence)])
+        ? ((id (*)(id, SEL))objc_msgSend)(timeline, @selector(sequence))
+        : nil;
+    if (!sequence || ![sequence respondsToSelector:@selector(videoProps)]) {
+        if (error) *error = SKIPImmersivePreviewError(-34, @"Could not find the active FCP project sequence");
+        return nil;
+    }
+
+    id oldVideoProps = ((id (*)(id, SEL))objc_msgSend)(sequence, @selector(videoProps));
+    NSInteger oldCameraMode = SKIPCameraModeForVideoProps(oldVideoProps);
+
+    NSString *timelinePath = @"";
+    id timelineItem = SKIPTimelineClipNearPlayhead();
+    if (timelineItem) {
+        NSURL *mediaURL = SKIPDirectMediaURLForClipObject(timelineItem);
+        timelinePath = mediaURL.path.stringByStandardizingPath ?: @"";
+        NSString *resolvedTimelinePath = timelinePath.length > 0
+            ? (SpliceKitBRAWResolveOriginalPathForPublic(timelinePath) ?: timelinePath)
+            : @"";
+        resolvedTimelinePath = resolvedTimelinePath.length > 0
+            ? [[NSURL fileURLWithPath:resolvedTimelinePath] URLByResolvingSymlinksInPath].path.stringByStandardizingPath
+            : @"";
+        if (resolvedPath.length > 0 &&
+            resolvedTimelinePath.length > 0 &&
+            ![resolvedTimelinePath isEqualToString:resolvedPath]) {
+            if (error) *error = SKIPImmersivePreviewError(-35, @"The active timeline clip no longer matches the selected immersive BRAW file");
+            return nil;
+        }
+
+        SKIPSetIntegerIfSupported(timelineItem, @"setSphericalProjectionMode:", 1);
+        SKIPSetIntegerIfSupported(timelineItem, @"setStereoscopicMode:", 0);
+        SKIPSetIntegerIfSupported(timelineItem, @"setHeroEye:", 0);
+    }
+
+    NSInteger targetCameraMode = 1;
+    BOOL sequenceChanged = NO;
+    NSString *sequenceDescription = @"";
+
+    if ((oldCameraMode & 0xFFFF) != 1) {
+        SEL copyProjectionSel = NSSelectorFromString(@"copyPropsWithCameraProjectionMode:adjustPaspForEquirect:");
+        if (!oldVideoProps || ![oldVideoProps respondsToSelector:copyProjectionSel]) {
+            if (error) *error = SKIPImmersivePreviewError(-36, @"FCP sequence video properties cannot be converted to a native 360 projection");
+            return nil;
+        }
+
+        CFTypeRef copiedVideoProps = ((CFTypeRef (*)(id, SEL, NSInteger, BOOL))objc_msgSend)(oldVideoProps,
+                                                                                             copyProjectionSel,
+                                                                                             targetCameraMode,
+                                                                                             YES);
+        id newVideoProps = (__bridge_transfer id)copiedVideoProps;
+        if (!newVideoProps) {
+            if (error) *error = SKIPImmersivePreviewError(-36, @"FCP failed to create native 360 sequence video properties");
+            return nil;
+        }
+
+        @try {
+            ((void (*)(id, SEL, id))objc_msgSend)(sequence, NSSelectorFromString(@"setVideoProps:"), newVideoProps);
+            if ([sequence respondsToSelector:NSSelectorFromString(@"forcePlayerContextChangeForSequence")]) {
+                ((void (*)(id, SEL))objc_msgSend)(sequence, NSSelectorFromString(@"forcePlayerContextChangeForSequence"));
+            }
+            sequenceChanged = YES;
+        } @catch (NSException *exception) {
+            if (error) {
+                *error = SKIPImmersivePreviewError(-37,
+                                                   exception.reason ?: @"FCP rejected the native 360 sequence video properties");
+            }
+            return nil;
+        }
+    }
+
+    id finalVideoProps = ((id (*)(id, SEL))objc_msgSend)(sequence, @selector(videoProps));
+    NSInteger finalCameraMode = SKIPCameraModeForVideoProps(finalVideoProps);
+    SEL propDescSel = NSSelectorFromString(@"_propertyDescription");
+    if ([finalVideoProps respondsToSelector:propDescSel]) {
+        id desc = ((id (*)(id, SEL))objc_msgSend)(finalVideoProps, propDescSel);
+        if ([desc isKindOfClass:[NSString class]]) sequenceDescription = desc;
+    }
+
+    NSMutableDictionary *status = [@{
+        @"status": @"ok",
+        @"path": resolvedPath ?: @"",
+        @"timelinePath": timelinePath ?: @"",
+        @"immersiveAvailable": @YES,
+        @"oldSequenceCameraMode": @(oldCameraMode),
+        @"sequenceCameraMode": @(finalCameraMode),
+        @"targetCameraMode": @(targetCameraMode),
+        @"sequenceChanged": @(sequenceChanged),
+        @"sequenceVideoProps": sequenceDescription ?: @"",
+    } mutableCopy];
+
+    if (timelineItem) {
+        SEL sphericalSel = NSSelectorFromString(@"sphericalProjectionMode");
+        if ([timelineItem respondsToSelector:sphericalSel]) {
+            NSInteger spherical = ((NSInteger (*)(id, SEL))objc_msgSend)(timelineItem, sphericalSel);
+            status[@"clipSphericalProjectionMode"] = @(spherical);
+        }
+        SEL stereoSel = NSSelectorFromString(@"stereoscopicMode");
+        if ([timelineItem respondsToSelector:stereoSel]) {
+            NSInteger stereo = ((NSInteger (*)(id, SEL))objc_msgSend)(timelineItem, stereoSel);
+            status[@"clipStereoscopicMode"] = @(stereo);
+        }
+    }
+
+    return [status copy];
 }
 
 @interface SKIPInteractiveImageView : MTKView <MTKViewDelegate>
@@ -1178,6 +1750,7 @@ static NSString *SKIPResolveFirstPathFromSelection(void) {
 @property (nonatomic, readonly) BOOL rendererReady;
 - (void)syncFromBackend;
 - (void)clearRenderer;
+- (void)waitForInFlightRendering;
 - (NSDictionary *)rendererPerformanceSnapshot;
 - (void)resetRendererPerformanceCounters;
 @end
@@ -1193,7 +1766,6 @@ static NSString *SKIPResolveFirstPathFromSelection(void) {
 - (NSDictionary *)metalRenderStateSnapshot;
 - (NSDictionary *)performanceSnapshot;
 - (void)logPerformanceIfNeeded;
-- (NSImage *)currentPreviewImage;
 - (void)previewDraggedByDelta:(NSPoint)delta ended:(BOOL)ended;
 - (void)previewScrolledByDeltaY:(CGFloat)deltaY;
 - (void)updateTimelineSyncTimer;
@@ -1206,7 +1778,7 @@ static NSView *SKIPFindLargestPlayerView(void) {
     NSWindow *mainWindow = NSApp.mainWindow;
     if (!mainWindow) {
         for (NSWindow *window in NSApp.windows) {
-            if (!window.isVisible) continue;
+            if (!window.isVisible || !window.contentView) continue;
             if (!mainWindow || (window.frame.size.width * window.frame.size.height >
                                 mainWindow.frame.size.width * mainWindow.frame.size.height)) {
                 mainWindow = window;
@@ -1238,9 +1810,14 @@ static NSView *SKIPFindLargestPlayerView(void) {
 @interface SKIPImmersiveViewerOverlayHost : NSObject
 @property (nonatomic, weak) NSView *attachedPlayerView;
 @property (nonatomic, strong) NSView *overlayView;
+@property (nonatomic, strong) NSArray<NSLayoutConstraint *> *overlayConstraints;
 @property (nonatomic, strong) SKIPInteractiveImageView *previewView;
 @property (nonatomic, strong) NSTextField *badgeLabel;
 @property (nonatomic, strong) NSButton *closeButton;
+- (BOOL)isVisible;
+- (void)hide;
+- (BOOL)showForCurrentSelection:(NSError **)error;
+- (BOOL)showLoadedClip:(NSError **)error;
 - (NSDictionary *)rendererPerformanceSnapshot;
 @end
 
@@ -1258,6 +1835,15 @@ static NSView *SKIPFindLargestPlayerView(void) {
 }
 
 - (void)hide {
+    if (![NSThread isMainThread]) {
+        SpliceKit_executeOnMainThread(^{ [self hide]; });
+        return;
+    }
+
+    [NSLayoutConstraint deactivateConstraints:self.overlayConstraints ?: @[]];
+    self.overlayConstraints = nil;
+    [self.previewView waitForInFlightRendering];
+    [self.previewView clearRenderer];
     [self.overlayView removeFromSuperview];
     self.attachedPlayerView = nil;
     [[SpliceKitImmersivePreviewPanel sharedPanel] updateTimelineSyncTimer];
@@ -1271,6 +1857,8 @@ static NSView *SKIPFindLargestPlayerView(void) {
     if (!playerView) return;
     if (self.overlayView.superview == playerView) return;
 
+    [NSLayoutConstraint deactivateConstraints:self.overlayConstraints ?: @[]];
+    self.overlayConstraints = nil;
     [self.overlayView removeFromSuperview];
     self.attachedPlayerView = playerView;
 
@@ -1285,13 +1873,14 @@ static NSView *SKIPFindLargestPlayerView(void) {
 
         SKIPInteractiveImageView *previewView = [[SKIPInteractiveImageView alloc] initWithFrame:NSZeroRect];
         previewView.translatesAutoresizingMaskIntoConstraints = NO;
-        previewView.wantsLayer = YES;
-        previewView.layer.backgroundColor = NSColor.blackColor.CGColor;
+        __weak SKIPImmersiveViewerOverlayHost *weakSelf = self;
         previewView.dragHandler = ^(NSPoint delta, BOOL ended) {
+            (void)weakSelf;
             SpliceKitImmersivePreviewPanel *backend = [SpliceKitImmersivePreviewPanel sharedPanel];
             [backend previewDraggedByDelta:delta ended:ended];
         };
         previewView.scrollHandler = ^(CGFloat deltaY) {
+            (void)weakSelf;
             SpliceKitImmersivePreviewPanel *backend = [SpliceKitImmersivePreviewPanel sharedPanel];
             [backend previewScrolledByDeltaY:deltaY];
         };
@@ -1333,17 +1922,27 @@ static NSView *SKIPFindLargestPlayerView(void) {
     }
 
     [playerView addSubview:self.overlayView positioned:NSWindowAbove relativeTo:nil];
-    [NSLayoutConstraint activateConstraints:@[
+    self.overlayConstraints = @[
         [self.overlayView.topAnchor constraintEqualToAnchor:playerView.topAnchor],
         [self.overlayView.leadingAnchor constraintEqualToAnchor:playerView.leadingAnchor],
         [self.overlayView.trailingAnchor constraintEqualToAnchor:playerView.trailingAnchor],
         [self.overlayView.bottomAnchor constraintEqualToAnchor:playerView.bottomAnchor],
-    ]];
+    ];
+    [NSLayoutConstraint activateConstraints:self.overlayConstraints];
 }
 
 - (void)syncImageFromBackend {
+    if (![NSThread isMainThread]) {
+        SpliceKit_executeOnMainThread(^{ [self syncImageFromBackend]; });
+        return;
+    }
+
     SpliceKitImmersivePreviewPanel *backend = [SpliceKitImmersivePreviewPanel sharedPanel];
-    [self.previewView syncFromBackend];
+    if (self.previewView.rendererReady) {
+        [self.previewView syncFromBackend];
+    } else {
+        self.previewView.image = backend.lastRenderedImage;
+    }
 
     NSDictionary *snapshot = backend.lastRenderedSnapshot ?: [backend statusSnapshot];
     NSString *path = [snapshot[@"path"] isKindOfClass:[NSString class]] ? snapshot[@"path"] : @"";
@@ -1362,26 +1961,30 @@ static NSView *SKIPFindLargestPlayerView(void) {
 }
 
 - (BOOL)showForCurrentSelection:(NSError **)error {
-    NSView *playerView = SKIPFindLargestPlayerView();
-    if (!playerView) {
-        if (error) {
-            *error = [NSError errorWithDomain:@"SpliceKitImmersivePreview" code:-30
-                                     userInfo:@{NSLocalizedDescriptionKey: @"Could not find the active FCP viewer"}];
-        }
-        return NO;
+    if (![NSThread isMainThread]) {
+        __block BOOL ok = NO;
+        __block NSError *mainError = nil;
+        SpliceKit_executeOnMainThread(^{
+            ok = [self showForCurrentSelection:&mainError];
+        });
+        if (!ok && error) *error = mainError;
+        return ok;
     }
 
     SpliceKitImmersivePreviewPanel *backend = [SpliceKitImmersivePreviewPanel sharedPanel];
-    [backend setupPanelIfNeeded];
     NSString *selectedPath = SKIPResolveFirstPathFromSelection();
     if (selectedPath.length == 0) {
-        if (error) {
-            *error = [NSError errorWithDomain:@"SpliceKitImmersivePreview" code:-31
-                                     userInfo:@{NSLocalizedDescriptionKey: @"No immersive BRAW clip is selected near the playhead"}];
-        }
+        if (error) *error = SKIPImmersivePreviewError(-31, @"No immersive BRAW clip is selected near the playhead");
         return NO;
     }
 
+    NSView *playerView = SKIPFindLargestPlayerView();
+    if (!playerView) {
+        if (error) *error = SKIPImmersivePreviewError(-30, @"Could not find the active FCP viewer");
+        return NO;
+    }
+
+    [backend setupPanelIfNeeded];
     [self ensureOverlayAttachedToPlayerView:playerView];
     [backend updateTimelineSyncTimer];
     [backend setMessage:@"Loading immersive viewer..."];
@@ -1417,45 +2020,48 @@ static NSView *SKIPFindLargestPlayerView(void) {
     return YES;
 }
 
-- (BOOL)toggleForCurrentSelection:(NSError **)error {
-    if (self.isVisible) {
-        [self hide];
-        return YES;
+- (BOOL)showLoadedClip:(NSError **)error {
+    if (![NSThread isMainThread]) {
+        __block BOOL ok = NO;
+        __block NSError *mainError = nil;
+        SpliceKit_executeOnMainThread(^{
+            ok = [self showLoadedClip:&mainError];
+        });
+        if (!ok && error) *error = mainError;
+        return ok;
     }
-    return [self showForCurrentSelection:error];
+
+    SpliceKitImmersivePreviewPanel *backend = [SpliceKitImmersivePreviewPanel sharedPanel];
+    if (backend.selectedPath.length == 0) {
+        if (error) *error = SKIPImmersivePreviewError(-32, @"No immersive BRAW clip is loaded");
+        return NO;
+    }
+
+    NSView *playerView = SKIPFindLargestPlayerView();
+    if (!playerView) {
+        if (error) *error = SKIPImmersivePreviewError(-30, @"Could not find the active FCP viewer");
+        return NO;
+    }
+
+    [backend setupPanelIfNeeded];
+    [self ensureOverlayAttachedToPlayerView:playerView];
+    [backend updateTimelineSyncTimer];
+    [backend setMessage:@"Loading immersive viewer..."];
+
+    NSError *renderError = nil;
+    BOOL renderOK = [backend requestPreviewRenderInteractive:NO error:&renderError];
+    if (!renderOK) {
+        [backend setMessage:renderError.localizedDescription ?: @"Failed to render immersive viewer clip."];
+        if (error) *error = renderError;
+        return NO;
+    }
+
+    [self syncImageFromBackend];
+    [backend setMessage:@"Immersive viewer ready"];
+    return YES;
 }
 
 @end
-
-static IMP sOrigPEAppControllerShow360 = NULL;
-
-static void SpliceKit_PEAppController_show360(id self, SEL _cmd, id sender) {
-    NSError *error = nil;
-    BOOL handled = [[SKIPImmersiveViewerOverlayHost sharedHost] toggleForCurrentSelection:&error];
-    if (handled) {
-        if (error.localizedDescription.length > 0) {
-            SpliceKit_log(@"[ImmersiveViewer] show360 handled with warning: %@", error.localizedDescription);
-        } else {
-            SpliceKit_log(@"[ImmersiveViewer] Redirected show360: to immersive viewer overlay");
-        }
-        return;
-    }
-
-    if (error.localizedDescription.length > 0) {
-        SpliceKit_log(@"[ImmersiveViewer] Falling back to native show360: %@", error.localizedDescription);
-    }
-    if (sOrigPEAppControllerShow360) {
-        ((void (*)(id, SEL, id))sOrigPEAppControllerShow360)(self, _cmd, sender);
-    }
-}
-
-void SpliceKit_installImmersiveViewerBridge(void) {
-    static BOOL logged = NO;
-    if (logged) return;
-
-    logged = YES;
-    SpliceKit_log(@"[ImmersiveViewer] Built-in show360: bridge disabled; use SpliceKit immersive preview commands instead");
-}
 
 @interface SKIPInteractiveImageView ()
 @property (nonatomic, weak) SpliceKitImmersivePreviewPanel *backend;
@@ -1464,6 +2070,7 @@ void SpliceKit_installImmersiveViewerBridge(void) {
 @property (nonatomic, strong) id<MTLRenderPipelineState> pipelineState;
 @property (nonatomic, strong) id<MTLTexture> leftTexture;
 @property (nonatomic, strong) id<MTLTexture> rightTexture;
+@property (nonatomic, strong) id<MTLCommandBuffer> inFlightCommandBuffer;
 @property (nonatomic, strong) NSData *uploadedLeftData;
 @property (nonatomic, strong) NSData *uploadedRightData;
 @property (nonatomic, strong) NSImageView *cpuFallbackView;
@@ -1540,13 +2147,6 @@ void SpliceKit_installImmersiveViewerBridge(void) {
         [cpuFallbackView.bottomAnchor constraintEqualToAnchor:self.bottomAnchor],
     ]];
 
-    SpliceKit_log(@"[ImmersivePreview] MTKView init device=%@ queue=%@ pipeline=%@ sampler=%@ ready=%@ layer=%@",
-                  device ? @"yes" : @"no",
-                  self.renderCommandQueue ? @"yes" : @"no",
-                  self.pipelineState ? @"yes" : @"no",
-                  self.samplerState ? @"yes" : @"no",
-                  self.rendererReady ? @"yes" : @"no",
-                  NSStringFromClass([self.layer class]) ?: @"<nil>");
     [self resetRendererPerformanceCounters];
     return self;
 }
@@ -1556,6 +2156,7 @@ void SpliceKit_installImmersiveViewerBridge(void) {
 }
 
 - (void)clearRenderer {
+    [self waitForInFlightRendering];
     self.leftTexture = nil;
     self.rightTexture = nil;
     self.uploadedLeftData = nil;
@@ -1564,6 +2165,15 @@ void SpliceKit_installImmersiveViewerBridge(void) {
     self.uploadedWidth = 0;
     self.uploadedHeight = 0;
     [self setNeedsDisplay:YES];
+}
+
+- (void)waitForInFlightRendering {
+    id<MTLCommandBuffer> commandBuffer = self.inFlightCommandBuffer;
+    if (!commandBuffer) return;
+    if (commandBuffer.status < MTLCommandBufferStatusCompleted) {
+        [commandBuffer waitUntilCompleted];
+    }
+    self.inFlightCommandBuffer = nil;
 }
 
 - (void)resetRendererPerformanceCounters {
@@ -1654,6 +2264,20 @@ void SpliceKit_installImmersiveViewerBridge(void) {
                         width:(size_t)width
                        height:(size_t)height {
     if (!texturePtr || !data || width == 0 || height == 0) return;
+    if (width > SIZE_MAX / 4 || height > SIZE_MAX / (width * 4)) {
+        SpliceKit_log(@"[ImmersivePreview] Refusing texture upload with overflow dimensions %zux%zu", width, height);
+        return;
+    }
+    NSUInteger bytesPerRow = (NSUInteger)width * 4;
+    NSUInteger requiredBytes = bytesPerRow * (NSUInteger)height;
+    if (data.length < requiredBytes) {
+        SpliceKit_log(@"[ImmersivePreview] Refusing short texture upload %lu < %lu for %zux%zu",
+                      (unsigned long)data.length,
+                      (unsigned long)requiredBytes,
+                      width,
+                      height);
+        return;
+    }
     id<MTLTexture> texture = *texturePtr;
     if (!texture || texture.width != width || texture.height != height) {
         texture = [self newTextureForWidth:width height:height];
@@ -1662,10 +2286,14 @@ void SpliceKit_installImmersiveViewerBridge(void) {
     if (!texture) return;
 
     MTLRegion region = MTLRegionMake2D(0, 0, width, height);
-    [texture replaceRegion:region mipmapLevel:0 withBytes:data.bytes bytesPerRow:width * 4];
+    [texture replaceRegion:region mipmapLevel:0 withBytes:data.bytes bytesPerRow:bytesPerRow];
 }
 
 - (void)syncFromBackend {
+    if (![NSThread isMainThread]) {
+        SpliceKit_executeOnMainThread(^{ [self syncFromBackend]; });
+        return;
+    }
     if (!self.rendererReady || !self.backend) return;
 
     self.syncRequestCount += 1;
@@ -1793,6 +2421,16 @@ void SpliceKit_installImmersiveViewerBridge(void) {
     [encoder endEncoding];
 
     [commandBuffer presentDrawable:drawable];
+    self.inFlightCommandBuffer = commandBuffer;
+    __weak SKIPInteractiveImageView *weakSelf = self;
+    [commandBuffer addCompletedHandler:^(id<MTLCommandBuffer> completedBuffer) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            SKIPInteractiveImageView *strongSelf = weakSelf;
+            if (strongSelf.inFlightCommandBuffer == completedBuffer) {
+                strongSelf.inFlightCommandBuffer = nil;
+            }
+        });
+    }];
     [commandBuffer commit];
 
     CFTimeInterval drawEnd = SKIPNow();
@@ -1881,6 +2519,7 @@ void SpliceKit_installImmersiveViewerBridge(void) {
 @property (nonatomic, strong) NSDictionary *lastRenderedSnapshot;
 @property (nonatomic, strong) NSTimer *timelineSyncTimer;
 @property (nonatomic, strong) NSDictionary *lastTimelineSyncSnapshot;
+@property (nonatomic, strong) NSDictionary *lastNativeViewerStatus;
 @property (nonatomic) uint64_t previewRequestCount;
 @property (nonatomic) uint64_t interactivePreviewRequestCount;
 @property (nonatomic) CFTimeInterval lastPreviewRequestTimestamp;
@@ -1920,15 +2559,14 @@ void SpliceKit_installImmersiveViewerBridge(void) {
 @property (nonatomic) CFTimeInterval perfRenderRequestedAt;
 @property (nonatomic) CFTimeInterval lastPerfLogTimestamp;
 
+- (uint64_t)bumpRenderGeneration;
+- (BOOL)isRenderGenerationCurrent:(uint64_t)generation;
 - (uint32_t)currentFrameIndex;
 - (NSString *)currentEyeMode;
 - (NSString *)currentViewMode;
 - (uint32_t)currentScaleHint;
 - (NSInteger)currentHeroEyeIndex;
 - (void)invalidateDecodeCache;
-- (BOOL)ensureDecodedFramesWithError:(NSError **)error;
-- (NSImage *)currentPreviewImage;
-- (NSImage *)currentPreviewImageInteractive:(BOOL)interactive;
 - (BOOL)applyLoadedClipSummary:(NSDictionary *)clipSummary
                        forPath:(NSString *)path
                          error:(NSError **)error;
@@ -1945,6 +2583,7 @@ void SpliceKit_installImmersiveViewerBridge(void) {
 - (NSDictionary *)timelineSyncSnapshot;
 - (BOOL)syncFrameIndexToTimelinePlayheadAndReturnChange:(BOOL *)outChanged error:(NSError **)error;
 - (void)timelineSyncTimerFired:(NSTimer *)timer;
+- (void)refreshUIState;
 @end
 
 @implementation SpliceKitImmersivePreviewPanel
@@ -1967,6 +2606,23 @@ void SpliceKit_installImmersiveViewerBridge(void) {
     return self;
 }
 
+- (void)dealloc {
+    [self.timelineSyncTimer invalidate];
+}
+
+- (uint64_t)bumpRenderGeneration {
+    @synchronized (self) {
+        self.renderGeneration += 1;
+        return self.renderGeneration;
+    }
+}
+
+- (BOOL)isRenderGenerationCurrent:(uint64_t)generation {
+    @synchronized (self) {
+        return generation == self.renderGeneration;
+    }
+}
+
 - (BOOL)isVisible {
     return self.panel && self.panel.isVisible;
 }
@@ -1987,6 +2643,12 @@ void SpliceKit_installImmersiveViewerBridge(void) {
         SpliceKit_executeOnMainThread(^{ [self hidePanel]; });
         return;
     }
+    [self.timelineSyncTimer invalidate];
+    self.timelineSyncTimer = nil;
+    if (!self.isViewerVisible) {
+        [self invalidateDecodeCache];
+        [self.imageView clearRenderer];
+    }
     [self.panel orderOut:nil];
     [self updateTimelineSyncTimer];
 }
@@ -1994,6 +2656,84 @@ void SpliceKit_installImmersiveViewerBridge(void) {
 - (void)togglePanel {
     if (self.isVisible) [self hidePanel];
     else [self showPanel];
+}
+
+- (BOOL)showInViewerForCurrentSelection:(NSError **)error {
+    if (![NSThread isMainThread]) {
+        __block BOOL ok = NO;
+        __block NSError *mainError = nil;
+        SpliceKit_executeOnMainThread(^{
+            ok = [self showInViewerForCurrentSelection:&mainError];
+        });
+        if (!ok && error) *error = mainError;
+        return ok;
+    }
+
+    __block NSString *selectedPath = nil;
+    selectedPath = SKIPResolveFirstPathFromSelection();
+
+    NSString *resolvedPath = selectedPath.length > 0
+        ? (SpliceKitBRAWResolveOriginalPathForPublic(selectedPath) ?: selectedPath)
+        : @"";
+    if (![[resolvedPath.pathExtension lowercaseString] isEqualToString:@"braw"]) {
+        if (error) {
+            *error = SKIPImmersivePreviewError(-31, @"No BRAW clip is selected near the playhead for FCP's native 360 viewer");
+        }
+        return NO;
+    }
+
+    NSError *describeError = nil;
+    NSDictionary *clip = SKIPDescribeImmersiveClipAtPath(resolvedPath, &describeError);
+    if (!clip) {
+        if (error) *error = describeError ?: SKIPImmersivePreviewError(-32, @"Unable to describe the selected BRAW clip");
+        return NO;
+    }
+
+    NSError *prepareError = nil;
+    NSDictionary *nativeStatus = SKIPPrepareNativeFCP360ForImmersiveBRAW(resolvedPath, clip, &prepareError);
+    if (!nativeStatus) {
+        if (error) *error = prepareError ?: SKIPImmersivePreviewError(-34, @"Unable to prepare FCP's native 360 viewer for the selected BRAW clip");
+        return NO;
+    }
+
+    self.selectedPath = resolvedPath;
+    self.clipSummary = clip;
+    self.lastNativeViewerStatus = nativeStatus;
+
+    BOOL opened = SKIPOpenNativeFCP360Viewer(YES, error);
+    if (!opened) return NO;
+
+    NSMutableDictionary *updatedStatus = [nativeStatus mutableCopy];
+    updatedStatus[@"playerOverrides"] = SKIPNormalizeNativeFCP360PlayerModules(clip);
+    updatedStatus[@"visible"] = @(SKIPNativeFCP360ViewerIsVisible());
+    self.lastNativeViewerStatus = [updatedStatus copy];
+    return YES;
+}
+
+- (BOOL)showLoadedInViewer:(NSError **)error {
+    if (error) {
+        *error = SKIPImmersivePreviewError(-41, @"FCP's native 360 viewer requires a selected timeline/browser clip; loadPath is decode diagnostics only");
+    }
+    return NO;
+}
+
+- (void)hideInViewer {
+    [[SKIPImmersiveViewerOverlayHost sharedHost] hide];
+    SKIPCloseNativeFCP360Viewer();
+    if (!self.isVisible) {
+        [self invalidateDecodeCache];
+    }
+}
+
+- (BOOL)isViewerVisible {
+    if (![NSThread isMainThread]) {
+        __block BOOL visible = NO;
+        SpliceKit_executeOnMainThread(^{
+            visible = [self isViewerVisible];
+        });
+        return visible;
+    }
+    return [SKIPImmersiveViewerOverlayHost sharedHost].isVisible || SKIPNativeFCP360ViewerIsVisible();
 }
 
 - (void)setupPanelIfNeeded {
@@ -2117,9 +2857,6 @@ void SpliceKit_installImmersiveViewerBridge(void) {
 
     self.imageView = [[SKIPInteractiveImageView alloc] initWithFrame:NSZeroRect];
     self.imageView.translatesAutoresizingMaskIntoConstraints = NO;
-    self.imageView.wantsLayer = YES;
-    self.imageView.layer.backgroundColor = NSColor.blackColor.CGColor;
-    self.imageView.layer.cornerRadius = 8.0;
     __weak SpliceKitImmersivePreviewPanel *weakSelf = self;
     self.imageView.dragHandler = ^(NSPoint delta, BOOL ended) {
         [weakSelf previewDraggedByDelta:delta ended:ended];
@@ -2298,8 +3035,10 @@ void SpliceKit_installImmersiveViewerBridge(void) {
     self.cachedFrameIndex = UINT32_MAX;
     self.cachedScaleHint = UINT32_MAX;
     self.cachedPath = @"";
-    self.renderGeneration += 1;
-    self.pendingRenderRequest = nil;
+    [self bumpRenderGeneration];
+    @synchronized (self) {
+        self.pendingRenderRequest = nil;
+    }
     self.lastRenderedImage = nil;
     self.lastRenderedSnapshot = nil;
 }
@@ -2542,8 +3281,7 @@ void SpliceKit_installImmersiveViewerBridge(void) {
 }
 
 - (void)updateTimelineSyncTimer {
-    BOOL shouldRun = self.selectedPath.length > 0 &&
-        (self.isVisible || [SKIPImmersiveViewerOverlayHost sharedHost].isVisible);
+    BOOL shouldRun = self.selectedPath.length > 0 && (self.isVisible || self.isViewerVisible);
     if (shouldRun) {
         if (!self.timelineSyncTimer) {
             self.timelineSyncTimer = [NSTimer scheduledTimerWithTimeInterval:(1.0 / 15.0)
@@ -2573,9 +3311,10 @@ void SpliceKit_installImmersiveViewerBridge(void) {
 }
 
 - (BOOL)loadClipAtPath:(NSString *)path error:(NSError **)error {
-    SpliceKit_log(@"[ImmersivePreview] loadClipAtPath path=%@", path ?: @"");
+    NSString *standardizedPath = path.stringByStandardizingPath ?: @"";
+    SpliceKit_log(@"[ImmersivePreview] loadClipAtPath path=%@", standardizedPath ?: @"");
     NSError *describeError = nil;
-    NSDictionary *clip = SKIPDescribeImmersiveClipAtPath(path, &describeError);
+    NSDictionary *clip = SKIPDescribeImmersiveClipAtPath(standardizedPath, &describeError);
     if (!clip) {
         SpliceKit_log(@"[ImmersivePreview] loadClipAtPath describe failed error=%@", describeError.localizedDescription ?: @"<none>");
         if (error) *error = describeError;
@@ -2583,13 +3322,13 @@ void SpliceKit_installImmersiveViewerBridge(void) {
     }
 
     if ([NSThread isMainThread]) {
-        return [self applyLoadedClipSummary:clip forPath:path error:error];
+        return [self applyLoadedClipSummary:clip forPath:standardizedPath error:error];
     }
 
     __block BOOL ok = NO;
     __block NSError *applyError = nil;
     dispatch_sync(dispatch_get_main_queue(), ^{
-        ok = [self applyLoadedClipSummary:clip forPath:path error:&applyError];
+        ok = [self applyLoadedClipSummary:clip forPath:standardizedPath error:&applyError];
     });
     if (!ok && error) *error = applyError;
     return ok;
@@ -2597,16 +3336,36 @@ void SpliceKit_installImmersiveViewerBridge(void) {
 
 - (void)loadClipAtPathAsync:(NSString *)path
                  completion:(void (^)(BOOL ok, NSError *error))completion {
-    NSString *pathCopy = [path copy] ?: @"";
-    dispatch_async(self.metadataQueue ?: dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+    NSString *pathCopy = [path.stringByStandardizingPath copy] ?: @"";
+    dispatch_queue_t queue = self.metadataQueue ?: dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0);
+    __weak SpliceKitImmersivePreviewPanel *weakSelf = self;
+    dispatch_async(queue, ^{
         @autoreleasepool {
             NSError *describeError = nil;
-            NSDictionary *clip = SKIPDescribeImmersiveClipAtPath(pathCopy, &describeError);
+            NSDictionary *clip = nil;
+            @try {
+                clip = SKIPDescribeImmersiveClipAtPath(pathCopy, &describeError);
+            } @catch (NSException *exception) {
+                describeError = SKIPImmersivePreviewError(-28,
+                                                          [NSString stringWithFormat:@"Immersive describe failed: %@",
+                                                           exception.reason ?: exception.name]);
+            }
             dispatch_async(dispatch_get_main_queue(), ^{
+                SpliceKitImmersivePreviewPanel *strongSelf = weakSelf;
+                if (!strongSelf) {
+                    if (completion) completion(NO, SKIPImmersivePreviewError(-26, @"Immersive preview panel was released before load completed"));
+                    return;
+                }
                 NSError *applyError = describeError;
                 BOOL ok = NO;
                 if (clip) {
-                    ok = [self applyLoadedClipSummary:clip forPath:pathCopy error:&applyError];
+                    @try {
+                        ok = [strongSelf applyLoadedClipSummary:clip forPath:pathCopy error:&applyError];
+                    } @catch (NSException *exception) {
+                        applyError = SKIPImmersivePreviewError(-27,
+                                                               [NSString stringWithFormat:@"Immersive load failed: %@",
+                                                                exception.reason ?: exception.name]);
+                    }
                 }
                 if (completion) completion(ok, applyError);
             });
@@ -2642,83 +3401,6 @@ void SpliceKit_installImmersiveViewerBridge(void) {
     return YES;
 }
 
-- (BOOL)ensureDecodedFramesWithError:(NSError **)error {
-    if (self.selectedPath.length == 0) {
-        if (error) {
-            *error = [NSError errorWithDomain:@"SpliceKitImmersivePreview" code:-22
-                                     userInfo:@{NSLocalizedDescriptionKey: @"No immersive BRAW clip loaded"}];
-        }
-        return NO;
-    }
-
-    uint32_t frameIndex = self.currentFrameIndex;
-    uint32_t scaleHint = self.currentScaleHint;
-    if ([self.cachedPath isEqualToString:self.selectedPath] &&
-        self.cachedFrameIndex == frameIndex &&
-        self.cachedScaleHint == scaleHint &&
-        self.leftDecodedData && self.rightDecodedData) {
-        [self noteDecodeCacheHit];
-        return YES;
-    }
-
-    uint32_t leftWidth = 0, leftHeight = 0;
-    uint32_t rightWidth = 0, rightHeight = 0;
-    NSError *decodeError = nil;
-    CFTimeInterval decodeStart = SKIPNow();
-    CFTimeInterval leftStart = decodeStart;
-    NSData *leftData = SKIPDecodeEyeBytes(self.selectedPath,
-                                          frameIndex,
-                                          scaleHint,
-                                          0,
-                                          self.clipSummary,
-                                          &leftWidth,
-                                          &leftHeight,
-                                          &decodeError);
-    double leftEyeMs = (SKIPNow() - leftStart) * 1000.0;
-    if (!leftData) {
-        if (error) *error = decodeError;
-        return NO;
-    }
-    CFTimeInterval rightStart = SKIPNow();
-    NSData *rightData = SKIPDecodeEyeBytes(self.selectedPath,
-                                           frameIndex,
-                                           scaleHint,
-                                           1,
-                                           self.clipSummary,
-                                           &rightWidth,
-                                           &rightHeight,
-                                           &decodeError);
-    double rightEyeMs = (SKIPNow() - rightStart) * 1000.0;
-    if (!rightData) {
-        if (error) *error = decodeError;
-        return NO;
-    }
-    if (leftWidth != rightWidth || leftHeight != rightHeight) {
-        if (error) {
-            *error = [NSError errorWithDomain:@"SpliceKitImmersivePreview" code:-23
-                                     userInfo:@{NSLocalizedDescriptionKey: @"Decoded eye sizes do not match"}];
-        }
-        return NO;
-    }
-
-    self.leftDecodedData = leftData;
-    self.rightDecodedData = rightData;
-    self.decodedWidth = leftWidth;
-    self.decodedHeight = leftHeight;
-    self.cachedPath = self.selectedPath ?: @"";
-    self.cachedFrameIndex = frameIndex;
-    self.cachedScaleHint = scaleHint;
-    [self noteDecodeDurationMs:((SKIPNow() - decodeStart) * 1000.0)
-                     leftEyeMs:leftEyeMs
-                    rightEyeMs:rightEyeMs];
-    [self logPerformanceIfNeeded];
-    return YES;
-}
-
-- (NSImage *)currentPreviewImage {
-    return [self currentPreviewImageInteractive:NO];
-}
-
 - (NSDictionary *)metalRenderStateSnapshot {
     return @{
         @"path": self.selectedPath ?: @"",
@@ -2736,29 +3418,6 @@ void SpliceKit_installImmersiveViewerBridge(void) {
         @"renderRequestToken": @(self.perfRenderRequestToken),
         @"renderRequestedAt": @(self.perfRenderRequestedAt),
     };
-}
-
-- (NSImage *)currentPreviewImageInteractive:(BOOL)interactive {
-    if (!self.leftDecodedData || !self.rightDecodedData) return nil;
-
-    CGFloat backingScale = self.panel.backingScaleFactor > 0.0 ? self.panel.backingScaleFactor : NSScreen.mainScreen.backingScaleFactor;
-    NSDictionary *imageData = SKIPBuildPreviewImageData(self.leftDecodedData,
-                                                        self.rightDecodedData,
-                                                        self.decodedWidth,
-                                                        self.decodedHeight,
-                                                        self.currentEyeMode,
-                                                        self.currentViewMode,
-                                                        self.currentHeroEyeIndex,
-                                                        self.yawSlider.doubleValue,
-                                                        self.pitchSlider.doubleValue,
-                                                        self.fovSlider.doubleValue,
-                                                        self.imageView.bounds.size,
-                                                        backingScale,
-                                                        interactive);
-    NSData *packed = [imageData[@"data"] isKindOfClass:[NSData class]] ? imageData[@"data"] : nil;
-    size_t width = [imageData[@"width"] respondsToSelector:@selector(unsignedIntegerValue)] ? [imageData[@"width"] unsignedIntegerValue] : 0;
-    size_t height = [imageData[@"height"] respondsToSelector:@selector(unsignedIntegerValue)] ? [imageData[@"height"] unsignedIntegerValue] : 0;
-    return SKIPImageFromBGRAData(packed, width, height);
 }
 
 - (BOOL)requestPreviewRenderInteractive:(BOOL)interactive error:(NSError **)error {
@@ -2804,7 +3463,8 @@ void SpliceKit_installImmersiveViewerBridge(void) {
     CGFloat backingScale = self.panel.backingScaleFactor > 0.0 ? self.panel.backingScaleFactor : NSScreen.mainScreen.backingScaleFactor;
     NSSize displaySize = self.imageView.bounds.size;
     NSDictionary *snapshot = [self statusSnapshot];
-    uint64_t generation = ++self.renderGeneration;
+    uint64_t generation = [self bumpRenderGeneration];
+    BOOL rendererReady = self.imageView.rendererReady;
     NSDictionary *request = @{
         @"leftDecodedData": leftDecodedData ?: NSData.data,
         @"rightDecodedData": rightDecodedData ?: NSData.data,
@@ -2825,6 +3485,7 @@ void SpliceKit_installImmersiveViewerBridge(void) {
         @"backingScale": @(backingScale),
         @"interactive": @(interactive),
         @"generation": @(generation),
+        @"rendererReady": @(rendererReady),
         @"renderRequestToken": @(self.perfRenderRequestToken),
         @"renderRequestedAt": @(self.perfRenderRequestedAt),
         @"snapshot": snapshot ?: @{},
@@ -2852,33 +3513,35 @@ void SpliceKit_installImmersiveViewerBridge(void) {
 }
 
 - (void)drainScheduledPreviewRenders {
-    while (YES) {
-        @autoreleasepool {
-            NSDictionary *request = nil;
-            @synchronized (self) {
-                request = self.pendingRenderRequest;
-                self.pendingRenderRequest = nil;
-                if (!request) {
-                    self.renderWorkerRunning = NO;
-                    return;
-                }
-            }
-
-            uint64_t generation = [request[@"generation"] respondsToSelector:@selector(unsignedLongLongValue)] ? [request[@"generation"] unsignedLongLongValue] : 0;
-            BOOL interactive = [request[@"interactive"] respondsToSelector:@selector(boolValue)] && [request[@"interactive"] boolValue];
-
-            @synchronized (self) {
-                NSDictionary *newerRequest = self.pendingRenderRequest;
-                if (newerRequest) {
-                    uint64_t newerGeneration = [newerRequest[@"generation"] respondsToSelector:@selector(unsignedLongLongValue)] ? [newerRequest[@"generation"] unsignedLongLongValue] : 0;
-                    if (newerGeneration > generation) {
-                        continue;
+    @try {
+        while (YES) {
+            @autoreleasepool {
+                NSDictionary *request = nil;
+                @synchronized (self) {
+                    request = self.pendingRenderRequest;
+                    self.pendingRenderRequest = nil;
+                    if (!request) {
+                        self.renderWorkerRunning = NO;
+                        return;
                     }
                 }
-            }
 
-            NSData *leftDecodedData = [request[@"leftDecodedData"] isKindOfClass:[NSData class]] ? request[@"leftDecodedData"] : nil;
-            NSData *rightDecodedData = [request[@"rightDecodedData"] isKindOfClass:[NSData class]] ? request[@"rightDecodedData"] : nil;
+                uint64_t generation = [request[@"generation"] respondsToSelector:@selector(unsignedLongLongValue)] ? [request[@"generation"] unsignedLongLongValue] : 0;
+                BOOL interactive = [request[@"interactive"] respondsToSelector:@selector(boolValue)] && [request[@"interactive"] boolValue];
+                BOOL rendererReady = [request[@"rendererReady"] respondsToSelector:@selector(boolValue)] && [request[@"rendererReady"] boolValue];
+
+                @synchronized (self) {
+                    NSDictionary *newerRequest = self.pendingRenderRequest;
+                    if (newerRequest) {
+                        uint64_t newerGeneration = [newerRequest[@"generation"] respondsToSelector:@selector(unsignedLongLongValue)] ? [newerRequest[@"generation"] unsignedLongLongValue] : 0;
+                        if (newerGeneration > generation) {
+                            continue;
+                        }
+                    }
+                }
+
+                NSData *leftDecodedData = [request[@"leftDecodedData"] isKindOfClass:[NSData class]] ? request[@"leftDecodedData"] : nil;
+                NSData *rightDecodedData = [request[@"rightDecodedData"] isKindOfClass:[NSData class]] ? request[@"rightDecodedData"] : nil;
             size_t decodedWidth = [request[@"decodedWidth"] respondsToSelector:@selector(unsignedIntegerValue)] ? [request[@"decodedWidth"] unsignedIntegerValue] : 0;
             size_t decodedHeight = [request[@"decodedHeight"] respondsToSelector:@selector(unsignedIntegerValue)] ? [request[@"decodedHeight"] unsignedIntegerValue] : 0;
             NSString *eyeMode = [request[@"eyeMode"] isKindOfClass:[NSString class]] ? request[@"eyeMode"] : @"hero";
@@ -2921,7 +3584,7 @@ void SpliceKit_installImmersiveViewerBridge(void) {
                     __weak SpliceKitImmersivePreviewPanel *weakSelf = self;
                     dispatch_async(dispatch_get_main_queue(), ^{
                         SpliceKitImmersivePreviewPanel *strongSelf = weakSelf;
-                        if (!strongSelf || generation != strongSelf.renderGeneration) return;
+                        if (!strongSelf || ![strongSelf isRenderGenerationCurrent:generation]) return;
                         [strongSelf setMessage:decodeError.localizedDescription ?: @"Unable to decode immersive left eye."];
                     });
                     continue;
@@ -2941,7 +3604,7 @@ void SpliceKit_installImmersiveViewerBridge(void) {
                     __weak SpliceKitImmersivePreviewPanel *weakSelf = self;
                     dispatch_async(dispatch_get_main_queue(), ^{
                         SpliceKitImmersivePreviewPanel *strongSelf = weakSelf;
-                        if (!strongSelf || generation != strongSelf.renderGeneration) return;
+                        if (!strongSelf || ![strongSelf isRenderGenerationCurrent:generation]) return;
                         [strongSelf setMessage:decodeError.localizedDescription ?: @"Unable to decode immersive right eye."];
                     });
                     continue;
@@ -2951,7 +3614,7 @@ void SpliceKit_installImmersiveViewerBridge(void) {
                     __weak SpliceKitImmersivePreviewPanel *weakSelf = self;
                     dispatch_async(dispatch_get_main_queue(), ^{
                         SpliceKitImmersivePreviewPanel *strongSelf = weakSelf;
-                        if (!strongSelf || generation != strongSelf.renderGeneration) return;
+                        if (!strongSelf || ![strongSelf isRenderGenerationCurrent:generation]) return;
                         [strongSelf setMessage:@"Decoded immersive eye sizes do not match."];
                     });
                     continue;
@@ -2975,11 +3638,11 @@ void SpliceKit_installImmersiveViewerBridge(void) {
                 }
             }
 
-            if (self.imageView.rendererReady) {
+            if (rendererReady) {
                 __weak SpliceKitImmersivePreviewPanel *weakSelf = self;
                 dispatch_async(dispatch_get_main_queue(), ^{
                     SpliceKitImmersivePreviewPanel *strongSelf = weakSelf;
-                    if (!strongSelf || generation != strongSelf.renderGeneration) return;
+                    if (!strongSelf || ![strongSelf isRenderGenerationCurrent:generation]) return;
                     strongSelf.leftDecodedData = leftDecodedData;
                     strongSelf.rightDecodedData = rightDecodedData;
                     strongSelf.decodedWidth = decodedWidth;
@@ -3031,10 +3694,10 @@ void SpliceKit_installImmersiveViewerBridge(void) {
                 }
             }
 
-            __weak SpliceKitImmersivePreviewPanel *weakSelf = self;
-            dispatch_async(dispatch_get_main_queue(), ^{
-                SpliceKitImmersivePreviewPanel *strongSelf = weakSelf;
-                if (!strongSelf || generation != strongSelf.renderGeneration) return;
+                __weak SpliceKitImmersivePreviewPanel *weakSelf = self;
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    SpliceKitImmersivePreviewPanel *strongSelf = weakSelf;
+                if (!strongSelf || ![strongSelf isRenderGenerationCurrent:generation]) return;
                 NSImage *image = SKIPImageFromBGRAData(packed, width, height);
                 if (!image) return;
                 double requestLatencyMs = renderRequestedAt > 0.0 ? ((SKIPNow() - renderRequestedAt) * 1000.0) : 0.0;
@@ -3057,7 +3720,20 @@ void SpliceKit_installImmersiveViewerBridge(void) {
                 [strongSelf refreshUIState];
                 [strongSelf logPerformanceIfNeeded];
             });
+            }
         }
+    } @catch (NSException *exception) {
+        NSString *message = [NSString stringWithFormat:@"Immersive preview render failed: %@",
+                             exception.reason ?: exception.name ?: @"unknown exception"];
+        SpliceKit_log(@"[ImmersivePreview] render worker exception: %@ %@", exception.name, exception.reason);
+        @synchronized (self) {
+            self.renderWorkerRunning = NO;
+        }
+        __weak SpliceKitImmersivePreviewPanel *weakSelf = self;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            SpliceKitImmersivePreviewPanel *strongSelf = weakSelf;
+            [strongSelf setMessage:message];
+        });
     }
 }
 
@@ -3066,7 +3742,7 @@ void SpliceKit_installImmersiveViewerBridge(void) {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.12 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
         SpliceKitImmersivePreviewPanel *strongSelf = weakSelf;
-        if (!strongSelf || generation != strongSelf.renderGeneration) return;
+        if (!strongSelf || ![strongSelf isRenderGenerationCurrent:generation]) return;
         [strongSelf scheduleAsyncPreviewRenderInteractive:NO];
     });
 }
@@ -3074,27 +3750,14 @@ void SpliceKit_installImmersiveViewerBridge(void) {
 - (BOOL)refreshPreviewWithError:(NSError **)error {
     [self syncFrameIndexToTimelinePlayheadAndReturnChange:NULL error:nil];
     [self notePreviewRequestInteractive:NO];
-    if (![self ensureDecodedFramesWithError:error]) return NO;
-    if (self.imageView.rendererReady) {
-        self.lastRenderedSnapshot = [self statusSnapshot];
-        [self.imageView syncFromBackend];
-        [[SKIPImmersiveViewerOverlayHost sharedHost] syncImageFromBackend];
-        [self refreshUIState];
-        return YES;
-    }
-    NSImage *image = [self currentPreviewImageInteractive:NO];
-    if (!image) {
+    if (self.selectedPath.length == 0) {
         if (error) {
-            *error = [NSError errorWithDomain:@"SpliceKitImmersivePreview" code:-24
-                                     userInfo:@{NSLocalizedDescriptionKey: @"Unable to render immersive preview image"}];
+            *error = [NSError errorWithDomain:@"SpliceKitImmersivePreview" code:-22
+                                     userInfo:@{NSLocalizedDescriptionKey: @"No immersive BRAW clip loaded"}];
         }
         return NO;
     }
-    self.lastRenderedImage = image;
-    self.lastRenderedSnapshot = [self statusSnapshot];
-    self.imageView.image = image;
-    [[SKIPImmersiveViewerOverlayHost sharedHost] syncImageFromBackend];
-    [self refreshUIState];
+    [self scheduleAsyncPreviewRenderInteractive:NO];
     return YES;
 }
 
@@ -3155,7 +3818,7 @@ void SpliceKit_installImmersiveViewerBridge(void) {
     NSDictionary *panelRendererPerf = [self.imageView rendererPerformanceSnapshot] ?: @{};
     SKIPImmersiveViewerOverlayHost *overlayHost = [SKIPImmersiveViewerOverlayHost sharedHost];
     NSDictionary *overlayRendererPerf = [overlayHost rendererPerformanceSnapshot] ?: @{};
-    BOOL overlayVisible = overlayHost.isVisible;
+    BOOL viewerVisible = overlayHost.isVisible;
     double avgCpuRenderMs = self.cpuRenderCount > 0 ? (self.totalCpuRenderMs / (double)self.cpuRenderCount) : 0.0;
     double avgCpuRenderIntervalMs = self.cpuRenderIntervalSamples > 0 ? (self.totalCpuRenderIntervalMs / (double)self.cpuRenderIntervalSamples) : 0.0;
     double avgCpuRequestLatencyMs = self.cpuRequestLatencySamples > 0 ? (self.totalCpuRequestLatencyMs / (double)self.cpuRequestLatencySamples) : 0.0;
@@ -3173,7 +3836,7 @@ void SpliceKit_installImmersiveViewerBridge(void) {
         @"avgRequestLatencyMs": @(avgCpuRequestLatencyMs),
         @"maxRequestLatencyMs": @(self.maxCpuRequestLatencyMs),
     };
-    NSDictionary *surfaceRendererPerf = overlayVisible ? overlayRendererPerf : panelRendererPerf;
+    NSDictionary *surfaceRendererPerf = viewerVisible ? overlayRendererPerf : panelRendererPerf;
     BOOL surfaceUsesMetal = [[surfaceRendererPerf[@"renderer"] lowercaseString] isEqualToString:@"metal"];
     NSDictionary *rendererPerf = surfaceUsesMetal ? surfaceRendererPerf : cpuRendererPerf;
     double avgDecodeMs = self.decodeCount > 0 ? (self.totalDecodeMs / (double)self.decodeCount) : 0.0;
@@ -3188,7 +3851,7 @@ void SpliceKit_installImmersiveViewerBridge(void) {
         : 0.0;
 
     return @{
-        @"overlayVisible": @(overlayVisible),
+        @"overlayVisible": @(viewerVisible),
         @"renderer": rendererPerf[@"renderer"] ?: (self.imageView.rendererReady ? @"metal" : @"cpu_fallback"),
         @"previewRequests": @(self.previewRequestCount),
         @"interactivePreviewRequests": @(self.interactivePreviewRequestCount),
@@ -3214,38 +3877,15 @@ void SpliceKit_installImmersiveViewerBridge(void) {
 }
 
 - (void)logPerformanceIfNeeded {
-    CFTimeInterval now = SKIPNow();
-    if (self.lastPerfLogTimestamp > 0.0 && (now - self.lastPerfLogTimestamp) < 1.0) return;
-    self.lastPerfLogTimestamp = now;
-
-    NSDictionary *perf = [self performanceSnapshot];
-    NSDictionary *rendererPerf = [perf[@"rendererPerf"] isKindOfClass:[NSDictionary class]] ? perf[@"rendererPerf"] : @{};
-    double recentFPS = [rendererPerf[@"recentDrawFPS"] respondsToSelector:@selector(doubleValue)]
-        ? [rendererPerf[@"recentDrawFPS"] doubleValue]
-        : [rendererPerf[@"recentRenderFPS"] doubleValue];
-    double lastRenderMs = [rendererPerf[@"lastDrawMs"] respondsToSelector:@selector(doubleValue)]
-        ? [rendererPerf[@"lastDrawMs"] doubleValue]
-        : [rendererPerf[@"lastRenderMs"] doubleValue];
-    double avgRenderMs = [rendererPerf[@"avgDrawMs"] respondsToSelector:@selector(doubleValue)]
-        ? [rendererPerf[@"avgDrawMs"] doubleValue]
-        : [rendererPerf[@"avgRenderMs"] doubleValue];
-    SpliceKit_log(@"[ImmersivePreviewPerf] renderer=%@ reqFPS=%.2f renderFPS=%.2f decodeMs(last=%.2f avg=%.2f cacheHitRate=%.2f) uploadMs(last=%.2f avg=%.2f) renderMs(last=%.2f avg=%.2f latency=%.2f)",
-                  perf[@"renderer"] ?: @"unknown",
-                  [perf[@"recentPreviewRequestFPS"] doubleValue],
-                  recentFPS,
-                  [perf[@"lastDecodeMs"] doubleValue],
-                  [perf[@"avgDecodeMs"] doubleValue],
-                  [perf[@"decodeCacheHitRate"] doubleValue],
-                  [rendererPerf[@"lastTextureUploadMs"] doubleValue],
-                  [rendererPerf[@"avgTextureUploadMs"] doubleValue],
-                  lastRenderMs,
-                  avgRenderMs,
-                  [rendererPerf[@"lastRequestLatencyMs"] doubleValue]);
+    self.lastPerfLogTimestamp = SKIPNow();
 }
 
 - (NSDictionary *)statusSnapshot {
+    BOOL nativeViewerVisible = SKIPNativeFCP360ViewerIsVisible();
     return @{
         @"visible": @(self.isVisible),
+        @"viewerVisible": @(self.isViewerVisible),
+        @"nativeViewerVisible": @(nativeViewerVisible),
         @"path": self.selectedPath ?: @"",
         @"frameIndex": @([self currentFrameIndex]),
         @"frameCount": @((NSInteger)MAX(0, self.frameSlider.maxValue) + 1),
@@ -3258,6 +3898,7 @@ void SpliceKit_installImmersiveViewerBridge(void) {
         @"decodedWidth": @(self.decodedWidth),
         @"decodedHeight": @(self.decodedHeight),
         @"clipSummary": self.clipSummary ?: @{},
+        @"nativeViewer": self.lastNativeViewerStatus ?: @{},
         @"timelineSync": self.lastTimelineSyncSnapshot ?: [self timelineSyncSnapshot],
         @"perf": [self performanceSnapshot],
     };
@@ -3387,7 +4028,7 @@ void SpliceKit_installImmersiveViewerBridge(void) {
     [self invalidateDecodeCache];
     NSError *error = nil;
     BOOL ok = [self refreshPreviewWithError:&error];
-    [self setMessage:ok ? @"Preview refreshed." : error.localizedDescription];
+    [self setMessage:ok ? @"Refreshing preview..." : error.localizedDescription];
 }
 
 - (void)sendToVisionProClicked:(id)sender {

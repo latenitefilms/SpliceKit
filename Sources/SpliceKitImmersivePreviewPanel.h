@@ -11,6 +11,10 @@
 - (void)hidePanel;
 - (void)togglePanel;
 - (BOOL)isVisible;
+- (BOOL)showInViewerForCurrentSelection:(NSError **)error;
+- (BOOL)showLoadedInViewer:(NSError **)error;
+- (void)hideInViewer;
+- (BOOL)isViewerVisible;
 
 - (NSDictionary *)statusSnapshot;
 - (BOOL)loadSelectedClipWithError:(NSError **)error;
@@ -45,7 +49,6 @@ NSDictionary *SpliceKit_handleImmersivePreviewRefresh(NSDictionary *params);
 NSDictionary *SpliceKit_handleImmersivePreviewResetPerf(NSDictionary *params);
 NSDictionary *SpliceKit_handleImmersivePreviewSendCurrentFrame(NSDictionary *params);
 NSString *SpliceKit_copyTimelineClipPathNearPlayhead(void);
-void SpliceKit_installImmersiveViewerBridge(void);
 #ifdef __cplusplus
 }
 #endif

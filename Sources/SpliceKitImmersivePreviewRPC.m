@@ -7,22 +7,81 @@ static NSDictionary *SKIPError(NSString *message) {
     return @{@"error": message ?: @"unknown error"};
 }
 
+static NSDictionary *SKIPCustomRendererDisabled(void) {
+    return SKIPError(@"The custom immersive renderer is disabled; use FCP's native 360 viewer");
+}
+
+static NSString *SKIPValidatedBRAWPath(id value, NSString **errorMessage) {
+    NSString *path = [value isKindOfClass:[NSString class]] ? value : @"";
+    path = path.stringByStandardizingPath ?: @"";
+    if (path.length == 0) {
+        if (errorMessage) *errorMessage = @"immersivePreview.loadPath requires {path}";
+        return nil;
+    }
+    if (!path.isAbsolutePath) {
+        if (errorMessage) *errorMessage = @"BRAW path must be absolute";
+        return nil;
+    }
+    if (![[path.pathExtension lowercaseString] isEqualToString:@"braw"]) {
+        if (errorMessage) *errorMessage = @"Immersive preview only supports .braw files";
+        return nil;
+    }
+    BOOL isDirectory = NO;
+    if (![[NSFileManager defaultManager] fileExistsAtPath:path isDirectory:&isDirectory] || isDirectory) {
+        if (errorMessage) *errorMessage = @"BRAW file does not exist";
+        return nil;
+    }
+    return path;
+}
+
 NSDictionary *SpliceKit_handleImmersivePreviewShow(NSDictionary *params) {
-    (void)params;
     __block NSDictionary *status = nil;
     SpliceKit_executeOnMainThread(^{
-        [[SpliceKitImmersivePreviewPanel sharedPanel] showPanel];
-        status = [[SpliceKitImmersivePreviewPanel sharedPanel] statusSnapshot];
+        NSString *surface = [params[@"surface"] isKindOfClass:[NSString class]] ? [params[@"surface"] lowercaseString] : @"";
+        if (surface.length == 0) surface = [params[@"mode"] isKindOfClass:[NSString class]] ? [params[@"mode"] lowercaseString] : @"";
+        SpliceKitImmersivePreviewPanel *panel = [SpliceKitImmersivePreviewPanel sharedPanel];
+        if ([surface isEqualToString:@"panel"] || [surface isEqualToString:@"window"]) {
+            status = SKIPError(@"The custom immersive popup viewer is disabled; use FCP's native 360 viewer");
+            return;
+        }
+
+        NSError *error = nil;
+        BOOL useLoaded = [params[@"useLoaded"] respondsToSelector:@selector(boolValue)] && [params[@"useLoaded"] boolValue];
+        BOOL ok = useLoaded
+            ? [panel showLoadedInViewer:&error]
+            : [panel showInViewerForCurrentSelection:&error];
+        if (!ok) {
+            status = SKIPError(error.localizedDescription ?: @"show viewer failed");
+            return;
+        }
+
+        NSString *timelinePath = SpliceKit_copyTimelineClipPathNearPlayhead() ?: @"";
+        NSString *resolvedPath = timelinePath.length > 0
+            ? (SpliceKitBRAWResolveOriginalPathForPublic(timelinePath) ?: timelinePath)
+            : @"";
+        NSMutableDictionary *snapshot = [[panel statusSnapshot] mutableCopy];
+        snapshot[@"status"] = @"ok";
+        snapshot[@"surface"] = @"fcp_native_360";
+        snapshot[@"customRendererActive"] = @NO;
+        snapshot[@"timelinePath"] = timelinePath;
+        snapshot[@"resolvedPath"] = resolvedPath;
+        status = [snapshot copy];
     });
     return status ?: @{@"visible": @NO};
 }
 
 NSDictionary *SpliceKit_handleImmersivePreviewHide(NSDictionary *params) {
-    (void)params;
     __block NSDictionary *status = nil;
     SpliceKit_executeOnMainThread(^{
-        [[SpliceKitImmersivePreviewPanel sharedPanel] hidePanel];
-        status = [[SpliceKitImmersivePreviewPanel sharedPanel] statusSnapshot];
+        NSString *surface = [params[@"surface"] isKindOfClass:[NSString class]] ? [params[@"surface"] lowercaseString] : @"";
+        SpliceKitImmersivePreviewPanel *panel = [SpliceKitImmersivePreviewPanel sharedPanel];
+        if (surface.length == 0 || [surface isEqualToString:@"viewer"]) {
+            [panel hideInViewer];
+        }
+        if (surface.length == 0 || [surface isEqualToString:@"panel"] || [surface isEqualToString:@"window"]) {
+            [panel hidePanel];
+        }
+        status = [panel statusSnapshot];
     });
     return status ?: @{@"visible": @NO};
 }
@@ -62,9 +121,10 @@ NSDictionary *SpliceKit_handleImmersivePreviewLoadSelected(NSDictionary *params)
             path = SpliceKitBRAWResolveOriginalPathForPublic(path) ?: @"";
         }
     });
-    if (![path isKindOfClass:[NSString class]] || path.length == 0 ||
-        ![[path.pathExtension lowercaseString] isEqualToString:@"braw"]) {
-        return SKIPError(@"No immersive BRAW clip is currently selected");
+    NSString *pathError = nil;
+    path = SKIPValidatedBRAWPath(path, &pathError);
+    if (path.length == 0) {
+        return SKIPError(pathError ?: @"No immersive BRAW clip is currently selected");
     }
 
     dispatch_semaphore_t sem = dispatch_semaphore_create(0);
@@ -75,7 +135,7 @@ NSDictionary *SpliceKit_handleImmersivePreviewLoadSelected(NSDictionary *params)
             : SKIPError(error.localizedDescription ?: @"loadSelected failed");
         dispatch_semaphore_signal(sem);
     }];
-    long waitResult = dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 30LL * NSEC_PER_SEC));
+    long waitResult = dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 12LL * NSEC_PER_SEC));
     if (waitResult != 0) {
         return SKIPError(@"loadSelected timed out");
     }
@@ -83,10 +143,9 @@ NSDictionary *SpliceKit_handleImmersivePreviewLoadSelected(NSDictionary *params)
 }
 
 NSDictionary *SpliceKit_handleImmersivePreviewLoadPath(NSDictionary *params) {
-    NSString *path = [params[@"path"] isKindOfClass:[NSString class]] ? params[@"path"] : @"";
-    if (path.length == 0) {
-        return SKIPError(@"immersivePreview.loadPath requires {path}");
-    }
+    NSString *pathError = nil;
+    NSString *path = SKIPValidatedBRAWPath(params[@"path"], &pathError);
+    if (path.length == 0) return SKIPError(pathError);
 
     dispatch_semaphore_t sem = dispatch_semaphore_create(0);
     __block NSDictionary *status = nil;
@@ -96,7 +155,7 @@ NSDictionary *SpliceKit_handleImmersivePreviewLoadPath(NSDictionary *params) {
             : SKIPError(error.localizedDescription ?: @"loadPath failed");
         dispatch_semaphore_signal(sem);
     }];
-    long waitResult = dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 30LL * NSEC_PER_SEC));
+    long waitResult = dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 12LL * NSEC_PER_SEC));
     if (waitResult != 0) {
         return SKIPError(@"loadPath timed out");
     }
@@ -104,92 +163,28 @@ NSDictionary *SpliceKit_handleImmersivePreviewLoadPath(NSDictionary *params) {
 }
 
 NSDictionary *SpliceKit_handleImmersivePreviewSetFrame(NSDictionary *params) {
-    __block NSDictionary *status = nil;
-    SpliceKit_executeOnMainThread(^{
-        NSNumber *frame = params[@"frameIndex"];
-        if (![frame isKindOfClass:[NSNumber class]]) {
-            status = SKIPError(@"immersivePreview.setFrame requires {frameIndex}");
-            return;
-        }
-        SpliceKitImmersivePreviewPanel *panel = [SpliceKitImmersivePreviewPanel sharedPanel];
-        [panel setFrameIndexValue:frame.integerValue];
-        NSError *error = nil;
-        BOOL ok = [panel requestPreviewRenderInteractive:NO error:&error];
-        status = ok ? panel.statusSnapshot : SKIPError(error.localizedDescription ?: @"setFrame failed");
-    });
-    return status ?: SKIPError(@"setFrame failed");
+    (void)params;
+    return SKIPCustomRendererDisabled();
 }
 
 NSDictionary *SpliceKit_handleImmersivePreviewSetEyeMode(NSDictionary *params) {
-    __block NSDictionary *status = nil;
-    SpliceKit_executeOnMainThread(^{
-        NSString *mode = [params[@"eyeMode"] isKindOfClass:[NSString class]] ? params[@"eyeMode"] : @"";
-        if (mode.length == 0) {
-            status = SKIPError(@"immersivePreview.setEyeMode requires {eyeMode}");
-            return;
-        }
-        SpliceKitImmersivePreviewPanel *panel = [SpliceKitImmersivePreviewPanel sharedPanel];
-        [panel setEyeModeIdentifier:mode];
-        NSError *error = nil;
-        BOOL ok = [panel requestPreviewRenderInteractive:NO error:&error];
-        status = ok ? panel.statusSnapshot : SKIPError(error.localizedDescription ?: @"setEyeMode failed");
-    });
-    return status ?: SKIPError(@"setEyeMode failed");
+    (void)params;
+    return SKIPCustomRendererDisabled();
 }
 
 NSDictionary *SpliceKit_handleImmersivePreviewSetViewMode(NSDictionary *params) {
-    __block NSDictionary *status = nil;
-    SpliceKit_executeOnMainThread(^{
-        NSString *mode = [params[@"viewMode"] isKindOfClass:[NSString class]] ? params[@"viewMode"] : @"";
-        if (mode.length == 0) {
-            status = SKIPError(@"immersivePreview.setViewMode requires {viewMode}");
-            return;
-        }
-        SpliceKitImmersivePreviewPanel *panel = [SpliceKitImmersivePreviewPanel sharedPanel];
-        [panel setViewModeIdentifier:mode];
-        NSError *error = nil;
-        BOOL ok = [panel requestPreviewRenderInteractive:NO error:&error];
-        status = ok ? panel.statusSnapshot : SKIPError(error.localizedDescription ?: @"setViewMode failed");
-    });
-    return status ?: SKIPError(@"setViewMode failed");
+    (void)params;
+    return SKIPCustomRendererDisabled();
 }
 
 NSDictionary *SpliceKit_handleImmersivePreviewSetViewport(NSDictionary *params) {
-    __block NSDictionary *status = nil;
-    SpliceKit_executeOnMainThread(^{
-        SpliceKitImmersivePreviewPanel *panel = [SpliceKitImmersivePreviewPanel sharedPanel];
-        NSDictionary *snapshot = [panel statusSnapshot];
-        id yawValue = params[@"yaw"];
-        id pitchValue = params[@"pitch"];
-        id fovValue = params[@"fov"];
-        double yaw = [yawValue respondsToSelector:@selector(doubleValue)] ? [yawValue doubleValue]
-            : [snapshot[@"yaw"] respondsToSelector:@selector(doubleValue)] ? [snapshot[@"yaw"] doubleValue]
-            : 0.0;
-        double pitch = [pitchValue respondsToSelector:@selector(doubleValue)] ? [pitchValue doubleValue]
-            : [snapshot[@"pitch"] respondsToSelector:@selector(doubleValue)] ? [snapshot[@"pitch"] doubleValue]
-            : 0.0;
-        double fov = [fovValue respondsToSelector:@selector(doubleValue)] ? [fovValue doubleValue]
-            : [snapshot[@"fov"] respondsToSelector:@selector(doubleValue)] ? [snapshot[@"fov"] doubleValue]
-            : 110.0;
-        [panel setViewportYaw:yaw pitch:pitch fov:fov];
-        NSError *error = nil;
-        BOOL ok = [panel requestPreviewRenderInteractive:YES error:&error];
-        status = ok ? panel.statusSnapshot : SKIPError(error.localizedDescription ?: @"setViewport failed");
-    });
-    return status ?: SKIPError(@"setViewport failed");
+    (void)params;
+    return SKIPCustomRendererDisabled();
 }
 
 NSDictionary *SpliceKit_handleImmersivePreviewRefresh(NSDictionary *params) {
     (void)params;
-    __block NSDictionary *status = nil;
-    SpliceKit_executeOnMainThread(^{
-        NSError *error = nil;
-        BOOL ok = [[SpliceKitImmersivePreviewPanel sharedPanel] refreshPreviewWithError:&error];
-        status = ok
-            ? [[SpliceKitImmersivePreviewPanel sharedPanel] statusSnapshot]
-            : SKIPError(error.localizedDescription ?: @"refresh failed");
-    });
-    return status ?: SKIPError(@"refresh failed");
+    return SKIPCustomRendererDisabled();
 }
 
 NSDictionary *SpliceKit_handleImmersivePreviewResetPerf(NSDictionary *params) {

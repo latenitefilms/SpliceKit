@@ -1450,20 +1450,11 @@ static void SpliceKit_PEAppController_show360(id self, SEL _cmd, id sender) {
 }
 
 void SpliceKit_installImmersiveViewerBridge(void) {
-    static BOOL installed = NO;
-    if (installed) return;
+    static BOOL logged = NO;
+    if (logged) return;
 
-    Class appControllerClass = objc_getClass("PEAppController");
-    SEL show360Sel = NSSelectorFromString(@"show360:");
-    Method method = appControllerClass ? class_getInstanceMethod(appControllerClass, show360Sel) : NULL;
-    if (!method) {
-        SpliceKit_log(@"[ImmersiveViewer] PEAppController show360: not found — skipping built-in viewer bridge");
-        return;
-    }
-
-    sOrigPEAppControllerShow360 = method_setImplementation(method, (IMP)SpliceKit_PEAppController_show360);
-    installed = YES;
-    SpliceKit_log(@"[ImmersiveViewer] Installed show360: bridge onto FFPlayerView overlay");
+    logged = YES;
+    SpliceKit_log(@"[ImmersiveViewer] Built-in show360: bridge disabled; use SpliceKit immersive preview commands instead");
 }
 
 @interface SKIPInteractiveImageView ()

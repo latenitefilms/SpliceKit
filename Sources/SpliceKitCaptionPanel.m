@@ -692,6 +692,10 @@ static void SpliceKit_installDragSpy(void) {
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
         instance = [[SpliceKitCaptionPanel alloc] init];
+        // Arm headless persistence restore so caption positions snap back to
+        // their saved offset (e.g. lower-third) on FCP relaunch without
+        // requiring the user to open the captions panel.
+        [instance enableAutomaticRestore];
     });
     return instance;
 }
@@ -1459,20 +1463,21 @@ static void SpliceKit_installDragSpy(void) {
 
     if (!self.automaticRestoreObserver) {
         __weak typeof(self) weakSelf = self;
+        // We fire restore whenever an FCP window becomes main — including on
+        // launch-time timeline restoration — because caption positions don't
+        // survive in the project XML and must be reapplied via ObjC.
         self.automaticRestoreObserver =
             [[NSNotificationCenter defaultCenter] addObserverForName:NSWindowDidBecomeMainNotification
                                                               object:nil
                                                                queue:[NSOperationQueue mainQueue]
                                                           usingBlock:^(__unused NSNotification *note) {
-            if (weakSelf.panel.isVisible) {
-                [weakSelf scheduleAutomaticRestoreAttemptsWithInitialDelay:0.15];
-            }
+            [weakSelf scheduleAutomaticRestoreAttemptsWithInitialDelay:0.15];
         }];
     }
 
-    if (self.panel.isVisible) {
-        [self scheduleAutomaticRestoreAttemptsWithInitialDelay:0.6];
-    }
+    // Always kick off a restore attempt on enable so captions repair even if
+    // the current window became main before the observer was attached.
+    [self scheduleAutomaticRestoreAttemptsWithInitialDelay:0.6];
 }
 
 - (void)scheduleAutomaticRestoreAttemptsWithInitialDelay:(NSTimeInterval)initialDelay {
@@ -5709,10 +5714,11 @@ static BOOL SpliceKitCaption_pollMainThread(BOOL (^condition)(void), double time
                   sequenceKey ?: @"<nil>",
                   panelVisible ? @"YES" : @"NO",
                   (unsigned long)runtimeEntries.count);
-    if (!panelVisible) {
-        SpliceKit_log(@"[Captions] Persisted caption repair skipped: panel not visible");
-        return;
-    }
+    // Do NOT gate on panel visibility here: the Motion generator's position/scale
+    // channel values don't persist into the FCP project XML, so on cold relaunch
+    // titles render at the template's default (center) until something re-applies
+    // them. We run the repair headlessly so captions snap back to their correct
+    // lower-third position without requiring the user to open the panel.
     if (runtimeEntries.count == 0 || !styleDict) {
         SpliceKit_log(@"[Captions] Persisted caption repair skipped: runtime entries or style missing");
         return;

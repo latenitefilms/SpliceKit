@@ -16,7 +16,15 @@ read_version() {
 }
 
 ENVIRONMENT="${SPLICEKIT_SENTRY_ENVIRONMENT:-production}"
+ENABLE_LOGS="${SPLICEKIT_SENTRY_ENABLE_LOGS:-${SPLICEKIT_SENTRY_LOGS_ENABLED:-true}}"
 RELEASE_NAME="splicekit@$(read_version)"
+
+enable_logs_plist_tag() {
+    case "$(echo "${ENABLE_LOGS}" | tr '[:upper:]' '[:lower:]')" in
+        0|false|no|off) echo "false/" ;;
+        *) echo "true/" ;;
+    esac
+}
 
 mkdir -p "${OUT_DIR}"
 
@@ -27,6 +35,8 @@ cat > "${OUT_PATH}" <<EOF
 <dict>
     <key>Environment</key>
     <string>${ENVIRONMENT}</string>
+    <key>EnableLogs</key>
+    <$(enable_logs_plist_tag)>
     <key>ReleaseName</key>
     <string>${RELEASE_NAME}</string>
 </dict>

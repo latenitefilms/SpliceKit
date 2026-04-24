@@ -5,6 +5,7 @@ enum PatcherSentry {
     private static let dsn = "https://56fa8ecde3c66d354606805ac2064c54@o4511243520966656.ingest.us.sentry.io/4511243525423104"
     nonisolated(unsafe) private static var started = false
     nonisolated(unsafe) private static var enabled = false
+    nonisolated(unsafe) private static var logsEnabled = false
     nonisolated(unsafe) private static var previousRunSummary: [String: Any]?
 
     private static func scrub(_ value: String) -> String {
@@ -26,10 +27,34 @@ enum PatcherSentry {
 
     private static func config() -> [String: Any]? {
         guard let url = Bundle.main.url(forResource: "SpliceKitSentryConfig", withExtension: "plist"),
-              let raw = NSDictionary(contentsOf: url) as? [String: Any] else {
+              var raw = NSDictionary(contentsOf: url) as? [String: Any] else {
             return nil
         }
+        let env = ProcessInfo.processInfo.environment
+        if let enableLogs = env["SPLICEKIT_SENTRY_ENABLE_LOGS"] ?? env["SPLICEKIT_SENTRY_LOGS_ENABLED"] {
+            raw["EnableLogs"] = enableLogs
+        }
         return raw
+    }
+
+    private static func bool(_ value: Any?, default defaultValue: Bool) -> Bool {
+        switch value {
+        case let bool as Bool:
+            return bool
+        case let number as NSNumber:
+            return number.boolValue
+        case let string as String:
+            switch string.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+            case "1", "true", "yes", "on":
+                return true
+            case "0", "false", "no", "off":
+                return false
+            default:
+                return defaultValue
+            }
+        default:
+            return defaultValue
+        }
     }
 
     private static func runtimeLogTail(named name: String, maxCharacters: Int = 3000) -> String? {
@@ -80,6 +105,7 @@ enum PatcherSentry {
         let environment = (config["Environment"] as? String) ?? "production"
         let version = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "0.0.0"
         let releaseName = (config["ReleaseName"] as? String) ?? "splicekit@\(version)"
+        let enableLogs = bool(config["EnableLogs"], default: true)
 
         SentrySDK.start { options in
             options.dsn = Self.dsn
@@ -97,7 +123,12 @@ enum PatcherSentry {
             options.enableMetricKit = false
             options.tracesSampleRate = 0
             options.maxBreadcrumbs = 150
+            options.enableLogs = enableLogs
             options.beforeSend = sanitize
+            options.beforeSendLog = { log in
+                log.body = scrub(log.body)
+                return log
+            }
             options.onLastRunStatusDetermined = { status, crashEvent in
                 guard status == .didCrash else { return }
                 var summary: [String: Any] = [:]
@@ -112,6 +143,7 @@ enum PatcherSentry {
         }
 
         enabled = SentrySDK.isEnabled
+        logsEnabled = enabled && enableLogs
         guard enabled else { return }
 
         SentrySDK.configureScope { scope in
@@ -150,6 +182,32 @@ enum PatcherSentry {
             crumb.data = scrub(data) as? [String: Any]
         }
         SentrySDK.addBreadcrumb(crumb)
+        log(message, category: category, level: level, data: data)
+    }
+
+    private static func log(_ message: String,
+                            category: String,
+                            level: SentryLevel,
+                            data: [String: Any]) {
+        guard enabled, logsEnabled, !message.isEmpty else { return }
+        var attributes = scrub(data) as? [String: Any] ?? [:]
+        attributes["component"] = "patcher"
+        attributes["category"] = scrub(category)
+        attributes["splicekit_surface"] = "patcher"
+
+        let body = scrub(message)
+        switch level {
+        case .fatal:
+            SentrySDK.logger.fatal(body, attributes: attributes)
+        case .error:
+            SentrySDK.logger.error(body, attributes: attributes)
+        case .warning:
+            SentrySDK.logger.warn(body, attributes: attributes)
+        case .debug:
+            SentrySDK.logger.debug(body, attributes: attributes)
+        default:
+            SentrySDK.logger.info(body, attributes: attributes)
+        }
     }
 
     static func capture(error: Error, context: String, extras: [String: Any] = [:]) {

@@ -117,6 +117,7 @@ void SpliceKit_log(NSString *format, ...) {
     }
 
     SpliceKit_sentryAddBreadcrumb(@"splicekit.log", message, nil);
+    SpliceKit_sentryLog(message, @"splicekit.log", nil);
 }
 
 #pragma mark - Startup Diagnostics

@@ -10,6 +10,7 @@
 
 static BOOL sRuntimeStarted = NO;
 static BOOL sRuntimeEnabled = NO;
+static BOOL sRuntimeLogsEnabled = NO;
 static NSString *sRuntimeLaunchPhase = @"constructor";
 static NSString *sRuntimeLastRPCMethod = nil;
 static NSDictionary *sRuntimeConfig = nil;
@@ -123,6 +124,11 @@ static NSDictionary *SpliceKit_loadRuntimeConfig(void) {
     if (disabled.length > 0) config[@"Enabled"] = @(!SpliceKit_sentryParseBool(disabled, NO));
     NSString *enabled = NSProcessInfo.processInfo.environment[@"SPLICEKIT_SENTRY_ENABLED"];
     if (enabled.length > 0) config[@"Enabled"] = @(SpliceKit_sentryParseBool(enabled, YES));
+    NSString *enableLogs = NSProcessInfo.processInfo.environment[@"SPLICEKIT_SENTRY_ENABLE_LOGS"];
+    if (enableLogs.length == 0) {
+        enableLogs = NSProcessInfo.processInfo.environment[@"SPLICEKIT_SENTRY_LOGS_ENABLED"];
+    }
+    if (enableLogs.length > 0) config[@"EnableLogs"] = @(SpliceKit_sentryParseBool(enableLogs, YES));
 
     if (![config[@"ReleaseName"] isKindOfClass:[NSString class]] || [config[@"ReleaseName"] length] == 0) {
         config[@"ReleaseName"] = [NSString stringWithFormat:@"splicekit@%s", SPLICEKIT_VERSION];
@@ -132,6 +138,9 @@ static NSDictionary *SpliceKit_loadRuntimeConfig(void) {
     }
     if (config[@"Enabled"] == nil) {
         config[@"Enabled"] = @YES;
+    }
+    if (config[@"EnableLogs"] == nil) {
+        config[@"EnableLogs"] = @YES;
     }
 
     sRuntimeConfig = [config copy];
@@ -230,6 +239,13 @@ static SentryEvent *SpliceKit_runtimeBeforeSend(SentryEvent *event) {
     return event;
 }
 
+static SentryLog *SpliceKit_runtimeBeforeSendLog(SentryLog *log) {
+    if (log.body.length > 0) {
+        log.body = SpliceKit_sentryScrubString(log.body);
+    }
+    return log;
+}
+
 static void SpliceKit_configureRuntimeScope(SentryScope *scope, NSString *context, NSDictionary *data) {
     [scope setTagValue:@"runtime" forKey:@"component"];
     [scope setTagValue:@"true" forKey:@"splicekit_loaded"];
@@ -254,6 +270,7 @@ NSDictionary *SpliceKit_sentryRuntimeStatus(void) {
     return @{
         @"started": @(sRuntimeStarted),
         @"enabled": @(sRuntimeEnabled),
+        @"logsEnabled": @(sRuntimeLogsEnabled),
         @"sdkEnabled": @([SentrySDK isEnabled]),
         @"launchPhase": sRuntimeLaunchPhase ?: @"unknown",
         @"lastRPCMethod": sRuntimeLastRPCMethod ?: @"",
@@ -292,6 +309,83 @@ void SpliceKit_sentryAddBreadcrumb(NSString *category, NSString *message, NSDict
     [SentrySDK addBreadcrumb:crumb];
 }
 
+static NSDictionary<NSString *, id> *SpliceKit_sentryBuildLogAttributes(NSString *category, NSDictionary *attributes) {
+    NSMutableDictionary<NSString *, id> *result = [NSMutableDictionary dictionary];
+    result[@"component"] = @"runtime";
+    result[@"category"] = category.length > 0 ? SpliceKit_sentryScrubString(category) : @"splicekit.log";
+    result[@"startup_phase"] = sRuntimeLaunchPhase ?: @"unknown";
+    result[@"splicekit_version"] = [NSString stringWithUTF8String:SPLICEKIT_VERSION];
+    if (sRuntimeLastRPCMethod.length > 0) {
+        result[@"last_rpc_method"] = SpliceKit_sentryScrubString(sRuntimeLastRPCMethod);
+    }
+
+    NSDictionary *scrubbedAttributes = SpliceKit_sentryScrubObject(attributes);
+    for (id key in scrubbedAttributes) {
+        NSString *stringKey = [key isKindOfClass:[NSString class]] ? key : [key description];
+        id value = scrubbedAttributes[key];
+        if (!stringKey.length || !value || value == [NSNull null]) {
+            continue;
+        }
+        if ([value isKindOfClass:[NSString class]] || [value isKindOfClass:[NSNumber class]]) {
+            result[stringKey] = value;
+        } else {
+            result[stringKey] = SpliceKit_sentryScrubString([value description]);
+        }
+    }
+    return result;
+}
+
+static SentryLevel SpliceKit_sentryLogLevelForMessage(NSString *message) {
+    NSString *lower = [message lowercaseString];
+    if ([lower rangeOfString:@"fatal"].location != NSNotFound ||
+        [lower rangeOfString:@"crash"].location != NSNotFound) {
+        return kSentryLevelFatal;
+    }
+    if ([lower rangeOfString:@"error"].location != NSNotFound ||
+        [lower rangeOfString:@"exception"].location != NSNotFound ||
+        [lower rangeOfString:@"failed"].location != NSNotFound ||
+        [lower rangeOfString:@"failure"].location != NSNotFound) {
+        return kSentryLevelError;
+    }
+    if ([lower rangeOfString:@"warn"].location != NSNotFound) {
+        return kSentryLevelWarning;
+    }
+    if ([lower rangeOfString:@"debug"].location != NSNotFound) {
+        return kSentryLevelDebug;
+    }
+    return kSentryLevelInfo;
+}
+
+void SpliceKit_sentryLog(NSString *message, NSString *category, NSDictionary *attributes) {
+    if (!sRuntimeEnabled || !sRuntimeLogsEnabled || message.length == 0) return;
+
+    @try {
+        NSString *body = SpliceKit_sentryScrubString(message);
+        NSDictionary *logAttributes = SpliceKit_sentryBuildLogAttributes(category, attributes);
+        SentryLogger *logger = [SentrySDK logger];
+        switch (SpliceKit_sentryLogLevelForMessage(body)) {
+            case kSentryLevelFatal:
+                [logger fatal:body attributes:logAttributes];
+                break;
+            case kSentryLevelError:
+                [logger error:body attributes:logAttributes];
+                break;
+            case kSentryLevelWarning:
+                [logger warn:body attributes:logAttributes];
+                break;
+            case kSentryLevelDebug:
+                [logger debug:body attributes:logAttributes];
+                break;
+            case kSentryLevelNone:
+            case kSentryLevelInfo:
+            default:
+                [logger info:body attributes:logAttributes];
+                break;
+        }
+    } @catch (__unused NSException *exception) {
+    }
+}
+
 void SpliceKit_sentryCaptureMessage(NSString *message, NSString *context, NSDictionary *data) {
     if (!sRuntimeEnabled || message.length == 0) return;
     [SentrySDK captureMessage:SpliceKit_sentryScrubString(message) withScopeBlock:^(SentryScope *scope) {
@@ -326,12 +420,14 @@ void SpliceKit_sentryStartRuntime(void) {
     NSString *releaseName = config[@"ReleaseName"];
     NSString *environment = config[@"Environment"];
     BOOL sentryEnabled = SpliceKit_sentryParseBool(config[@"Enabled"], YES);
+    BOOL logsEnabled = SpliceKit_sentryParseBool(config[@"EnableLogs"], YES);
     NSString *cacheDirectoryPath = SpliceKit_runtimeCacheDirectory();
     __block BOOL crashedLastRun = NO;
     __block NSDictionary *crashSummary = nil;
 
     if (!sentryEnabled) {
         sRuntimeEnabled = NO;
+        sRuntimeLogsEnabled = NO;
         if ([SentrySDK respondsToSelector:@selector(close)]) {
             [SentrySDK close];
         }
@@ -359,8 +455,12 @@ void SpliceKit_sentryStartRuntime(void) {
         options.enableMetricKit = NO;
         options.tracesSampleRate = @0;
         options.maxBreadcrumbs = 150;
+        options.enableLogs = logsEnabled;
         options.beforeSend = ^SentryEvent *_Nullable(SentryEvent *event) {
             return SpliceKit_runtimeBeforeSend(event);
+        };
+        options.beforeSendLog = ^SentryLog *_Nullable(SentryLog *log) {
+            return SpliceKit_runtimeBeforeSendLog(log);
         };
         options.onLastRunStatusDetermined = ^(enum SentryLastRunStatus status, SentryEvent * _Nullable crashEvent) {
             if (status == SentryLastRunStatusDidCrash) {
@@ -373,6 +473,7 @@ void SpliceKit_sentryStartRuntime(void) {
     }];
 
     sRuntimeEnabled = [SentrySDK isEnabled];
+    sRuntimeLogsEnabled = sRuntimeEnabled && logsEnabled;
     if (!sRuntimeEnabled) {
         SpliceKit_log(@"Sentry runtime failed to start");
         return;

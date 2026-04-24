@@ -26,11 +26,14 @@ There is no build-time or runtime DSN override path anymore. If you ever want to
 
 - `SPLICEKIT_SENTRY_ENVIRONMENT`
   Optional. Usually `development`, `staging`, or `production`. Defaults to `production`.
+- `SPLICEKIT_SENTRY_ENABLE_LOGS`
+  Optional. Enables native Sentry Logs in both the patcher and runtime config. Defaults to `true`.
 
 Example:
 
 ```bash
 export SPLICEKIT_SENTRY_ENVIRONMENT='development'
+export SPLICEKIT_SENTRY_ENABLE_LOGS='true'
 ```
 
 ## Release-Time Environment Variables
@@ -114,6 +117,7 @@ The patcher captures:
 - patcher crashes
 - explicit patch/update/launch failures
 - breadcrumbs from `patcher.log`
+- structured Sentry Logs mirrored from patcher breadcrumbs
 - a synthetic follow-up event on next launch if the previous patcher run crashed
 
 Useful tags and context:
@@ -131,6 +135,7 @@ The injected runtime captures:
 - uncaught Objective-C exceptions in that host process
 - explicit nonfatal failures from SpliceKit startup and RPC handling
 - breadcrumbs mirrored from `SpliceKit_log(...)`
+- structured Sentry Logs mirrored from `SpliceKit_log(...)`
 - a synthetic follow-up event on next launch if the previous runtime session crashed
 
 Useful runtime tags:

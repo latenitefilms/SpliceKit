@@ -467,7 +467,7 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
 
 // Options menu
 @property (nonatomic, strong) NSPopUpButton *enginePopup;
-@property (nonatomic, copy) NSString *parakeetModelVersion; // "v3" (default, multilingual) or "v2" (English-optimized)
+// parakeetModelVersion is declared in the public header so the transcript.setEngine RPC can set it.
 
 // Speaker diarization (macOS 26+)
 @property (nonatomic, strong) NSButton *speakerDetectionCheckbox;

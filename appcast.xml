@@ -6,6 +6,19 @@
     <description>SpliceKit Patcher release updates</description>
     <language>en</language>
     <item>
+      <title>SpliceKit v3.3.8</title>
+      <sparkle:releaseNotesLink>https://elliotttate.github.io/SpliceKit/releasenotes.html</sparkle:releaseNotesLink>
+      <sparkle:version>3.3.8</sparkle:version>
+      <sparkle:shortVersionString>3.3.8</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+      <pubDate>Mon, 27 Apr 2026 17:25:05 +0000</pubDate>
+      <enclosure
+        url="https://github.com/elliotttate/SpliceKit/releases/download/v3.3.8/SpliceKit-v3.3.8.dmg"
+        sparkle:edSignature="eWkduuLGox0uOGIzmCM96PjQyaZR+YfQncntJcK0NYL+KkGm7d9d0KTSYvwRwJ84FeTqAp6FwimFX0q9nbE4Cw=="
+        length="21680555"
+        type="application/octet-stream" />
+    </item>
+    <item>
       <title>SpliceKit v3.3.7</title>
       <sparkle:releaseNotesLink>https://elliotttate.github.io/SpliceKit/releasenotes.html</sparkle:releaseNotesLink>
       <sparkle:version>3.3.7</sparkle:version>

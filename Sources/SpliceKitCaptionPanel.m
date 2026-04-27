@@ -2493,11 +2493,25 @@ static void SpliceKit_installDragSpy(void) {
     @synchronized (stderrAccum) {
         stderrData = [stderrAccum copy];
     }
-    SpliceKitTranscriptDiag_logProcessExit(task.terminationStatus, stdoutData, stderrData, taskElapsed);
+    // -[NSTask terminationStatus] throws if task is still running. Defensively
+    // ensure exit before reading. See APPLE-MACOS-1D / APPLE-MACOS-17.
+    int exitCode = -1;
+    @try {
+        if (task.isRunning) {
+            SpliceKit_log(@"[Captions] WARNING: task still running after waitUntilExit; terminating");
+            [task terminate];
+            [task waitUntilExit];
+        }
+        exitCode = task.terminationStatus;
+    } @catch (NSException *e) {
+        SpliceKit_log(@"[Captions] ERROR: failed to read terminationStatus: %@", e.reason);
+        exitCode = -1;
+    }
+    SpliceKitTranscriptDiag_logProcessExit(exitCode, stdoutData, stderrData, taskElapsed);
 
-    if (task.terminationStatus != 0) {
-        SpliceKit_log(@"[Captions] %@ failed (exit code %d)", engineLabel, task.terminationStatus);
-        [self transcriptionFailedWithError:[NSString stringWithFormat:@"%@ transcription failed (exit code %d). Check log for details.", engineLabel, task.terminationStatus]];
+    if (exitCode != 0) {
+        SpliceKit_log(@"[Captions] %@ failed (exit code %d)", engineLabel, exitCode);
+        [self transcriptionFailedWithError:[NSString stringWithFormat:@"%@ transcription failed (exit code %d). Check log for details.", engineLabel, exitCode]];
         return;
     }
 

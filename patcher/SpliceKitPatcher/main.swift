@@ -326,6 +326,12 @@ class PatcherModel: ObservableObject {
             shell("cp '\(bundledParakeet)' '\(parakeetBin)'")
         }
 
+        let whisperBin = buildDir + "/whisper-transcriber"
+        let bundledWhisper = (Bundle.main.resourcePath ?? "") + "/tools/whisper-transcriber"
+        if FileManager.default.fileExists(atPath: bundledWhisper) {
+            shell("cp '\(bundledWhisper)' '\(whisperBin)'")
+        }
+
         await completeStepAsync(.buildDylib)
 
         // Step 4: Create macOS framework bundle (Versions/A + symlinks)
@@ -365,6 +371,10 @@ class PatcherModel: ObservableObject {
         // Also deploy parakeet-transcriber into the framework Resources so it's found first
         if FileManager.default.fileExists(atPath: parakeetBin) {
             shell("cp '\(parakeetBin)' '\(fwDir)/Versions/A/Resources/parakeet-transcriber'")
+        }
+        if FileManager.default.fileExists(atPath: whisperBin) {
+            shell("cp '\(whisperBin)' '\(toolsDir)/whisper-transcriber'")
+            shell("cp '\(whisperBin)' '\(fwDir)/Versions/A/Resources/whisper-transcriber'")
         }
 
         await logAsync("Framework installed")
@@ -530,6 +540,11 @@ class PatcherModel: ObservableObject {
         if FileManager.default.fileExists(atPath: bundledParakeet) {
             shell("cp '\(bundledParakeet)' '\(parakeetBin)'")
         }
+        let whisperBin = buildDir + "/whisper-transcriber"
+        let bundledWhisper = (Bundle.main.resourcePath ?? "") + "/tools/whisper-transcriber"
+        if FileManager.default.fileExists(atPath: bundledWhisper) {
+            shell("cp '\(bundledWhisper)' '\(whisperBin)'")
+        }
         await completeStepAsync(.buildDylib)
 
         // Install framework (overwrite existing binary)
@@ -560,6 +575,10 @@ class PatcherModel: ObservableObject {
         if FileManager.default.fileExists(atPath: parakeetBin) {
             shell("cp '\(parakeetBin)' '\(toolsDir)/parakeet-transcriber'")
             shell("cp '\(parakeetBin)' '\(fwDir)/Versions/A/Resources/parakeet-transcriber'")
+        }
+        if FileManager.default.fileExists(atPath: whisperBin) {
+            shell("cp '\(whisperBin)' '\(toolsDir)/whisper-transcriber'")
+            shell("cp '\(whisperBin)' '\(fwDir)/Versions/A/Resources/whisper-transcriber'")
         }
 
         await logAsync("Framework updated")

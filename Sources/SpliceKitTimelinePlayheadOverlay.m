@@ -285,8 +285,20 @@ static BOOL PO_scrollDuringPlayback(id timelineView) {
     // If nothing has been observed yet, we have no reference — skip this tick.
     if (base.timescale <= 0 || baseWall <= 0.0) return;
 
-    // Extrapolate forward: t_now = base + (now - baseWall) * rate
+    // Skip when paused: tick only needs to extrapolate during active playback,
+    // and if we've gone idle the cached view may be mid-teardown. APPLE-MACOS-P
+    // shows EXC_BAD_ACCESS deep inside locationRangeForTime: when this fires
+    // against a view whose internals were freed.
+    if (rate == 0.0) return;
+
+    // Stale observation: if we haven't seen a setPlayheadTime in a while, the
+    // cached view may have been replaced (sequence change, dual-timeline
+    // toggle). Bail out and wait for a fresh observation rather than calling
+    // into a possibly-dead view.
     CFTimeInterval elapsed = CACurrentMediaTime() - baseWall;
+    if (elapsed > 5.0) return;
+
+    // Extrapolate forward: t_now = base + (now - baseWall) * rate
     double extraSecs = elapsed * rate;
     PO_CMTime extrapolated = base;
     int64_t addValue = (int64_t)llround(extraSecs * (double)base.timescale);

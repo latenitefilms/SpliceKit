@@ -917,7 +917,19 @@ static NSDictionary *SpliceKit_handleCallMethodWithArgs(NSDictionary *params) {
 
                 if ([type isEqualToString:@"string"]) {
                     NSString *val = [arg[@"value"] description];
-                    [inv setArgument:&val atIndex:argIdx];
+                    // setArgument: blindly memcpy's sigof(arg) bytes from the
+                    // source pointer, so the layout of `val` must match the
+                    // selector's expected ObjC type encoding. If the selector
+                    // wants a C-string (`*` / `r*`) and we pass &NSString*, the
+                    // callee later strlen()s the NSString's isa as if it were
+                    // a char* and crashes deep inside _platform_strlen.
+                    // See APPLE-MACOS-K.
+                    if (sigType[0] == '*' || (sigType[0] == 'r' && sigType[1] == '*')) {
+                        const char *cstr = [val UTF8String] ?: "";
+                        [inv setArgument:&cstr atIndex:argIdx];
+                    } else {
+                        [inv setArgument:&val atIndex:argIdx];
+                    }
                 } else if ([type isEqualToString:@"int"]) {
                     if (SpliceKit_rejectScalarForObjectArgument(sigType, selectorName, argIdx, type, &result)) return;
                     long long val = [arg[@"value"] longLongValue];
@@ -27604,9 +27616,13 @@ static NSDictionary *SpliceKit_handleDebugBreakpoint(NSDictionary *params) {
 
 NSDictionary *SpliceKit_handleRequest(NSDictionary *request) {
     NSString *method = request[@"method"];
-    NSDictionary *params = request[@"params"] ?: @{};
+    id rawParams = request[@"params"];
+    // Clients sometimes send `"params": []` instead of `{}`. Without this guard,
+    // every later `params[@"key"]` crashes with "unrecognized selector sent to
+    // __NSArray0". See APPLE-MACOS-X. Coerce non-dict params to empty dict.
+    NSDictionary *params = [rawParams isKindOfClass:[NSDictionary class]] ? (NSDictionary *)rawParams : @{};
 
-    if (!method) {
+    if (![method isKindOfClass:[NSString class]]) {
         return @{@"error": @{@"code": @(-32600), @"message": @"Invalid Request: method required"}};
     }
 

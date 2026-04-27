@@ -37,8 +37,19 @@ enum WizardPanel: Int {
 
 enum PatchError: LocalizedError {
     case msg(String)
+    /// User-prerequisite failure (e.g. Xcode CLT not installed, license not accepted).
+    /// Surfaces to the user normally but does NOT report to Sentry — these are
+    /// expected setup steps, not SpliceKit bugs.
+    case userPrereq(String)
     var errorDescription: String? {
-        switch self { case .msg(let s): return s }
+        switch self {
+        case .msg(let s): return s
+        case .userPrereq(let s): return s
+        }
+    }
+    var isUserPrereq: Bool {
+        if case .userPrereq = self { return true }
+        return false
     }
 }
 
@@ -325,7 +336,7 @@ class PatcherModel: ObservableObject {
         guard !selectedPath.isEmpty else {
             await logAsync("Xcode Command Line Tools not found. Installing...")
             shell("xcode-select --install 2>/dev/null")
-            throw PatchError.msg("""
+            throw PatchError.userPrereq("""
             Xcode Command Line Tools are required.
 
             An installer window should have appeared. Please complete the installation, then click Retry.
@@ -336,7 +347,7 @@ class PatcherModel: ObservableObject {
         guard otoolCheck.status == 0 else {
             let output = otoolCheck.output.trimmingCharacters(in: .whitespacesAndNewlines)
             if output.localizedCaseInsensitiveContains("license") {
-                throw PatchError.msg("""
+                throw PatchError.userPrereq("""
                 Xcode Command Line Tools are installed, but the Xcode license has not been accepted.
 
                 Please run this once in Terminal, then retry:
@@ -344,7 +355,7 @@ class PatcherModel: ObservableObject {
                 """)
             }
             shell("xcode-select --install 2>/dev/null")
-            throw PatchError.msg("""
+            throw PatchError.userPrereq("""
             Xcode Command Line Tools are installed, but required developer tools are not available.
 
             Please complete or repair the Command Line Tools installation, then click Retry.
@@ -360,7 +371,7 @@ class PatcherModel: ObservableObject {
             let clangCheck = shellResult("xcrun clang --version 2>&1")
             guard clangCheck.status == 0 else {
                 if clangCheck.output.localizedCaseInsensitiveContains("license") {
-                    throw PatchError.msg("""
+                    throw PatchError.userPrereq("""
                     Xcode Command Line Tools are installed, but the Xcode license has not been accepted.
 
                     Please run this once in Terminal, then retry:
@@ -604,9 +615,15 @@ class PatcherModel: ObservableObject {
                 await MainActor.run {
                     self.errorMessage = error.localizedDescription
                     self.appendLog("ERROR: \(error.localizedDescription)")
-                    PatcherSentry.capture(error: error,
-                                          context: "patch.run",
-                                          extras: ["current_step": self.currentStep?.rawValue ?? "unknown"])
+                    if (error as? PatchError)?.isUserPrereq == true {
+                        // User prerequisite (e.g. Xcode CLT) — surfaced to the user
+                        // but not a SpliceKit bug, so don't pollute Sentry.
+                        self.appendLog("Skipping Sentry report: user-prerequisite failure.")
+                    } else {
+                        PatcherSentry.capture(error: error,
+                                              context: "patch.run",
+                                              extras: ["current_step": self.currentStep?.rawValue ?? "unknown"])
+                    }
                 }
             }
             await MainActor.run {
@@ -877,14 +894,24 @@ class PatcherModel: ObservableObject {
         // Step 4: Create macOS framework bundle (Versions/A + symlinks)
         await setStepAsync(.installFramework)
         let fwDir = moddedApp + "/Contents/Frameworks/SpliceKit.framework"
+        let resourcesDir = fwDir + "/Versions/A/Resources"
         shell("""
             rm -rf '\(fwDir)'
-            mkdir -p '\(fwDir)/Versions/A/Resources'
+            mkdir -p '\(resourcesDir)'
             cp '\(buildDir)/SpliceKit' '\(fwDir)/Versions/A/SpliceKit'
             cd '\(fwDir)/Versions' && ln -sfn A Current
             cd '\(fwDir)' && ln -sfn Versions/Current/SpliceKit SpliceKit
             cd '\(fwDir)' && ln -sfn Versions/Current/Resources Resources
             """)
+        // Belt-and-suspenders: shell mkdir occasionally fails silently (sandbox,
+        // permissions, weird path), and the plist.write below then fails with
+        // NSCocoaErrorDomain Code 4 (no such file or directory) — see APPLE-MACOS-18.
+        // Re-create with FileManager so we get a clear, throwable error if it
+        // genuinely can't be created.
+        if !FileManager.default.fileExists(atPath: resourcesDir) {
+            try FileManager.default.createDirectory(atPath: resourcesDir,
+                                                     withIntermediateDirectories: true)
+        }
         let currentVersion = currentSpliceKitVersion()
         let patcherVersion = currentVersion.isEmpty ? "0.0.0" : currentVersion
         let plist = """
@@ -899,9 +926,9 @@ class PatcherModel: ObservableObject {
             <key>CFBundleExecutable</key><string>SpliceKit</string>
             </dict></plist>
             """
-        try plist.write(toFile: fwDir + "/Versions/A/Resources/Info.plist", atomically: true, encoding: .utf8)
+        try plist.write(toFile: resourcesDir + "/Info.plist", atomically: true, encoding: .utf8)
         if let sentryConfig = Bundle.main.url(forResource: "SpliceKitSentryConfig", withExtension: "plist") {
-            shell("cp '\(sentryConfig.path)' '\(fwDir)/Versions/A/Resources/SpliceKitSentryConfig.plist'")
+            shell("cp '\(sentryConfig.path)' '\(resourcesDir)/SpliceKitSentryConfig.plist'")
         }
 
         // Install BRAW plugin bundles into FCP.app/Contents/PlugIns/
@@ -1145,14 +1172,19 @@ class PatcherModel: ObservableObject {
         // Install framework (overwrite existing binary)
         await setStepAsync(.installFramework)
         let fwDir = moddedApp + "/Contents/Frameworks/SpliceKit.framework"
+        let resourcesDir = fwDir + "/Versions/A/Resources"
         shell("""
             rm -rf '\(fwDir)'
-            mkdir -p '\(fwDir)/Versions/A/Resources'
+            mkdir -p '\(resourcesDir)'
             cp '\(buildDir)/SpliceKit' '\(fwDir)/Versions/A/SpliceKit'
             cd '\(fwDir)/Versions' && ln -sfn A Current
             cd '\(fwDir)' && ln -sfn Versions/Current/SpliceKit SpliceKit
             cd '\(fwDir)' && ln -sfn Versions/Current/Resources Resources
             """)
+        if !FileManager.default.fileExists(atPath: resourcesDir) {
+            try FileManager.default.createDirectory(atPath: resourcesDir,
+                                                     withIntermediateDirectories: true)
+        }
 
         let currentVersion = currentSpliceKitVersion()
         let patcherVersion = currentVersion.isEmpty ? "0.0.0" : currentVersion
@@ -1168,9 +1200,9 @@ class PatcherModel: ObservableObject {
             <key>CFBundleExecutable</key><string>SpliceKit</string>
             </dict></plist>
             """
-        try plist.write(toFile: fwDir + "/Versions/A/Resources/Info.plist", atomically: true, encoding: .utf8)
+        try plist.write(toFile: resourcesDir + "/Info.plist", atomically: true, encoding: .utf8)
         if let sentryConfig = Bundle.main.url(forResource: "SpliceKitSentryConfig", withExtension: "plist") {
-            shell("cp '\(sentryConfig.path)' '\(fwDir)/Versions/A/Resources/SpliceKitSentryConfig.plist'")
+            shell("cp '\(sentryConfig.path)' '\(resourcesDir)/SpliceKitSentryConfig.plist'")
         }
 
         // Refresh BRAW plugin bundles on upgrade. Same reasoning as fresh
@@ -1530,24 +1562,45 @@ class PatcherModel: ObservableObject {
         appendLog(String(format: "Final Cut Pro process %d terminated after %.1fs",
                          app.processIdentifier, runtime))
         if runtime < 90 {
-            for line in launchDiagnostics(
+            let diagnostics = launchDiagnostics(
                 launchTime: launchTime,
                 spliceKitLogDateBeforeLaunch: spliceKitLogDateBeforeLaunch
-            ) {
+            )
+            for line in diagnostics {
                 appendLog(line)
             }
-            PatcherSentry.captureMessage(
-                "Final Cut Pro terminated shortly after launch",
-                level: .error,
-                context: "patcher.launch_termination",
-                extras: [
-                    "runtime_seconds": runtime,
-                    "diagnostics": launchDiagnostics(
-                        launchTime: launchTime,
-                        spliceKitLogDateBeforeLaunch: spliceKitLogDateBeforeLaunch
-                    )
-                ]
-            )
+
+            // Only report to Sentry if there's an actual failure signal. A user
+            // quitting FCP within 90s after launching it from the patcher is
+            // normal and should not produce a crash event. Real signals:
+            //   1. A FCP crash report newer than launchTime exists.
+            //   2. The injected dylib never initialized (splicekit.log unchanged).
+            //   3. Runtime was extremely short (< 5s) — likely instant exit.
+            let hasCrashReport = latestCrashReportURL(after: launchTime) != nil
+            let dylibNeverLoaded = diagnostics.contains {
+                $0.contains("dylib likely never initialized")
+            }
+            let cleanShutdown = diagnostics.contains {
+                $0.contains("App terminating") || $0.contains("Server socket closed")
+            }
+            let abnormal = hasCrashReport || dylibNeverLoaded || (runtime < 5 && !cleanShutdown)
+
+            if abnormal {
+                PatcherSentry.captureMessage(
+                    "Final Cut Pro terminated shortly after launch",
+                    level: .error,
+                    context: "patcher.launch_termination",
+                    extras: [
+                        "runtime_seconds": runtime,
+                        "has_crash_report": hasCrashReport,
+                        "dylib_never_loaded": dylibNeverLoaded,
+                        "clean_shutdown": cleanShutdown,
+                        "diagnostics": diagnostics
+                    ]
+                )
+            } else {
+                appendLog("Skipping Sentry report: no crash report and dylib initialized cleanly (likely user-initiated quit).")
+            }
         }
         if launchedFCPRunningApp?.processIdentifier == app.processIdentifier {
             launchedFCPRunningApp = nil

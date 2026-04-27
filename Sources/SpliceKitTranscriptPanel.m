@@ -2925,6 +2925,24 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
     // Clean up manifest
     [[NSFileManager defaultManager] removeItemAtPath:manifestPath error:nil];
 
+    // -[NSTask terminationStatus] throws NSInvalidArgumentException if the task
+    // is still running. waitUntilExit normally guarantees termination, but in
+    // edge cases (e.g. arm64-only binary launched on x86, signal interruption,
+    // pipe failures) the task can be in an inconsistent state. Read it once,
+    // defensively, and treat a throw as a non-zero exit. See APPLE-MACOS-17.
+    int exitCode = -1;
+    @try {
+        if (task.isRunning) {
+            SpliceKit_log(@"[Transcript] WARNING: task still running after waitUntilExit; terminating");
+            [task terminate];
+            [task waitUntilExit];
+        }
+        exitCode = task.terminationStatus;
+    } @catch (NSException *e) {
+        SpliceKit_log(@"[Transcript] ERROR: failed to read terminationStatus: %@", e.reason);
+        exitCode = -1;
+    }
+
     // Diagnostic: process exit details
     {
         NSTimeInterval processElapsed = -[processStartTime timeIntervalSinceNow];
@@ -2933,13 +2951,13 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
         @synchronized (stdoutAccum) {
             stdoutDiagData = [stdoutAccum copy];
         }
-        SpliceKitTranscriptDiag_logProcessExit(task.terminationStatus,
+        SpliceKitTranscriptDiag_logProcessExit(exitCode,
                                                 stdoutDiagData, stderrDiagData, processElapsed);
         SpliceKitTranscriptDiag_inspectRawOutput(stdoutDiagData);
     }
 
-    if (task.terminationStatus != 0) {
-        SpliceKit_log(@"[Transcript] ─── Parakeet failed (exit code %d) ───", task.terminationStatus);
+    if (exitCode != 0) {
+        SpliceKit_log(@"[Transcript] ─── Parakeet failed (exit code %d) ───", exitCode);
 
         // Collect all stderr output for diagnostics
         NSData *stderrRemaining = [stderrPipe.fileHandleForReading readDataToEndOfFile];
@@ -2992,9 +3010,9 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
             userError = @"Permission denied reading media file. Check that FCP has Full Disk Access in System Settings > Privacy.";
         } else if ([allLower containsString:@"corrupt"] || [allLower containsString:@"invalid data"]) {
             userError = @"Media file appears to be corrupted or in an unsupported format.";
-        } else if (task.terminationStatus == 9) {
+        } else if (exitCode == 9) {
             userError = @"Parakeet was killed (likely out of memory). Close other apps and try again with fewer clips.";
-        } else if (task.terminationStatus == 6) {
+        } else if (exitCode == 6) {
             userError = @"Parakeet crashed (SIGABRT). This may be a compatibility issue. Try switching to Apple Speech engine.";
         } else {
             // Generic fallback with the actual output
@@ -3010,7 +3028,7 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
                 userError = [NSString stringWithFormat:@"Parakeet transcription failed: %@", lastLine];
             } else {
                 userError = [NSString stringWithFormat:@"Parakeet transcription failed (exit code %d). "
-                    @"Try switching to \"Apple Speech\" engine.", task.terminationStatus];
+                    @"Try switching to \"Apple Speech\" engine.", exitCode];
             }
         }
 

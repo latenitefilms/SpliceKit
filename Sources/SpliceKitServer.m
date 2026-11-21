@@ -13650,9 +13650,15 @@ static BOOL SpliceKit_browserPrepareExplicitPasteboard(id clip,
     }
 
     if (!wroteRanges) {
+        // FCP 12.x: -writeAnchoredObjects:options:
+        // FCP 13.0 removed the two-argument form; only
+        // -writeAnchoredObjects:userInfo:options: remains.
         SEL writeAnchoredSel = NSSelectorFromString(@"writeAnchoredObjects:options:");
+        SEL writeAnchoredUserInfoSel = NSSelectorFromString(@"writeAnchoredObjects:userInfo:options:");
         if ([ffPasteboard respondsToSelector:writeAnchoredSel]) {
             wroteAnchored = ((BOOL (*)(id, SEL, id, id))objc_msgSend)(ffPasteboard, writeAnchoredSel, @[clip], nil);
+        } else if ([ffPasteboard respondsToSelector:writeAnchoredUserInfoSel]) {
+            wroteAnchored = ((BOOL (*)(id, SEL, id, id, id))objc_msgSend)(ffPasteboard, writeAnchoredUserInfoSel, @[clip], nil, nil);
         }
     }
 

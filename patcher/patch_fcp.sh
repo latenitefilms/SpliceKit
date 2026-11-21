@@ -29,7 +29,6 @@ if [[ -z "${SOURCE_APP:-}" ]]; then
 fi
 DEFAULT_DEST="$HOME/Applications/SpliceKit"
 DEST_DIR="${DEST_DIR:-$DEFAULT_DEST}"
-APP_NAME="$(basename "$SOURCE_APP")"
 BRIDGE_PORT=9876
 VERSION="2.0.0"
 
@@ -170,6 +169,9 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# Derive the app name after argument parsing so --source picks the right
+# destination name (e.g. "Final Cut Pro Creator Studio.app").
+APP_NAME="$(basename "$SOURCE_APP")"
 MODDED_APP="$DEST_DIR/$APP_NAME"
 
 # ============================================================

@@ -375,6 +375,15 @@ public:
         dispatch_semaphore_signal(_semaphore);
     }
 
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Winconsistent-missing-override"
+    // Blackmagic RAW SDK 5.x added ReadAudioComplete() to IBlackmagicRawCallback
+    // (between ReadComplete and DecodeComplete). Declared without `override` so this
+    // still builds against older SDKs. SpliceKit never submits audio read jobs.
+    virtual void ReadAudioComplete(IBlackmagicRawJob *job, HRESULT, IBlackmagicRawAudioBuffer *) {
+        if (job) job->Release();
+    }
+#pragma clang diagnostic pop
     void DecodeComplete(IBlackmagicRawJob *, HRESULT) override {}
     void ProcessComplete(IBlackmagicRawJob *, HRESULT, IBlackmagicRawProcessedImage *) override {}
     void TrimProgress(IBlackmagicRawJob *, float) override {}

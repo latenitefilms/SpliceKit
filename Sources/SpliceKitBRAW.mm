@@ -24,6 +24,9 @@ extern "C" void VTRegisterVideoDecoderBundleDirectory(CFURLRef directoryURL);
 #include <vector>
 #include <string>
 #include "/Applications/Blackmagic RAW/Blackmagic RAW SDK/Mac/Include/BlackmagicRawAPI.h"
+
+// Forward-declared so ReadAudioComplete stubs compile against pre-5.x SDKs too.
+class IBlackmagicRawAudioBuffer;
 #define SPLICEKIT_HAS_BRAW_SDK 1
 #else
 #define SPLICEKIT_HAS_BRAW_SDK 0
@@ -2334,6 +2337,15 @@ public:
         if (job) job->Release();
     }
 
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Winconsistent-missing-override"
+    // Blackmagic RAW SDK 5.x added ReadAudioComplete() to IBlackmagicRawCallback
+    // (between ReadComplete and DecodeComplete). Declared without `override` so this
+    // still builds against older SDKs. SpliceKit never submits audio read jobs.
+    virtual void ReadAudioComplete(IBlackmagicRawJob *job, HRESULT, IBlackmagicRawAudioBuffer *) {
+        if (job) job->Release();
+    }
+#pragma clang diagnostic pop
     void DecodeComplete(IBlackmagicRawJob *, HRESULT) override {}
 
     void ProcessComplete(IBlackmagicRawJob *job, HRESULT result, IBlackmagicRawProcessedImage *processedImage) override {
@@ -4554,6 +4566,15 @@ public:
         if (job) job->Release();
     }
 
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Winconsistent-missing-override"
+    // Blackmagic RAW SDK 5.x added ReadAudioComplete() to IBlackmagicRawCallback
+    // (between ReadComplete and DecodeComplete). Declared without `override` so this
+    // still builds against older SDKs. SpliceKit never submits audio read jobs.
+    virtual void ReadAudioComplete(IBlackmagicRawJob *job, HRESULT, IBlackmagicRawAudioBuffer *) {
+        if (job) job->Release();
+    }
+#pragma clang diagnostic pop
     void DecodeComplete(IBlackmagicRawJob *job, HRESULT) override {
         if (job) job->Release();
     }

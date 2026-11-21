@@ -9,6 +9,9 @@
 
 #if __has_include("/Applications/Blackmagic RAW/Blackmagic RAW SDK/Mac/Include/BlackmagicRawAPI.h")
 #include "/Applications/Blackmagic RAW/Blackmagic RAW SDK/Mac/Include/BlackmagicRawAPI.h"
+
+// Forward-declared so ReadAudioComplete stubs compile against pre-5.x SDKs too.
+class IBlackmagicRawAudioBuffer;
 #define SPLICEKIT_BRAW_SDK_AVAILABLE 1
 #else
 #define SPLICEKIT_BRAW_SDK_AVAILABLE 0

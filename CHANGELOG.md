@@ -6,6 +6,48 @@ notarization ticket, and Sparkle signature live on the
 Sparkle users are notified automatically; manual download is available from the
 same page or via `appcast.xml`.
 
+## [Unreleased]
+
+### Added
+- **Final Cut Pro 13.0 and Final Cut Pro 13.0 Creator Studio are supported.**
+  SpliceKit loads, starts its control server and installs its CloudContent
+  guards on FCP 13.0 (build 460023). Clip pasteboard writes fall back to FCP
+  13's `writeAnchoredObjects:userInfo:options:`, and FCP 13's new MotionVFX
+  content catalog is left untouched.
+
+### Changed
+- **FCP 13 no longer shows the "not enough extra media" dialog when adding a
+  transition** — it ripple-trims automatically and shows a notice instead — so
+  SpliceKit's "Use Freeze Frames" dialog button can no longer appear there.
+- **Photos imports work in the patched app again.** The Photos-library
+  entitlement is now preserved when FCP is re-signed (upstream #98).
+- **The media-extension crash guard is now purely a crash guard.** It still
+  stops an incomplete third-party Media Extension from aborting FCP, but no
+  longer overrides which decoder FCP picks.
+
+### Removed
+- **Built-in Blackmagic RAW support has been removed. Use
+  [BRAW Toolbox](https://brawtoolbox.io) for `.braw` media.** This removes the
+  BRAW decoder, format reader, RAW processor, RAW settings HUD and inspector
+  tile, the `braw.*` RPCs and `braw_probe` MCP tool, and the BRAW-only
+  Immersive Preview (FCP 360 Viewer) with its `immersivePreview.*` RPCs. The
+  Vision Pro preview panel remains. Patching or updating removes SpliceKit
+  BRAW bundles left in the patched app by older versions.
+
+### Fixed
+- **The inspector no longer goes blank after switching away from FCP and back**
+  (upstream #94).
+- **Skimming with snapping on no longer crashes FCP on Intel Macs** (upstream
+  #92).
+- **Transcription is more reliable:** the patcher deploys
+  `whisper-transcriber`, one undecodable clip no longer aborts a Parakeet batch,
+  and `parakeet-transcriber` builds against current FluidAudio (upstream #85).
+- **`patcher/patch_fcp.sh` produces a launchable app again.** It builds through
+  the Makefile, detects existing injection correctly, picks one signing
+  identity, signs after editing `Info.plist`, no longer writes `.mcp.json` into
+  the signed framework, and names the destination correctly for
+  `--source "…Creator Studio.app"` (upstream #87 plus follow-up fixes).
+
 ## [3.3.9] — 2026-08-29
 
 ### Added

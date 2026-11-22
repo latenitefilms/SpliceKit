@@ -322,6 +322,9 @@ apply_transition(name="Flow")         # apply Flow transition there
 When clips don't have enough extra media beyond their edges for a transition, FCP normally
 shows a dialog offering to ripple trim. SpliceKit adds a third option: **"Use Freeze Frames"**.
 
+**FCP 13:** FCP 13.0 no longer shows this dialog — it ripple-trims automatically and
+shows a notice — so the "Use Freeze Frames" button only appears on FCP 12.x.
+
 - **UI button**: Whenever the "not enough extra media" dialog appears (including manual use),
   a "Use Freeze Frames" button is added. It extends clip edges with freeze frames and
   re-applies the transition without shortening the project.

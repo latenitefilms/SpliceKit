@@ -2219,7 +2219,15 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
                                   NSStringFromClass([asset class]));
                     continue;
                 }
-                for (NSDictionary *covered in matchingClipInfos) [coveredClipInfos addObject:covered];
+                // Mark every clip that uses this media as covered, including clips the
+                // shared-asset dedup above left out of clipInfosByAsset.
+                for (NSDictionary *covered in matchingClipInfos) {
+                    [coveredClipInfos addObject:covered];
+                    NSString *coveredPath = ((NSURL *)covered[@"mediaURL"]).path;
+                    for (NSDictionary *sibling in (coveredPath.length > 0 ? clipInfosByPath[coveredPath] : nil)) {
+                        [coveredClipInfos addObject:sibling];
+                    }
+                }
 
                 // Get phrases from transcript
                 id phrases = ((id (*)(id, SEL))objc_msgSend)(transcript,

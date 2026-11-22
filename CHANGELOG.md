@@ -38,7 +38,7 @@ same page or via `appcast.xml`.
 
 ### Removed
 - **Sentry crash reporting has been removed.** Neither the patcher nor the
-  injected runtime sends crash or diagnostic data automatically; crashes are
+  injected runtime sends crash reports or logs automatically; crashes are
   written to `~/Library/Logs/SpliceKit/splicekit.log`, and the patcher's
   **Share Logs** button uploads logs only when you click it. This also drops the Sentry SDK
   from the patcher and halves the size of the SpliceKit framework.

@@ -348,9 +348,13 @@ cp "$BUILD_DIR/SpliceKit" "$FW_DIR/Versions/A/SpliceKit"
 
 # Create symlinks. Use -n so repeated patch runs replace the symlink itself
 # instead of following it into Versions/A and creating recursive loops.
-cd "$FW_DIR/Versions" && ln -sfn A Current
-cd "$FW_DIR" && ln -sfn Versions/Current/SpliceKit SpliceKit
-cd "$FW_DIR" && ln -sfn Versions/Current/Resources Resources
+# Run in subshells so the script's working directory is unchanged: Step 7 writes
+# .mcp.json into the current directory, and leaving the cwd inside the framework
+# dropped that file into the signed bundle ("unsealed contents present in the
+# root directory of an embedded framework").
+(cd "$FW_DIR/Versions" && ln -sfn A Current)
+(cd "$FW_DIR" && ln -sfn Versions/Current/SpliceKit SpliceKit)
+(cd "$FW_DIR" && ln -sfn Versions/Current/Resources Resources)
 
 # Create Info.plist
 cat > "$FW_DIR/Versions/A/Resources/Info.plist" << 'PLIST'
@@ -421,6 +425,16 @@ fi
 # Step 5: Create entitlements and re-sign
 # ============================================================
 step "Step 5: Re-signing (this takes a moment)"
+
+# Add speech, camera and microphone usage descriptions (transcripts, LiveCam, dictation).
+# This must happen BEFORE re-signing: Info.plist is sealed by the signature, so editing
+# it afterwards leaves an invalid signature and launchd refuses to spawn the app
+# ("Launchd job spawn failed", POSIX error 163).
+/usr/libexec/PlistBuddy -c "Set :NSSpeechRecognitionUsageDescription 'SpliceKit uses speech recognition for transcript editing and command palette voice dictation inside Final Cut Pro.'" "$MODDED_APP/Contents/Info.plist" 2>/dev/null || /usr/libexec/PlistBuddy -c "Add :NSSpeechRecognitionUsageDescription string 'SpliceKit uses speech recognition for transcript editing and command palette voice dictation inside Final Cut Pro.'" "$MODDED_APP/Contents/Info.plist" 2>/dev/null || true
+/usr/libexec/PlistBuddy -c "Set :NSMicrophoneUsageDescription 'SpliceKit uses the microphone for LiveCam capture and command palette voice dictation inside Final Cut Pro.'" "$MODDED_APP/Contents/Info.plist" 2>/dev/null || /usr/libexec/PlistBuddy -c "Add :NSMicrophoneUsageDescription string 'SpliceKit uses the microphone for LiveCam capture and command palette voice dictation inside Final Cut Pro.'" "$MODDED_APP/Contents/Info.plist" 2>/dev/null || true
+/usr/libexec/PlistBuddy -c "Set :NSCameraUsageDescription 'SpliceKit LiveCam uses the camera for native webcam recording inside Final Cut Pro.'" "$MODDED_APP/Contents/Info.plist" 2>/dev/null || /usr/libexec/PlistBuddy -c "Add :NSCameraUsageDescription string 'SpliceKit LiveCam uses the camera for native webcam recording inside Final Cut Pro.'" "$MODDED_APP/Contents/Info.plist" 2>/dev/null || true
+log "Speech recognition, camera and microphone usage descriptions configured"
+
 
 # Create entitlements
 ENTITLEMENTS="$BUILD_DIR/entitlements.plist"
@@ -502,10 +516,6 @@ defaults write com.apple.FinalCut CloudContentFirstLaunchCompleted -bool true 2>
 defaults write com.apple.FinalCut FFCloudContentDisabled -bool true 2>/dev/null || true
 log "CloudContent defaults set"
 
-# Add speech and microphone usage descriptions for transcript + command palette dictation
-/usr/libexec/PlistBuddy -c "Set :NSSpeechRecognitionUsageDescription 'SpliceKit uses speech recognition for transcript editing and command palette voice dictation inside Final Cut Pro.'" "$MODDED_APP/Contents/Info.plist" 2>/dev/null || /usr/libexec/PlistBuddy -c "Add :NSSpeechRecognitionUsageDescription string 'SpliceKit uses speech recognition for transcript editing and command palette voice dictation inside Final Cut Pro.'" "$MODDED_APP/Contents/Info.plist" 2>/dev/null || true
-/usr/libexec/PlistBuddy -c "Set :NSMicrophoneUsageDescription 'SpliceKit uses the microphone for LiveCam capture and command palette voice dictation inside Final Cut Pro.'" "$MODDED_APP/Contents/Info.plist" 2>/dev/null || /usr/libexec/PlistBuddy -c "Add :NSMicrophoneUsageDescription string 'SpliceKit uses the microphone for LiveCam capture and command palette voice dictation inside Final Cut Pro.'" "$MODDED_APP/Contents/Info.plist" 2>/dev/null || true
-log "Speech recognition and microphone permissions configured"
 
 # ============================================================
 # Step 7: Create MCP config

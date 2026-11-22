@@ -24,10 +24,8 @@ mkdir -p "$BUILD_OUT"
 bash "$REPO_DIR/Scripts/ensure_sentry_framework.sh"
 
 # Build everything via the Makefile (handles incremental builds)
-# Includes braw-prototype so the VT decoder + FormatReader bundles end up
-# at build/braw-prototype/{Codecs,FormatReaders}/*.bundle ready to ship.
 echo "Building SpliceKit via Makefile..."
-make -C "$REPO_DIR" all tools braw-prototype
+make -C "$REPO_DIR" all tools
 
 # Copy artifacts to Xcode's expected location
 cp "$REPO_DIR/build/SpliceKit" "$BUILD_OUT/SpliceKit"
@@ -38,20 +36,8 @@ for tool in silence-detector structure-analyzer SpliceKitMixer; do
     fi
 done
 
-# Stage BRAW plugin bundles so bundle_resources.sh can copy them into the app.
-BRAW_OUT="$BUILD_OUT/BRAWPlugins"
-rm -rf "$BRAW_OUT"
-mkdir -p "$BRAW_OUT/Codecs" "$BRAW_OUT/FormatReaders"
-if [ -d "$REPO_DIR/build/braw-prototype/Codecs/SpliceKitBRAWDecoder.bundle" ]; then
-    cp -R "$REPO_DIR/build/braw-prototype/Codecs/SpliceKitBRAWDecoder.bundle" \
-          "$BRAW_OUT/Codecs/"
-fi
-if [ -d "$REPO_DIR/build/braw-prototype/FormatReaders/SpliceKitBRAWImport.bundle" ]; then
-    cp -R "$REPO_DIR/build/braw-prototype/FormatReaders/SpliceKitBRAWImport.bundle" \
-          "$BRAW_OUT/FormatReaders/"
-fi
+# SpliceKit no longer ships BRAW plugin bundles; clear any stale staging dir.
+rm -rf "$BUILD_OUT/BRAWPlugins"
 
 echo "Build complete: $BUILD_OUT"
 ls -la "$BUILD_OUT/"
-echo "BRAW plugin staging:"
-ls -la "$BRAW_OUT/Codecs/" "$BRAW_OUT/FormatReaders/" 2>/dev/null || true

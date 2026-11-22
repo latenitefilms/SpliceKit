@@ -268,6 +268,22 @@ class PatcherModel: ObservableObject {
         }
     }
 
+    /// SpliceKit no longer ships BRAW support (BRAW Toolbox covers it). Older
+    /// SpliceKit versions installed their own BRAW decoder, format reader and RAW
+    /// processor into the modded app; remove them so they can't compete with
+    /// third-party BRAW Media Extensions.
+    private nonisolated func removeLegacyBRAWBundles(from moddedApp: String) async {
+        let legacyBundles = [
+            moddedApp + "/Contents/PlugIns/Codecs/SpliceKitBRAWDecoder.bundle",
+            moddedApp + "/Contents/PlugIns/FormatReaders/SpliceKitBRAWImport.bundle",
+            moddedApp + "/Contents/Extensions/SpliceKitBRAWRAWProcessor.appex",
+        ]
+        for path in legacyBundles where FileManager.default.fileExists(atPath: path) {
+            shell("rm -rf \(shellQuote(path))")
+            await logAsync("Removed legacy \((path as NSString).lastPathComponent)")
+        }
+    }
+
     private func deployTools(to toolsDir: String,
                              silenceBin: String,
                              parakeetBin: String,
@@ -946,32 +962,7 @@ class PatcherModel: ObservableObject {
             shell("cp '\(sentryConfig.path)' '\(resourcesDir)/SpliceKitSentryConfig.plist'")
         }
 
-        // Install BRAW plugin bundles into FCP.app/Contents/PlugIns/
-        // Without these, FCP has no registered VideoToolbox decoder or
-        // MediaToolbox format reader for .braw files — drag/drop and Import
-        // Media both silently fail. The bundles were staged into our app
-        // Resources by bundle_resources.sh.
-        let brawBundleSource = (Bundle.main.resourcePath ?? "") + "/BRAWPlugins"
-        if FileManager.default.fileExists(atPath: brawBundleSource) {
-            let moddedPlugIns = moddedApp + "/Contents/PlugIns"
-            let moddedCodecs = moddedPlugIns + "/Codecs"
-            let moddedFormatReaders = moddedPlugIns + "/FormatReaders"
-            shell("mkdir -p '\(moddedCodecs)' '\(moddedFormatReaders)'")
-            let decoderSource = brawBundleSource + "/Codecs/SpliceKitBRAWDecoder.bundle"
-            let readerSource = brawBundleSource + "/FormatReaders/SpliceKitBRAWImport.bundle"
-            if FileManager.default.fileExists(atPath: decoderSource) {
-                shell("rm -rf '\(moddedCodecs)/SpliceKitBRAWDecoder.bundle'")
-                shell("cp -R '\(decoderSource)' '\(moddedCodecs)/SpliceKitBRAWDecoder.bundle'")
-                await logAsync("Installed SpliceKitBRAWDecoder.bundle")
-            }
-            if FileManager.default.fileExists(atPath: readerSource) {
-                shell("rm -rf '\(moddedFormatReaders)/SpliceKitBRAWImport.bundle'")
-                shell("cp -R '\(readerSource)' '\(moddedFormatReaders)/SpliceKitBRAWImport.bundle'")
-                await logAsync("Installed SpliceKitBRAWImport.bundle")
-            }
-        } else {
-            await logAsync("WARNING: BRAW plugin bundles missing from patcher Resources")
-        }
+        await removeLegacyBRAWBundles(from: moddedApp)
 
         // Deploy tools
         let toolsDir = NSHomeDirectory() + "/Applications/SpliceKit/tools"
@@ -1036,9 +1027,7 @@ class PatcherModel: ObservableObject {
         // Sign inside-out: any nested SpliceKit plug-in bundles → framework → app.
         let signSpliceKitBundles: (String) -> String = { ident in
             let bundlePaths = [
-                moddedApp + "/Contents/PlugIns/Codecs/SpliceKitBRAWDecoder.bundle",
                 moddedApp + "/Contents/PlugIns/Codecs/SpliceKitVP9Decoder.bundle",
-                moddedApp + "/Contents/PlugIns/FormatReaders/SpliceKitBRAWImport.bundle",
                 moddedApp + "/Contents/PlugIns/FormatReaders/SpliceKitMKVImport.bundle"
             ]
             let parts = bundlePaths
@@ -1230,28 +1219,7 @@ class PatcherModel: ObservableObject {
             shell("cp '\(sentryConfig.path)' '\(resourcesDir)/SpliceKitSentryConfig.plist'")
         }
 
-        // Refresh BRAW plugin bundles on upgrade. Same reasoning as fresh
-        // install — FCP needs the VT decoder + FormatReader bundles in
-        // PlugIns/ for .braw files to be recognized and playable.
-        let brawBundleSource = (Bundle.main.resourcePath ?? "") + "/BRAWPlugins"
-        if FileManager.default.fileExists(atPath: brawBundleSource) {
-            let moddedPlugIns = moddedApp + "/Contents/PlugIns"
-            let moddedCodecs = moddedPlugIns + "/Codecs"
-            let moddedFormatReaders = moddedPlugIns + "/FormatReaders"
-            shell("mkdir -p '\(moddedCodecs)' '\(moddedFormatReaders)'")
-            let decoderSource = brawBundleSource + "/Codecs/SpliceKitBRAWDecoder.bundle"
-            let readerSource = brawBundleSource + "/FormatReaders/SpliceKitBRAWImport.bundle"
-            if FileManager.default.fileExists(atPath: decoderSource) {
-                shell("rm -rf '\(moddedCodecs)/SpliceKitBRAWDecoder.bundle'")
-                shell("cp -R '\(decoderSource)' '\(moddedCodecs)/SpliceKitBRAWDecoder.bundle'")
-                await logAsync("Updated SpliceKitBRAWDecoder.bundle")
-            }
-            if FileManager.default.fileExists(atPath: readerSource) {
-                shell("rm -rf '\(moddedFormatReaders)/SpliceKitBRAWImport.bundle'")
-                shell("cp -R '\(readerSource)' '\(moddedFormatReaders)/SpliceKitBRAWImport.bundle'")
-                await logAsync("Updated SpliceKitBRAWImport.bundle")
-            }
-        }
+        await removeLegacyBRAWBundles(from: moddedApp)
 
         // Deploy tools
         let toolsDir = NSHomeDirectory() + "/Applications/SpliceKit/tools"
@@ -1293,9 +1261,7 @@ class PatcherModel: ObservableObject {
         // Sign inside-out: any nested SpliceKit plug-in bundles → framework → app.
         let signSpliceKitBundles: (String) -> String = { ident in
             let bundlePaths = [
-                moddedApp + "/Contents/PlugIns/Codecs/SpliceKitBRAWDecoder.bundle",
                 moddedApp + "/Contents/PlugIns/Codecs/SpliceKitVP9Decoder.bundle",
-                moddedApp + "/Contents/PlugIns/FormatReaders/SpliceKitBRAWImport.bundle",
                 moddedApp + "/Contents/PlugIns/FormatReaders/SpliceKitMKVImport.bundle"
             ]
             let parts = bundlePaths

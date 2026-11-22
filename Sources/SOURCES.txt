@@ -8,13 +8,6 @@ SpliceKitDualTimelineDrag.m
 SpliceKitRuntime.m
 SpliceKitSwizzle.m
 SpliceKitAudioBusDiagnostics.m
-SpliceKitBRAWToolboxCheck.m
-SpliceKitBRAW.mm
-SpliceKitBRAWRAW.mm
-SpliceKitBRAWAdjustmentInfo.mm
-SpliceKitBRAWSettingsHud.mm
-SpliceKitBRAWInspectorTile.mm
-SpliceKitBRAWDecoderInProcess.mm
 SpliceKitMediaExtensionGuard.m
 SpliceKitVP9.mm
 SpliceKitMKV.m
@@ -43,7 +36,5 @@ SpliceKitURLImport.m
 SpliceKitLiveCam.m
 SpliceKitVisionPro.m
 SpliceKitVisionProPanel.m
-SpliceKitImmersivePreviewPanel.mm
-SpliceKitImmersivePreviewRPC.m
 SpliceKitHapticBridge.m
 SpliceKitHapticSnapEmitters.m

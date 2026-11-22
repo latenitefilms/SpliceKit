@@ -84,12 +84,6 @@ sign_modded_app() {
     # fail with "code object is not signed at all" on rebuild / no-copy flows.
     xattr -cr "$MODDED_APP" 2>/dev/null || true
 
-    if ! sign_if_present "$identity" "$MODDED_APP/Contents/PlugIns/Codecs/SpliceKitBRAWDecoder.bundle"; then
-        return 1
-    fi
-    if ! sign_if_present "$identity" "$MODDED_APP/Contents/PlugIns/FormatReaders/SpliceKitBRAWImport.bundle"; then
-        return 1
-    fi
     if ! sign_if_present "$identity" "$MODDED_APP/Contents/PlugIns/Codecs/SpliceKitVP9Decoder.bundle"; then
         return 1
     fi
@@ -373,6 +367,19 @@ cat > "$FW_DIR/Versions/A/Resources/Info.plist" << 'PLIST'
 PLIST
 
 log "Framework installed"
+
+# SpliceKit no longer ships BRAW support (use BRAW Toolbox instead). Remove
+# bundles left behind by older SpliceKit versions so they don't compete with
+# third-party BRAW Media Extensions.
+for legacy in \
+    "$MODDED_APP/Contents/PlugIns/Codecs/SpliceKitBRAWDecoder.bundle" \
+    "$MODDED_APP/Contents/PlugIns/FormatReaders/SpliceKitBRAWImport.bundle" \
+    "$MODDED_APP/Contents/Extensions/SpliceKitBRAWRAWProcessor.appex"; do
+    if [[ -e "$legacy" ]]; then
+        rm -rf "$legacy"
+        log "Removed legacy $(basename "$legacy")"
+    fi
+done
 
 # ============================================================
 # Step 4: Inject LC_LOAD_DYLIB

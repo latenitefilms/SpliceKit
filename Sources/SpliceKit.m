@@ -16,7 +16,6 @@
 #import "SpliceKitSentry.h"
 #import "SpliceKitLiveCam.h"
 #import "SpliceKitURLImport.h"
-#import "SpliceKitImmersivePreviewPanel.h"
 #import <AppKit/AppKit.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #import <Security/Security.h>
@@ -34,9 +33,6 @@ extern NSDictionary *SpliceKit_handleFCPXMLExport(NSDictionary *params);
 extern NSDictionary *SpliceKit_handleFCPXMLImport(NSDictionary *params);
 extern NSDictionary *SpliceKit_handleProjectOpen(NSDictionary *params);
 extern void SpliceKit_installMixerSkimHooks(void);
-extern void SpliceKit_installBRAWProviderShim(void);
-extern void SpliceKit_bootstrapBRAWAtLaunchPhase(NSString *phase);
-extern BOOL SpliceKit_installBRAWRAWSettingsHooks(void);
 extern void SpliceKitURLImport_bootstrapAtLaunchPhase(NSString *phase);
 extern void SpliceKitVP9_Bootstrap(void);
 
@@ -424,7 +420,6 @@ static void SpliceKit_checkCompatibility(void) {
 - (void)toggleTranscriptPanel:(id)sender;
 - (void)toggleCaptionPanel:(id)sender;
 - (void)toggleLiveCamPanel:(id)sender;
-- (void)toggleImmersiveViewer:(id)sender;
 - (void)toggleSections:(id)sender;
 - (void)toggleOverviewBar:(id)sender;
 - (void)toggleCommandPalette:(id)sender;
@@ -536,16 +531,6 @@ static void SpliceKit_checkCompatibility(void) {
         ((void (*)(id, SEL))objc_msgSend)(panel, @selector(showPanel));
     }
     [self updateLiveCamToolbarButtonState:!visible];
-}
-
-- (void)toggleImmersiveViewer:(id)sender {
-    SpliceKitImmersivePreviewPanel *panel = [SpliceKitImmersivePreviewPanel sharedPanel];
-
-    NSError *error = nil;
-    if (![panel showInViewerForCurrentSelection:&error]) {
-        SpliceKit_log(@"[ImmersiveViewer] native FCP viewer show failed: %@", error.localizedDescription ?: @"unknown error");
-        NSBeep();
-    }
 }
 
 - (void)toggleVisionProPanel:(id)sender {
@@ -2458,13 +2443,6 @@ static void SpliceKit_installMenu(void) {
     liveCamItem.target = [SpliceKitMenuController shared];
     [bridgeMenu addItem:liveCamItem];
 
-    NSMenuItem *immersiveViewerItem = [[NSMenuItem alloc]
-        initWithTitle:@"FCP 360 Viewer"
-               action:@selector(toggleImmersiveViewer:)
-        keyEquivalent:@""];
-    immersiveViewerItem.target = [SpliceKitMenuController shared];
-    [bridgeMenu addItem:immersiveViewerItem];
-
     NSMenuItem *visionProItem = [[NSMenuItem alloc]
         initWithTitle:@"Vision Pro Preview"
                action:@selector(toggleVisionProPanel:)
@@ -3271,19 +3249,11 @@ static void SpliceKit_appDidLaunch(void) {
     SpliceKit_checkCompatibility();
 
     // Guard against the VTCopyVideoDecoderExtensionProperties nil-property
-    // crash before BRAW bootstrap runs — registering BRAW variant FourCCs
-    // increases the surface area where a Media Extension with incomplete
-    // CodecInfo (e.g. BRAW Toolbox advertises only 'braw') can be queried for
-    // a codec it doesn't enumerate, and the resulting nil triggers
-    // -[__NSDictionaryM __setObject:forKey:] inside VT.
+    // crash: a third-party Media Extension with incomplete CodecInfo can be
+    // queried for a codec it doesn't enumerate, and the resulting nil triggers
+    // -[__NSDictionaryM __setObject:forKey:] inside VT, aborting FCP.
     SpliceKit_safeInstall("MediaExtensionGuard", ^{
         SpliceKit_installMediaExtensionGuard();
-    });
-
-    SpliceKit_bootstrapBRAWAtLaunchPhase(@"did-launch");
-
-    SpliceKit_safeInstall("BRAWRAWSettings", ^{
-        SpliceKit_installBRAWRAWSettingsHooks();
     });
 
     SpliceKit_safeInstall("VP9Bootstrap", ^{
@@ -3318,8 +3288,6 @@ static void SpliceKit_appDidLaunch(void) {
 
     // Install toolbar button in FCP's main window
     [SpliceKitMenuController installToolbarButton];
-
-    SpliceKit_log(@"[ImmersiveViewer] Built-in show360 bridge install skipped at launch; use SpliceKit immersive preview commands instead");
 
     [[NSNotificationCenter defaultCenter] addObserverForName:SpliceKitLiveCamVisibilityDidChangeNotification
                                                       object:nil
@@ -4150,7 +4118,6 @@ static void SpliceKit_init(void) {
             SpliceKit_swizzleCloudContentClasses("willLaunch");
             SpliceKit_logCloudContentGuardSummary(@"will-launch");
             SpliceKit_logLoadedFrameworks();
-            SpliceKit_bootstrapBRAWAtLaunchPhase(@"will-launch");
             SpliceKitURLImport_bootstrapAtLaunchPhase(@"will-launch");
             SpliceKit_safeInstall("MKVWillLaunchHooks", ^{
                 extern void SpliceKitMKV_bootstrapAtLaunchPhase(NSString *phase);

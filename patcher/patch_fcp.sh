@@ -519,9 +519,12 @@ log "Entitlements applied (library validation disabled, Photos library access en
 # ============================================================
 step "Step 6: Configuring defaults"
 
-defaults write com.apple.FinalCut CloudContentFirstLaunchCompleted -bool true 2>/dev/null || true
-defaults write com.apple.FinalCut FFCloudContentDisabled -bool true 2>/dev/null || true
-log "CloudContent defaults set"
+# Use the patched app's own bundle ID: Creator Studio is com.apple.FinalCutApp,
+# so writing to com.apple.FinalCut would leave its CloudContent flow enabled.
+FCP_BUNDLE_ID=$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$MODDED_APP/Contents/Info.plist" 2>/dev/null || echo "com.apple.FinalCut")
+defaults write "$FCP_BUNDLE_ID" CloudContentFirstLaunchCompleted -bool true 2>/dev/null || true
+defaults write "$FCP_BUNDLE_ID" FFCloudContentDisabled -bool true 2>/dev/null || true
+log "CloudContent defaults set ($FCP_BUNDLE_ID)"
 
 
 # ============================================================

@@ -16,9 +16,12 @@ same page or via `appcast.xml`.
   content catalog is left untouched.
 
 ### Changed
-- **FCP 13 no longer shows the "not enough extra media" dialog when adding a
-  transition** — it ripple-trims automatically and shows a notice instead — so
-  SpliceKit's "Use Freeze Frames" dialog button can no longer appear there.
+- **FCP 13 no longer asks before ripple-trimming for a transition**, so
+  SpliceKit's "Use Freeze Frames" dialog button can no longer appear there. FCP
+  13 inserts the transition and then shows "Clips were trimmed to create the
+  transition." `apply_transition()` now keeps the transition, answers that alert
+  for you, and reports `rippleTrimmed` (previously the API call silently removed
+  the transition on FCP 13).
 - **Photos imports work in the patched app again.** The Photos-library
   entitlement is now preserved when FCP is re-signed (upstream #98).
 - **The media-extension crash guard is now purely a crash guard.** It still
@@ -35,6 +38,13 @@ same page or via `appcast.xml`.
   BRAW bundles left in the patched app by older versions.
 
 ### Fixed
+- **`browser.appendClip`, `browser.insertClip` and `browser.connectClip` find
+  clips by name or index again.** They enumerated events with `ownedClips`,
+  which FCP's event records don't implement, so only handles worked.
+- **RPC calls that open a modal panel (such as `project.createLibrary`) return a
+  clear "did not finish in time" error** instead of an internal nil-insert error.
+- **`+[CloudContentFeatureFlag isEnabled]` no longer writes a log line every
+  second**; each blocked call is logged once.
 - **The inspector no longer goes blank after switching away from FCP and back**
   (upstream #94).
 - **Skimming with snapping on no longer crashes FCP on Intel Macs** (upstream
@@ -45,8 +55,9 @@ same page or via `appcast.xml`.
 - **`patcher/patch_fcp.sh` produces a launchable app again.** It builds through
   the Makefile, detects existing injection correctly, picks one signing
   identity, signs after editing `Info.plist`, no longer writes `.mcp.json` into
-  the signed framework, and names the destination correctly for
-  `--source "…Creator Studio.app"` (upstream #87 plus follow-up fixes).
+  the signed framework, names the destination correctly for
+  `--source "…Creator Studio.app"`, and writes Creator Studio's CloudContent
+  defaults to `com.apple.FinalCutApp` (upstream #87 plus follow-up fixes).
 
 ## [3.3.9] — 2026-08-29
 

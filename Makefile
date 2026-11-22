@@ -156,7 +156,7 @@ mcp-doctor:
 		echo "[FAIL] mcp package not importable in venv — run 'make mcp-setup'"; \
 	fi
 	@if [ -f .mcp.json ]; then \
-		CMD=$$(/usr/bin/python3 -c "import json; print(json.load(open('.mcp.json'))['mcpServers']['splicekit']['command'])" 2>/dev/null); \
+		CMD=$$(/usr/bin/python3 -c "import json, os; print(os.path.expandvars(json.load(open('.mcp.json'))['mcpServers']['splicekit']['command']))" 2>/dev/null); \
 		if [ "$$CMD" = "$(MCP_PYTHON)" ]; then \
 			echo "[ok] .mcp.json command:   $$CMD"; \
 		else \

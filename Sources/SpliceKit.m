@@ -175,6 +175,15 @@ static void SpliceKit_uncaughtExceptionHandler(NSException *exception) {
     }
     SpliceKit_log(@"UserInfo: %@", exception.userInfo);
 
+    // SpliceKit_log queues file writes on sLogQueue. Wait for those to land before
+    // the process dies; the timeout avoids a deadlock if the exception was raised
+    // on the log queue itself.
+    if (sLogQueue) {
+        dispatch_semaphore_t drained = dispatch_semaphore_create(0);
+        dispatch_async(sLogQueue, ^{ dispatch_semaphore_signal(drained); });
+        dispatch_semaphore_wait(drained, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(NSEC_PER_SEC / 2)));
+    }
+
     // Flush log synchronously so it hits disk before we die
     if (sLogHandle) {
         [sLogHandle synchronizeFile];

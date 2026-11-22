@@ -38,8 +38,9 @@ same page or via `appcast.xml`.
 
 ### Removed
 - **Sentry crash reporting has been removed.** Neither the patcher nor the
-  injected runtime sends crash or diagnostic data anywhere; crashes are written
-  to `~/Library/Logs/SpliceKit/splicekit.log`. This also drops the Sentry SDK
+  injected runtime sends crash or diagnostic data automatically; crashes are
+  written to `~/Library/Logs/SpliceKit/splicekit.log`, and the patcher's
+  **Share Logs** button uploads logs only when you click it. This also drops the Sentry SDK
   from the patcher and halves the size of the SpliceKit framework.
 - **Built-in Blackmagic RAW support has been removed. Use
   [BRAW Toolbox](https://brawtoolbox.io) for `.braw` media.** This removes the
@@ -53,8 +54,10 @@ same page or via `appcast.xml`.
 - **"Delete silences" no longer removes clips that couldn't be transcribed.**
   When one clip in a Parakeet batch fails (a still, graphic or clip with no
   decodable audio), the rest of the batch still transcribes, but that clip's
-  range used to read as one long pause. It's now excluded from silence
-  detection, and the panel reports how many clips weren't transcribed.
+  range used to read as one long pause. Untranscribed clips (Parakeet, Apple
+  Speech and FCP Native) are now excluded from silence detection, stay excluded
+  after later edits move them, and the panel reports how many there were. A gap
+  split by such a clip now shows every remaining pause marker.
 - **Release builds include `parakeet-transcriber` and `whisper-transcriber`.**
   The build looked for their sources in a folder that is no longer in the
   repository, so releases skipped them; it now uses `tools/`. `make tools` also

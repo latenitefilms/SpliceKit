@@ -1542,10 +1542,11 @@ class PatcherModel: ObservableObject {
             for line in diagnostics {
                 appendLog(line)
             }
-
-            if let crashReport = latestCrashReportURL(after: launchTime) {
-                appendLog("Final Cut Pro crash report: \(crashReport.path)")
-            }
+        }
+        // Log a crash report for any termination, not just early exits, so a
+        // mid-session crash still leaves a pointer in the patcher log.
+        if let crashReport = latestCrashReportURL(after: launchTime) {
+            appendLog("Final Cut Pro crash report: \(crashReport.path)")
         }
         if launchedFCPRunningApp?.processIdentifier == app.processIdentifier {
             launchedFCPRunningApp = nil

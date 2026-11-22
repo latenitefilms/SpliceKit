@@ -152,6 +152,25 @@ static SpliceKitTranscriptWord *SpliceKitTranscript_wordFromDictionary(NSDiction
     return word;
 }
 
+// A clip the engine couldn't transcribe, keyed by source media so its timeline
+// range can be recomputed after edits (see -remapUntranscribedRangesToClips:).
+// trimStart/duration are in FCP's timecode space, as returned by
+// -collectClipInfosForSequence:primaryObject:errorMessage:.
+static NSDictionary *SpliceKitTranscript_untranscribedEntry(NSDictionary *clipInfo) {
+    NSURL *mediaURL = clipInfo[@"mediaURL"];
+    double trimStart = [clipInfo[@"trimStart"] doubleValue];
+    double duration = [clipInfo[@"duration"] doubleValue];
+    double timelineStart = [clipInfo[@"timelineStart"] doubleValue];
+    return @{
+        @"path": mediaURL.path ?: @"",
+        @"name": mediaURL.lastPathComponent ?: @"",
+        @"sourceStart": @(trimStart),
+        @"sourceEnd": @(trimStart + duration),
+        @"timelineStart": @(timelineStart),
+        @"timelineEnd": @(timelineStart + duration),
+    };
+}
+
 static NSDictionary *SpliceKitTranscript_silenceToDictionary(SpliceKitTranscriptSilence *silence) {
     if (!silence) return @{};
     return @{
@@ -444,10 +463,16 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
 @property (nonatomic, readwrite) SpliceKitTranscriptStatus status;
 @property (nonatomic, readwrite, strong) NSMutableArray<SpliceKitTranscriptWord *> *mutableWords;
 @property (nonatomic, readwrite, strong) NSMutableArray<SpliceKitTranscriptSilence *> *mutableSilences;
-// Timeline ranges ([start, end] seconds) of clips the engine could not transcribe.
-// Silence detection never reports pauses inside these, so "delete silences" can't
-// remove footage just because its transcription failed.
+// Clips the engine could not transcribe, identified by source media (path +
+// source in/out, in FCP's timecode space) so their timeline position can be
+// recomputed after edits, the same way words are resynced.
+@property (nonatomic, copy) NSArray<NSDictionary *> *untranscribedClips;
+// Current timeline ranges ([start, end] seconds) of those clips. Silence detection
+// never reports pauses inside these, so "delete silences" can't remove footage just
+// because its transcription failed.
 @property (nonatomic, copy) NSArray<NSArray<NSNumber *> *> *untranscribedRanges;
+// Apple Speech collects failures here while clips transcribe one by one.
+@property (nonatomic, strong) NSMutableArray<NSDictionary *> *pendingUntranscribedClips;
 @property (nonatomic, readwrite, copy) NSString *fullText;
 @property (nonatomic, readwrite, copy) NSString *errorMessage;
 
@@ -503,6 +528,8 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
         _mutableWords = [NSMutableArray array];
         _mutableSilences = [NSMutableArray array];
         _untranscribedRanges = @[];
+        _untranscribedClips = @[];
+        _pendingUntranscribedClips = [NSMutableArray array];
         _pendingTranscriptions = [NSMutableArray array];
         _searchResultRanges = [NSMutableArray array];
         _currentSearchIndex = -1;
@@ -889,7 +916,7 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
             [self.mutableWords removeAllObjects];
         }
         [self.mutableSilences removeAllObjects];
-        self.untranscribedRanges = @[];
+        [self resetUntranscribedClips];
         self.fullText = nil;
         self.status = SpliceKitTranscriptStatusIdle;
         self.lastRestoredSequenceKey = nil;
@@ -954,6 +981,9 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
     if (self.untranscribedRanges.count > 0) {
         section[@"untranscribedRanges"] = self.untranscribedRanges;
     }
+    if (self.untranscribedClips.count > 0) {
+        section[@"untranscribedClips"] = self.untranscribedClips;
+    }
 
     NSString *engineName = (self.engine == SpliceKitTranscriptEngineFCPNative) ? @"fcpNative" :
                            (self.engine == SpliceKitTranscriptEngineParakeet) ? @"parakeet" : @"appleSpeech";
@@ -1011,7 +1041,7 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
             [self.mutableWords removeAllObjects];
         }
         [self.mutableSilences removeAllObjects];
-        self.untranscribedRanges = @[];
+        [self resetUntranscribedClips];
         self.fullText = nil;
         self.status = SpliceKitTranscriptStatusIdle;
         self.lastRestoredSequenceKey = sequenceKey;
@@ -1035,7 +1065,7 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
             [self.mutableWords removeAllObjects];
         }
         [self.mutableSilences removeAllObjects];
-        self.untranscribedRanges = @[];
+        [self resetUntranscribedClips];
         self.fullText = nil;
         self.status = SpliceKitTranscriptStatusIdle;
         self.errorMessage = nil;
@@ -1082,6 +1112,18 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
         }
     }
     self.untranscribedRanges = restoredRanges;
+    NSMutableArray<NSDictionary *> *restoredClips = [NSMutableArray array];
+    NSArray *clipList = [transcript[@"untranscribedClips"] isKindOfClass:[NSArray class]]
+        ? transcript[@"untranscribedClips"] : nil;
+    for (id entry in clipList) {
+        if ([entry isKindOfClass:[NSDictionary class]] &&
+            [entry[@"path"] isKindOfClass:[NSString class]] &&
+            [entry[@"sourceStart"] isKindOfClass:[NSNumber class]] &&
+            [entry[@"sourceEnd"] isKindOfClass:[NSNumber class]]) {
+            [restoredClips addObject:entry];
+        }
+    }
+    self.untranscribedClips = restoredClips;
 
     [self.mutableSilences removeAllObjects];
     NSArray *silenceDicts = [transcript[@"silences"] isKindOfClass:[NSArray class]] ? transcript[@"silences"] : nil;
@@ -1141,7 +1183,7 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
         [self.mutableWords removeAllObjects];
     }
     [self.mutableSilences removeAllObjects];
-    self.untranscribedRanges = @[];
+    [self resetUntranscribedClips];
     self.fullText = nil;
     self.status = SpliceKitTranscriptStatusIdle;
     self.errorMessage = nil;
@@ -2082,7 +2124,7 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
 
     [self.mutableWords removeAllObjects];
     [self.mutableSilences removeAllObjects];
-    self.untranscribedRanges = @[];
+    [self resetUntranscribedClips];
 
     // Call FFTranscriptionCoordinator.modalTranscriptsForClips:locale:
     // This must run off the main thread (the decompiled code asserts this)
@@ -2136,6 +2178,8 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
         // Extract words from the FFTranscript objects in the result map
         // resultMap is an NSMapTable: FFAsset -> FFTranscript
         NSUInteger totalWords = 0;
+        // Clip infos whose asset came back with a transcript (identity-based).
+        NSHashTable *coveredClipInfos = [NSHashTable hashTableWithOptions:NSPointerFunctionsObjectPointerPersonality];
 
         @try {
             // NSMapTable enumeration
@@ -2175,6 +2219,7 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
                                   NSStringFromClass([asset class]));
                     continue;
                 }
+                for (NSDictionary *covered in matchingClipInfos) [coveredClipInfos addObject:covered];
 
                 // Get phrases from transcript
                 id phrases = ((id (*)(id, SEL))objc_msgSend)(transcript,
@@ -2261,6 +2306,19 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
 
         SpliceKit_log(@"[Transcript] Extracted %lu words from FCP native transcription", (unsigned long)totalWords);
 
+        // Clips FCP returned no transcript for are unknown content, not silence.
+        NSMutableArray<NSDictionary *> *failedClips = [NSMutableArray array];
+        for (NSArray<NSDictionary *> *clipsForPath in clipInfosByPath.allValues) {
+            for (NSDictionary *clipInfo in clipsForPath) {
+                if (![coveredClipInfos containsObject:clipInfo]) {
+                    NSURL *mediaURL = clipInfo[@"mediaURL"];
+                    SpliceKit_log(@"[Transcript] FCP Native returned no transcript for %@; excluding its range "
+                                  "from silence detection", mediaURL.lastPathComponent);
+                    [failedClips addObject:SpliceKitTranscript_untranscribedEntry(clipInfo)];
+                }
+            }
+        }
+
         // Finalize on main thread
         dispatch_async(dispatch_get_main_queue(), ^{
             @synchronized (self.mutableWords) {
@@ -2275,6 +2333,7 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
                 }
             }
 
+            [self applyUntranscribedClips:failedClips];
             [self detectSilences];
             [self assignSpeakers];
 
@@ -2289,8 +2348,9 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
             self.deleteSilencesButton.enabled = (self.mutableSilences.count > 0);
 
             NSUInteger silenceCount = self.mutableSilences.count;
-            [self updateStatusUI:[NSString stringWithFormat:@"%lu words, %lu pauses (FCP Native)",
-                (unsigned long)self.mutableWords.count, (unsigned long)silenceCount]];
+            [self updateStatusUI:[[NSString stringWithFormat:@"%lu words, %lu pauses (FCP Native)",
+                (unsigned long)self.mutableWords.count, (unsigned long)silenceCount]
+                stringByAppendingString:[self untranscribedStatusSuffix]]];
 
             SpliceKit_log(@"[Transcript] FCP Native complete: %lu words, %lu silences",
                           (unsigned long)self.mutableWords.count, (unsigned long)silenceCount);
@@ -2370,7 +2430,7 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
 
     [self.mutableWords removeAllObjects];
     [self.mutableSilences removeAllObjects];
-    self.untranscribedRanges = @[];
+    [self resetUntranscribedClips];
     self.completedTranscriptions = 0;
     self.totalTranscriptions = 0;
 
@@ -2411,6 +2471,12 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
             }
 
             // Detect silences and assign speakers
+            NSArray<NSDictionary *> *failedClips = nil;
+            @synchronized (self.pendingUntranscribedClips) {
+                failedClips = [self.pendingUntranscribedClips copy];
+                [self.pendingUntranscribedClips removeAllObjects];
+            }
+            [self applyUntranscribedClips:failedClips];
             [self detectSilences];
             [self assignSpeakers];
 
@@ -2425,8 +2491,9 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
             self.deleteSilencesButton.enabled = (self.mutableSilences.count > 0);
 
             NSUInteger silenceCount = self.mutableSilences.count;
-            [self updateStatusUI:[NSString stringWithFormat:@"%lu words, %lu pauses",
-                (unsigned long)self.mutableWords.count, (unsigned long)silenceCount]];
+            [self updateStatusUI:[[NSString stringWithFormat:@"%lu words, %lu pauses",
+                (unsigned long)self.mutableWords.count, (unsigned long)silenceCount]
+                stringByAppendingString:[self untranscribedStatusSuffix]]];
 
             SpliceKit_log(@"[Transcript] Complete: %lu words, %lu silences",
                           (unsigned long)self.mutableWords.count, (unsigned long)silenceCount);
@@ -2472,6 +2539,9 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
                 [self setErrorState:@"Apple Speech denied — FCP can't request speech permission. "
                                     "Use Parakeet or FCP Native engine instead."];
                 return;
+            }
+            @synchronized (self.pendingUntranscribedClips) {
+                [self.pendingUntranscribedClips addObject:SpliceKitTranscript_untranscribedEntry(clipInfo)];
             }
         } else {
             // Apple Speech returns file-relative timestamps, but sourceMediaTime and
@@ -2801,7 +2871,7 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
 
     [self.mutableWords removeAllObjects];
     [self.mutableSilences removeAllObjects];
-    self.untranscribedRanges = @[];
+    [self resetUntranscribedClips];
 
     dispatch_async(dispatch_get_main_queue(), ^{
         [self updateStatusUI:[NSString stringWithFormat:@"Transcribing %lu clips with Parakeet...",
@@ -3132,8 +3202,7 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
             resultsByFile[file] = words;
         }
     }
-    NSMutableArray<NSArray<NSNumber *> *> *failedRanges = [NSMutableArray array];
-    NSMutableArray<NSString *> *failedClipNames = [NSMutableArray array];
+    NSMutableArray<NSDictionary *> *failedClips = [NSMutableArray array];
 
     // Process results for each clip
     @synchronized (self.mutableWords) {
@@ -3150,8 +3219,7 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
                 NSString *reason = errorsByFile[mediaURL.path] ?: @"no result";
                 SpliceKit_log(@"[Transcript] Could not transcribe %@ (%@); excluding its range from silence detection",
                               mediaURL.lastPathComponent, reason);
-                [failedRanges addObject:@[@(timelineStart), @(timelineStart + clipDuration)]];
-                if (mediaURL.lastPathComponent) [failedClipNames addObject:mediaURL.lastPathComponent];
+                [failedClips addObject:SpliceKitTranscript_untranscribedEntry(clipInfo)];
                 continue;
             }
 
@@ -3232,7 +3300,7 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
             }
         }
 
-        self.untranscribedRanges = failedRanges;
+        [self applyUntranscribedClips:failedClips];
         [self detectSilences];
         [self assignSpeakers];
 
@@ -3246,15 +3314,9 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
         self.refreshButton.enabled = YES;
         self.deleteSilencesButton.enabled = (self.mutableSilences.count > 0);
 
-        NSString *statusText = [NSString stringWithFormat:@"%lu words, %lu pauses (Parakeet)",
-            (unsigned long)self.mutableWords.count, (unsigned long)self.mutableSilences.count];
-        if (failedClipNames.count > 0) {
-            statusText = [statusText stringByAppendingFormat:@" — %lu clip%@ couldn't be transcribed",
-                (unsigned long)failedClipNames.count, failedClipNames.count == 1 ? @"" : @"s"];
-            SpliceKit_log(@"[Transcript] %lu clip(s) not transcribed: %@",
-                (unsigned long)failedClipNames.count, [failedClipNames componentsJoinedByString:@", "]);
-        }
-        [self updateStatusUI:statusText];
+        [self updateStatusUI:[[NSString stringWithFormat:@"%lu words, %lu pauses (Parakeet)",
+            (unsigned long)self.mutableWords.count, (unsigned long)self.mutableSilences.count]
+            stringByAppendingString:[self untranscribedStatusSuffix]]];
 
         SpliceKit_log(@"[Transcript] Parakeet transcription complete: %lu words, %lu silences",
             (unsigned long)self.mutableWords.count, (unsigned long)self.mutableSilences.count);
@@ -3386,6 +3448,70 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
     SpliceKit_log(@"[Transcript] Detected %lu silences (threshold: %.2fs, suspectThreshold: %.2fs)",
                   (unsigned long)self.mutableSilences.count, self.silenceThreshold,
                   self.silenceThreshold * 2.0);
+}
+
+- (void)resetUntranscribedClips {
+    self.untranscribedClips = @[];
+    self.untranscribedRanges = @[];
+    @synchronized (self.pendingUntranscribedClips) {
+        [self.pendingUntranscribedClips removeAllObjects];
+    }
+}
+
+// Record the clips a transcription run couldn't transcribe and their current
+// timeline ranges. Call before -detectSilences.
+- (void)applyUntranscribedClips:(NSArray<NSDictionary *> *)clips {
+    self.untranscribedClips = clips ?: @[];
+    NSMutableArray<NSArray<NSNumber *> *> *ranges = [NSMutableArray array];
+    for (NSDictionary *clip in self.untranscribedClips) {
+        [ranges addObject:@[clip[@"timelineStart"] ?: @0, clip[@"timelineEnd"] ?: @0]];
+    }
+    self.untranscribedRanges = ranges;
+    if (self.untranscribedClips.count > 0) {
+        NSMutableArray *names = [NSMutableArray array];
+        for (NSDictionary *clip in self.untranscribedClips) [names addObject:clip[@"name"] ?: @"?"];
+        SpliceKit_log(@"[Transcript] %lu clip(s) not transcribed: %@",
+                      (unsigned long)self.untranscribedClips.count, [names componentsJoinedByString:@", "]);
+    }
+}
+
+// After an edit, find where each untranscribed clip's source range now sits on
+// the timeline (it may have moved, been bladed, or been deleted). Mirrors how
+// -resyncTimestampsFromTimeline rematches words by source path + source time.
+- (void)remapUntranscribedRangesToClips:(NSArray<NSDictionary *> *)actualClips {
+    if (self.untranscribedClips.count == 0) return;
+    NSMutableArray<NSArray<NSNumber *> *> *ranges = [NSMutableArray array];
+    for (NSDictionary *failed in self.untranscribedClips) {
+        NSString *path = failed[@"path"];
+        double srcStart = [failed[@"sourceStart"] doubleValue];
+        double srcEnd = [failed[@"sourceEnd"] doubleValue];
+        if (path.length == 0) {
+            // No source identity to rematch with; keep the last known range.
+            [ranges addObject:@[failed[@"timelineStart"] ?: @0, failed[@"timelineEnd"] ?: @0]];
+            continue;
+        }
+        for (NSDictionary *clip in actualClips) {
+            if (![clip[@"path"] isEqualToString:path]) continue;
+            double clipTrimStart = [clip[@"trimStart"] doubleValue];
+            double clipEnd = clipTrimStart + [clip[@"duration"] doubleValue];
+            double overlapStart = MAX(srcStart, clipTrimStart);
+            double overlapEnd = MIN(srcEnd, clipEnd);
+            if (overlapEnd - overlapStart <= 0.001) continue;
+            double clipTimelineStart = [clip[@"timelineStart"] doubleValue];
+            [ranges addObject:@[@(clipTimelineStart + (overlapStart - clipTrimStart)),
+                                @(clipTimelineStart + (overlapEnd - clipTrimStart))]];
+        }
+    }
+    self.untranscribedRanges = ranges;
+    SpliceKit_log(@"[Transcript] Resync: %lu untranscribed clip(s) now cover %lu timeline range(s)",
+                  (unsigned long)self.untranscribedClips.count, (unsigned long)ranges.count);
+}
+
+- (NSString *)untranscribedStatusSuffix {
+    NSUInteger count = self.untranscribedClips.count;
+    if (count == 0) return @"";
+    return [NSString stringWithFormat:@" — %lu clip%@ couldn't be transcribed",
+            (unsigned long)count, count == 1 ? @"" : @"s"];
 }
 
 // Remove the parts of each detected silence that fall inside a clip the engine
@@ -4002,10 +4128,13 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
         FCPAttrItemType: @"word",
     };
 
-    // Build silence lookup: afterWordIndex -> silence
-    NSMutableDictionary<NSNumber *, SpliceKitTranscriptSilence *> *silenceMap = [NSMutableDictionary dictionary];
+    // Build silence lookup: afterWordIndex -> silences (in time order). A gap can
+    // hold more than one pause when an untranscribed clip splits it.
+    NSMutableDictionary<NSNumber *, NSMutableArray<SpliceKitTranscriptSilence *> *> *silenceMap = [NSMutableDictionary dictionary];
     for (SpliceKitTranscriptSilence *s in self.mutableSilences) {
-        silenceMap[@(s.afterWordIndex)] = s;
+        NSMutableArray *list = silenceMap[@(s.afterWordIndex)];
+        if (!list) { list = [NSMutableArray array]; silenceMap[@(s.afterWordIndex)] = list; }
+        [list addObject:s];
     }
 
     @synchronized (self.mutableWords) {
@@ -4114,8 +4243,9 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
 
                 // Check for silence before this word
                 if (i > 0) {
-                    SpliceKitTranscriptSilence *silence = silenceMap[@(i - 1)];
-                    if (silence) {
+                    NSArray<SpliceKitTranscriptSilence *> *silencesHere = silenceMap[@(i - 1)];
+                    if (silencesHere.count > 0) {
+                      for (SpliceKitTranscriptSilence *silence in silencesHere) {
                         // Insert silence marker: " [···] "
                         NSString *silenceStr = @" [\u22EF] ";
 
@@ -4136,6 +4266,7 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
                         [attrStr appendAttributedString:[[NSAttributedString alloc]
                             initWithString:silenceStr attributes:silenceAttrs]];
                         textPos += silenceStr.length;
+                      }
                     } else if (i > segStart) {
                         // Regular space between words within the same segment
                         [attrStr appendAttributedString:[[NSAttributedString alloc]
@@ -4965,6 +5096,7 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
                       (unsigned long)matched, (unsigned long)unmatched);
     }
 
+    [self remapUntranscribedRangesToClips:actualClips];
     [self detectSilences];
     SpliceKit_log(@"[Transcript] Resync complete");
 }

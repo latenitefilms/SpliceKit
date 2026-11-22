@@ -1,8 +1,8 @@
 {
   "id": "community.editortoolkit.raw-tab",
   "name": "RAW Tab",
-  "version": "1.0.0",
-  "description": "Edit RAW Properties controls as a tab in the inspector.",
+  "version": "2.0.0",
+  "description": "Final Cut Pro's RAW settings (Media Extension RAW such as BRAW Toolbox, ProRes RAW, RED R3D) in their own inspector tab.",
   "author": "Shubham Pratap",
   "apiVersion": 1,
   "entry": {

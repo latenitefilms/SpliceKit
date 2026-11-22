@@ -1,0 +1,13 @@
+{
+  "id": "community.editortoolkit.inspector-refresh",
+  "name": "Inspector Refresh",
+  "version": "1.0.0",
+  "description": "Fixes Scale/Position doing nothing on clips just dropped into the timeline: gives them their own Transform and refreshes the Inspector.",
+  "author": "Shubham Pratap",
+  "apiVersion": 1,
+  "entry": {
+    "native": "InspectorRefresh.dylib"
+  },
+  "methods": [],
+  "dependencies": []
+}

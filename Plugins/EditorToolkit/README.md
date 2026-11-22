@@ -15,7 +15,7 @@ Install all of them, a themed preset, or any single plugin. Each plugin is indep
 
 | Plugin | What it does | Preset |
 |---|---|---|
-| [RAW Tab](plugins/raw-tab) | Edit RAW Properties as its own inspector tab | `@raw` |
+| [RAW Tab](plugins/raw-tab) | RAW settings (Media Extension RAW, ProRes RAW, RED) as their own inspector tab | `@raw` |
 | [RAW Multi](plugins/raw-multi) | RAW controls stay editable across a multi-clip selection | `@raw` |
 | [RAW Gyro Presets](plugins/raw-gyro) | One-click gyro stabilisation presets plus a single strength dial | `@raw` |
 | [Shortcuts](plugins/shortcuts) | Command Editor commands: Edit RAW Properties, Toggle Stabilization, Zoom to Fit toggle, Show Video/Info Inspector | `@raw` |
@@ -26,6 +26,7 @@ Install all of them, a themed preset, or any single plugin. Each plugin is indep
 | [Batch Sync Audio](plugins/audio-sync) | Waveform-sync many clips to external recordings in one go | `@editing` |
 | [XML Clips](plugins/xml-clips) | After an XML import, the timeline's clips appear in the browser | `@editing` |
 | [Flip](plugins/flip) | Flip H/V buttons and an Image Orientation menu in Transform | `@editing` |
+| [Inspector Refresh](plugins/inspector-refresh) | Scale/Position work on clips you just dropped into the timeline | `@editing` |
 | [Playback Frame Rate](plugins/fps-meter) | Live delivered-FPS and dropped-frame readout in the viewer | `@monitoring` |
 | [Workspace Collapse](plugins/workspace-collapse) | The timeline takes the full height in a vertical workspace | `@workspace` |
 

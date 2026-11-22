@@ -19,7 +19,7 @@ BUILD="$ROOT/build"
 PRESET_raw="raw-tab raw-multi raw-gyro shortcuts"
 PRESET_lock="grade-lock grade-lock-skim paste-below-lock topmost"
 PRESET_workspace="workspace-collapse"
-PRESET_editing="topmost paste-below-lock xml-clips audio-sync flip"
+PRESET_editing="topmost paste-below-lock xml-clips audio-sync flip inspector-refresh"
 PRESET_monitoring="fps-meter"
 
 all_plugins() { ls -1 "$ROOT/plugins"; }

@@ -1,5 +1,6 @@
-// RAW Tab: puts Final Cut Pro's "Edit RAW Properties" controls (from BRAW Toolbox)
-// in their own tab inside the inspector. Built for FCP 12.4 + SpliceKit 3.3.9.
+// RAW Tab: puts Final Cut Pro's own RAW settings controls in their own tab inside the inspector.
+// Each RAW family is a "provider" (see kProviders): how to recognise it and which of Final Cut's
+// native RAW settings windows edits it. Adding a format = adding one row to kProviders. Built for FCP 12.4 + SpliceKit 3.3.9.
 // Tab plumbing modelled on Transcript Tab (github.com/bcassin/fcp-transcript-tab, MIT).
 #import <AppKit/AppKit.h>
 #import <objc/runtime.h>
@@ -9,8 +10,9 @@ static NSString *const kTabIdent = @"SKInspectorTabRAWIdentifier";
 static void RLog(NSString *fmt, ...) {
     va_list a; va_start(a, fmt);
     NSString *s = [[NSString alloc] initWithFormat:fmt arguments:a]; va_end(a);
-    NSString *p = [NSHomeDirectory() stringByAppendingPathComponent:@"Library/Logs/SpliceKit/rawtab.log"];
-    FILE *f = fopen(p.fileSystemRepresentation, "a");
+    NSString *dir = [NSHomeDirectory() stringByAppendingPathComponent:@"Library/Logs/SpliceKit"];
+    [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
+    FILE *f = fopen([dir stringByAppendingPathComponent:@"raw-tab.log"].fileSystemRepresentation, "a");
     if (f) { fprintf(f, "%s %s\n", [NSDate date].description.UTF8String, s.UTF8String); fclose(f); }
 }
 
@@ -24,6 +26,7 @@ static void RLog(NSString *fmt, ...) {
 static __weak id gTabModule;
 static __weak SKRawTabModule *gModule;
 static BOOL gOpeningFromTab;
+static BOOL gREDUnavailable;   // set when Final Cut has no RED RAW settings button (RED plugin missing)
 
 @interface SKRawContainer : NSView
 @property (nonatomic, weak) SKRawTabModule *owner;
@@ -45,8 +48,55 @@ static BOOL gOpeningFromTab;
 }
 @end
 
-static id RHud(void) {
-    Class c = objc_getClass("FFVTRAWSettingsHud");
+// ---- RAW providers -------------------------------------------------------------------------
+typedef NS_ENUM(NSInteger, RFormat) { RFormatNone = 0, RFormatProResRAW, RFormatRED, RFormatRAWProcessor, RFormatMixed };
+typedef struct { RFormat fmt; const char *name; const char *hudClass; BOOL embeddable; } RProvider;
+// embeddable: the HUD can be pointed at items directly (shared / setAssetItems: / openHUD / panel).
+// RED's window is driven by Final Cut's RED controller from the real Info-inspector button, so it is
+// only embedded after that native button has opened it (see RLoadREDControls).
+static const RProvider kProviders[] = {
+    { RFormatProResRAW,    "ProRes RAW",           "FFProResRAWSettingsHud", YES },
+    { RFormatRED,          "RED (R3D)",            "FFREDRAWSettings",       NO  },
+    { RFormatRAWProcessor, "RAW (BRAW and others)", "FFVTRAWSettingsHud",     YES },
+};
+static const RProvider *RProviderFor(RFormat f) {
+    for (size_t i = 0; i < sizeof(kProviders) / sizeof(kProviders[0]); i++) if (kProviders[i].fmt == f) return &kProviders[i];
+    return NULL;
+}
+static id RCall(id o, NSString *sel) {
+    SEL s = NSSelectorFromString(sel);
+    return (o && [o respondsToSelector:s]) ? ((id(*)(id, SEL))objc_msgSend)(o, s) : nil;
+}
+static BOOL RBool(id o, NSString *sel) {
+    SEL s = NSSelectorFromString(sel);
+    return (o && [o respondsToSelector:s]) ? ((BOOL(*)(id, SEL))objc_msgSend)(o, s) : NO;
+}
+static RFormat RFormatOfAsset(id a) {
+    @try {
+        if (RBool(a, @"isProResRAWCodec")) return RFormatProResRAW;
+        id url = RCall(a, @"originalMediaURL");
+        if ([url isKindOfClass:[NSURL class]] && [[[(NSURL *)url pathExtension] lowercaseString] isEqualToString:@"r3d"]) return RFormatRED;
+        if (RBool(a, @"usingRAWMediaExtension") || RCall(a, @"rawProcessorSettings")) return RFormatRAWProcessor;  // BRAW etc. (unchanged path)
+    } @catch (id e) {}
+    return RFormatNone;
+}
+// Format shared by every selected clip; None if any clip isn't RAW, Mixed if RAW formats differ.
+static RFormat RFormatOfItems(id items) {
+    if (![items respondsToSelector:@selector(countByEnumeratingWithState:objects:count:)]) return RFormatNone;
+    SEL as = NSSelectorFromString(@"assetsIncludingAnchored:");
+    RFormat common = RFormatNone; NSUInteger n = 0;
+    for (id it in items) {
+        n++;
+        if (![it respondsToSelector:as]) return RFormatNone;
+        RFormat f = RFormatNone;
+        for (id a in ((id(*)(id, SEL, BOOL))objc_msgSend)(it, as, NO)) { f = RFormatOfAsset(a); if (f) break; }
+        if (!f) return RFormatNone;
+        if (common && f != common) common = RFormatMixed; else if (!common) common = f;
+    }
+    return n ? common : RFormatNone;
+}
+static id RHudFor(const RProvider *p) {
+    Class c = p ? objc_getClass(p->hudClass) : Nil;
     return c ? ((id(*)(id, SEL))objc_msgSend)(c, NSSelectorFromString(@"shared")) : nil;
 }
 
@@ -58,13 +108,20 @@ static id RHud(void) {
     SKRawContainer *c = [[SKRawContainer alloc] initWithFrame:NSMakeRect(0, 0, 400, 600)];
     c.owner = self;
     c.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
-    NSTextField *ph = [NSTextField labelWithString:@"Select a RAW clip to edit its RAW settings."];
+    NSTextField *ph = [NSTextField wrappingLabelWithString:@"Select a RAW clip to edit its RAW settings."];
     ph.textColor = [NSColor secondaryLabelColor];
     ph.alignment = NSTextAlignmentCenter;
-    ph.frame = NSMakeRect(10, 40, 380, 20);
+    ph.frame = NSMakeRect(20, 30, 360, 60);
     ph.autoresizingMask = NSViewWidthSizable;
     [c addSubview:ph];
     self.placeholder = ph;
+    NSButton *b = [NSButton buttonWithTitle:@"Load RED RAW Controls" target:self action:@selector(sk_loadRED:)];
+    b.controlSize = NSControlSizeSmall;
+    b.frame = NSMakeRect(120, 96, 160, 24);
+    b.autoresizingMask = NSViewMinXMargin | NSViewMaxXMargin;
+    b.hidden = YES;
+    [c addSubview:b];
+    objc_setAssociatedObject(self, "sk_redButton", b, OBJC_ASSOCIATION_RETAIN);
     self.container = c;
     [self setView:c];
 }
@@ -80,84 +137,137 @@ static id RHud(void) {
     self.items = [items isKindOfClass:[NSArray class]] ? [items copy] : nil;
     if (self.container.window) [self sk_refresh];
 }
-// Move the RAW settings HUD's content into our tab (once), and point it at our items.
+- (void)sk_message:(NSString *)msg showREDButton:(BOOL)red {
+    self.placeholder.stringValue = msg ?: @"";
+    self.placeholder.hidden = (msg == nil);
+    [(NSButton *)objc_getAssociatedObject(self, "sk_redButton") setHidden:!red];
+}
+// Show exactly one provider's controls (or none); everything else in the tab is hidden.
+- (void)sk_showContent:(NSView *)show {
+    for (size_t i = 0; i < sizeof(kProviders) / sizeof(kProviders[0]); i++) {
+        id hud = RHudFor(&kProviders[i]);
+        NSView *v = hud ? objc_getAssociatedObject(hud, "sk_rawContent") : nil;
+        if (v && v != show) v.hidden = YES;
+    }
+    if (!show) return;
+    // Keep each RAW window's own layout: natural size, pinned to the top, centred horizontally.
+    // (Stretching it to the tab's height pushed RED's controls to the bottom and left a large gap.)
+    NSValue *nat = objc_getAssociatedObject(show, "sk_natural");
+    if (!nat) { nat = [NSValue valueWithSize:show.frame.size]; objc_setAssociatedObject(show, "sk_natural", nat, OBJC_ASSOCIATION_RETAIN); }
+    NSSize n = nat.sizeValue;
+    if (show.superview != self.container) {
+        [show removeFromSuperview];
+        show.translatesAutoresizingMaskIntoConstraints = YES;
+        [self.container addSubview:show];
+    }
+    CGFloat W = NSWidth(self.container.bounds);
+    show.frame = NSMakeRect(MAX(0, floor((W - n.width) / 2)), 8, n.width, n.height);   // container is flipped: y=8 is near the top
+    show.autoresizingMask = NSViewMinXMargin | NSViewMaxXMargin;
+    show.hidden = NO;
+}
+- (NSArray *)sk_items {
+    NSArray *items = self.items;
+    if (!items.count) {
+        id tabModule = gTabModule;
+        for (NSView *v = self.container.superview; v && !tabModule; v = v.superview)
+            if ([v isKindOfClass:[NSTabView class]] && [NSStringFromClass([[(NSTabView *)v delegate] class]) containsString:@"InspectorTab"]) tabModule = [(NSTabView *)v delegate];
+        id cur = nil; @try { cur = [tabModule valueForKey:@"currentItems"]; } @catch (id e) {}
+        if ([cur isKindOfClass:[NSArray class]]) items = cur;
+    }
+    return items ?: @[];
+}
 - (void)sk_refresh {
     if (!self.container.window) return;
-    id hud = RHud();
-    if (!hud) { RLog(@"no FFVTRAWSettingsHud"); return; }
     @try {
-        NSArray *items = self.items;
-        if (!items.count) {
-            id tabModule = gTabModule;
-            for (NSView *v = self.container.superview; v && !tabModule; v = v.superview)
-                if ([v isKindOfClass:[NSTabView class]] && [NSStringFromClass([[(NSTabView *)v delegate] class]) containsString:@"InspectorTab"]) tabModule = [(NSTabView *)v delegate];
-            id cur = nil; @try { cur = [tabModule valueForKey:@"currentItems"]; } @catch (id e) {}
-            if ([cur isKindOfClass:[NSArray class]]) items = cur;
+        NSArray *items = [self sk_items];
+        RFormat f = RFormatOfItems(items);
+        const RProvider *p = RProviderFor(f);
+        RLog(@"refresh with %lu item(s), format=%s", (unsigned long)items.count, p ? p->name : (f == RFormatMixed ? "mixed" : "none"));
+        if (f == RFormatMixed) { [self sk_showContent:nil]; [self sk_message:@"The selected clips use different RAW formats.\nSelect clips of one RAW format to edit their RAW settings." showREDButton:NO]; return; }
+        if (!p) { [self sk_showContent:nil]; [self sk_message:@"Select a RAW clip to edit its RAW settings." showREDButton:NO]; return; }
+        id hud = RHudFor(p);
+        if (!hud) { [self sk_showContent:nil]; [self sk_message:[NSString stringWithFormat:@"Final Cut's %s settings aren't available in this version.", p->name] showREDButton:NO]; return; }
+        if (!p->embeddable) {
+            // RED: the RED controller follows the timeline selection itself once its window is loaded.
+            NSView *content = objc_getAssociatedObject(hud, "sk_rawContent");
+            if (content) { [self sk_message:nil showREDButton:NO]; [self sk_showContent:content]; }
+            else if (gREDUnavailable) { [self sk_showContent:nil]; [self sk_message:@"Final Cut doesn't offer RED RAW settings for this clip.\n\nInstall RED Apple Workflow Installer (from red.com), restart Final Cut, then try again." showREDButton:NO]; }
+            else { [self sk_showContent:nil]; [self sk_message:@"RED RAW controls are provided by RED's Apple Workflow plugin for Final Cut." showREDButton:YES]; }
+            return;
         }
-        if (!items) items = @[];
-        RLog(@"refresh with %lu item(s)", (unsigned long)items.count);
+        NSView *existing = objc_getAssociatedObject(hud, "sk_rawContent");
+        NSArray *last = objc_getAssociatedObject(hud, "sk_lastItems");
+        if (existing && existing.superview == self.container && !existing.hidden && [last isEqualToArray:items]) return;
+        objc_setAssociatedObject(hud, "sk_lastItems", items, OBJC_ASSOCIATION_RETAIN);
         ((void(*)(id, SEL, id))objc_msgSend)(hud, NSSelectorFromString(@"setAssetItems:"), items);
         gOpeningFromTab = YES;
         ((void(*)(id, SEL))objc_msgSend)(hud, NSSelectorFromString(@"openHUD"));   // loads + refreshes; panel is hidden by our hook
         gOpeningFromTab = NO;
-        NSPanel *panel = ((id(*)(id, SEL))objc_msgSend)(hud, NSSelectorFromString(@"panel"));
+        NSPanel *panel = RCall(hud, @"panel");
         NSView *content = objc_getAssociatedObject(hud, "sk_rawContent");
         if (!content && panel) {
             content = panel.contentView;
-            NSSize natural = content.frame.size;
             panel.contentView = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 10, 10)];
             objc_setAssociatedObject(hud, "sk_rawContent", content, OBJC_ASSOCIATION_RETAIN);
-            RLog(@"moved HUD content into tab (natural size %@)", NSStringFromSize(natural));
+            RLog(@"moved %s controls into tab (natural size %@)", p->name, NSStringFromSize(content.frame.size));
         }
-        if (content && content.superview != self.container) {
-            [content removeFromSuperview];
-            content.translatesAutoresizingMaskIntoConstraints = YES;
-            content.frame = self.container.bounds;
-            content.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
-            [self.container addSubview:content];
-        }
-        self.placeholder.hidden = (content != nil && items.count > 0);
-        content.hidden = (items.count == 0);
+        [self sk_message:(content ? nil : @"Couldn't load the RAW controls for this clip.") showREDButton:NO];
+        [self sk_showContent:content];
         [panel orderOut:nil];
     } @catch (id e) {
         gOpeningFromTab = NO;
         RLog(@"refresh threw %@", e);
     }
 }
+// RED: press Final Cut's own "Modify RED RAW Settings" button in the Info tab (its real code path);
+// the openHUD hook then moves the RED window's controls into this tab.
+static NSButton *RFindButton(NSView *v, SEL action) {
+    if ([v isKindOfClass:[NSButton class]] && [(NSButton *)v action] == action) return (NSButton *)v;
+    for (NSView *s in v.subviews) { NSButton *b = RFindButton(s, action); if (b) return b; }
+    return nil;
+}
+- (void)sk_loadRED:(id)sender {
+    @try {
+        NSTabView *tv = gTabModule ? [gTabModule valueForKey:@"_tabView"] : nil;
+        NSInteger info = -1;
+        for (NSUInteger i = 0; i < tv.tabViewItems.count && info < 0; i++) {
+            NSTabViewItem *it = tv.tabViewItems[i];
+            id ident = it.identifier;
+            if ([ident isEqual:@"FFInspectorTabInfoIdentifier"] || [it.label isEqualToString:@"Info"] ||
+                [NSStringFromClass([ident class]) containsString:@"FileInfo"]) info = (NSInteger)i;
+        }
+        if (info < 0) { RLog(@"RED: Info tab not found in %@", tv.tabViewItems); return; }
+        ((void(*)(id,SEL,NSUInteger))objc_msgSend)(gTabModule, NSSelectorFromString(@"selectInspectorTab:"), (NSUInteger)info);
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            NSButton *b = nil;
+            for (NSWindow *w in NSApp.windows) { b = RFindButton(w.contentView, NSSelectorFromString(@"modifyRedRawSettingsButtonPressed:")); if (b) break; }
+            RLog(@"RED: native button %@", b ? @"found - pressing" : @"not found");
+            if (b) [NSApp sendAction:b.action to:b.target from:b];   // Final Cut's own button action, no synthetic click
+            else {
+                // Without RED's plugin Final Cut plays R3D but has no RED RAW settings at all.
+                gREDUnavailable = YES;
+                [self sk_message:@"Final Cut doesn't offer RED RAW settings for this clip.\n\nInstall RED Apple Workflow Installer (from red.com), restart Final Cut, then try again." showREDButton:NO];
+                NSTabView *tv2 = gTabModule ? [gTabModule valueForKey:@"_tabView"] : nil;
+                for (NSUInteger i = 0; i < tv2.tabViewItems.count; i++)
+                    if (tv2.tabViewItems[i].identifier == gModule || [tv2.tabViewItems[i].identifier isEqual:kTabIdent]) {
+                        ((void(*)(id,SEL,NSUInteger))objc_msgSend)(gTabModule, NSSelectorFromString(@"selectInspectorTab:"), i); break; }
+            }
+        });
+    } @catch (id e) { RLog(@"loadRED threw %@", e); }
+}
 @end
 
-static IMP o_ids, o_image, o_alt, o_button, o_openHUD;
+static IMP o_ids, o_image, o_alt, o_button;
+static NSMutableDictionary<NSString *, NSValue *> *gOpenHUD;   // HUD class name -> original -openHUD
 
 // Final Cut's inspector shows at most 5 tabs. When the identifier list for a selection is longer,
 // it silently falls back to just Video + Info - which is how titles lost their Title tab (and clips
 // their Color/Audio tabs) once the RAW tab was being added to every selection. So:
-//   - the RAW tab is only added for clips whose media really is RAW (BRAW / ProRes RAW)
+//   - the RAW tab is only added for clips whose media really is RAW (any provider in kProviders)
 //   - native tabs are never displaced; if the list is already full, only another plugin's tab
 //     (e.g. Transcript) gives up its place for the RAW tab, otherwise the RAW tab is left out.
 static const NSUInteger kMaxInspectorTabs = 5;
-static BOOL RIsRAWAsset(id a) {
-    @try {
-        SEL ext = NSSelectorFromString(@"usingRAWMediaExtension"), prr = NSSelectorFromString(@"isProResRAWCodec"), rps = NSSelectorFromString(@"rawProcessorSettings");
-        if ([a respondsToSelector:ext] && ((BOOL(*)(id, SEL))objc_msgSend)(a, ext)) return YES;
-        if ([a respondsToSelector:prr] && ((BOOL(*)(id, SEL))objc_msgSend)(a, prr)) return YES;
-        if ([a respondsToSelector:rps] && ((id(*)(id, SEL))objc_msgSend)(a, rps)) return YES;
-    } @catch (id e) {}
-    return NO;
-}
-static BOOL RItemsAreRAW(id items) {
-    if (![items respondsToSelector:@selector(countByEnumeratingWithState:objects:count:)]) return NO;
-    NSUInteger n = 0;
-    SEL as = NSSelectorFromString(@"assetsIncludingAnchored:");
-    for (id it in items) {
-        n++;
-        if (![it respondsToSelector:as]) return NO;
-        id assets = ((id(*)(id, SEL, BOOL))objc_msgSend)(it, as, NO);
-        BOOL raw = NO;
-        for (id a in assets) if (RIsRAWAsset(a)) { raw = YES; break; }
-        if (!raw) return NO;                     // every selected clip must be RAW
-    }
-    return n > 0;
-}
+static BOOL RItemsAreRAW(id items) { return RFormatOfItems(items) != RFormatNone; }   // includes mixed RAW selections
 static BOOL RIsNative(id k) { return [k isKindOfClass:[NSString class]] ? [k hasPrefix:@"FF"] : YES; }
 
 static BOOL h_ids(id self, SEL _cmd, id items, __autoreleasing id *outIds, __autoreleasing id *outMap) {
@@ -228,11 +338,19 @@ static id h_button(id self, SEL _cmd, id title, long tag) {
 }
 // The Info tab's "Edit RAW Properties" button: jump to our tab instead of showing the floating window.
 static void h_openHUD(id self, SEL _cmd) {
-    ((void(*)(id,SEL))o_openHUD)(self, _cmd);
+    IMP orig = NULL;
+    for (Class k = [self class]; k && !orig; k = class_getSuperclass(k)) orig = [gOpenHUD[NSStringFromClass(k)] pointerValue];
+    if (orig) ((void(*)(id,SEL))orig)(self, _cmd);
     @try {
         NSPanel *panel = ((id(*)(id, SEL))objc_msgSend)(self, NSSelectorFromString(@"panel"));
         NSView *content = objc_getAssociatedObject(self, "sk_rawContent");
         if (gOpeningFromTab) { if (content) [panel orderOut:nil]; return; }
+        if (!content && panel && [NSStringFromClass([self class]) isEqualToString:@"FFREDRAWSettings"] && gModule) {
+            content = panel.contentView;   // first time the RED window opens: bring its controls into the tab
+            panel.contentView = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 10, 10)];
+            objc_setAssociatedObject(self, "sk_rawContent", content, OBJC_ASSOCIATION_RETAIN);
+            RLog(@"moved RED controls into tab (natural size %@)", NSStringFromSize(content.frame.size));
+        }
         NSInteger tab = -1;
         NSTabView *tv = gTabModule ? [gTabModule valueForKey:@"_tabView"] : nil;
         for (NSUInteger i = 0; i < tv.tabViewItems.count; i++) {
@@ -242,6 +360,7 @@ static void h_openHUD(id self, SEL _cmd) {
         if (tab >= 0) {
             if (content) [panel orderOut:nil];
             ((void(*)(id,SEL,NSUInteger))objc_msgSend)(gTabModule, NSSelectorFromString(@"selectInspectorTab:"), (NSUInteger)tab);
+            dispatch_async(dispatch_get_main_queue(), ^{ [gModule sk_refresh]; });
         } else if (content && panel) {
             // no RAW tab for this selection: give the controls back to Final Cut's own floating window
             [content removeFromSuperview];
@@ -262,14 +381,20 @@ __attribute__((visibility("default"))) void SpliceKitPlugin_init(void *api) { (v
 static void rawtab_install(void) {
     static BOOL done; if (done) return; done = YES;
     Class c = objc_getClass("FFInspectorTabModule");
-    Class h = objc_getClass("FFVTRAWSettingsHud");
-    if (!c || !h) { RLog(@"missing classes tab=%@ hud=%@", c, h); return; }
+    if (!c) { RLog(@"missing FFInspectorTabModule"); return; }
+    gOpenHUD = [NSMutableDictionary dictionary];
     o_ids = hook(c, @"_identifiersAndClassesForItems:outTabIdentifiers:outClassesMap:", (IMP)h_ids);
     o_image = hook(c, @"imageForInspectorTab:", (IMP)h_image);
     o_alt = hook(c, @"altImageForInspectorTab:", (IMP)h_alt);
     o_button = hook(c, @"newTabSelectorButtonWithTitle:tag:", (IMP)h_button);
-    o_openHUD = hook(h, @"openHUD", (IMP)h_openHUD);
-    RLog(@"RAW Tab loaded (ids=%d image=%d alt=%d button=%d openHUD=%d)", o_ids != NULL, o_image != NULL, o_alt != NULL, o_button != NULL, o_openHUD != NULL);
+    for (size_t i = 0; i < sizeof(kProviders) / sizeof(kProviders[0]); i++) {
+        Class h = objc_getClass(kProviders[i].hudClass);
+        Method m = h ? class_getInstanceMethod(h, @selector(openHUD)) : NULL;
+        if (!m) { RLog(@"%s: %s not available", kProviders[i].name, kProviders[i].hudClass); continue; }
+        if (method_getImplementation(m) == (IMP)h_openHUD) continue;   // shared/inherited openHUD already hooked
+        gOpenHUD[NSStringFromClass(h)] = [NSValue valueWithPointer:(void *)method_setImplementation(m, (IMP)h_openHUD)];
+    }
+    RLog(@"RAW Tab loaded (ids=%d image=%d alt=%d button=%d) providers=%@", o_ids != NULL, o_image != NULL, o_alt != NULL, o_button != NULL, gOpenHUD.allKeys);
 }
 // hook after every other plugin has loaded, so our tab is added on top of theirs (e.g. transcript tab)
 __attribute__((constructor)) static void rawtab_init(void) {

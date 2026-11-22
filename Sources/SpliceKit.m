@@ -16,7 +16,6 @@
 #import "SpliceKitSentry.h"
 #import "SpliceKitLiveCam.h"
 #import "SpliceKitURLImport.h"
-#import "SpliceKitImmersivePreviewPanel.h"
 #import <AppKit/AppKit.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #import <Security/Security.h>
@@ -34,9 +33,6 @@ extern NSDictionary *SpliceKit_handleFCPXMLExport(NSDictionary *params);
 extern NSDictionary *SpliceKit_handleFCPXMLImport(NSDictionary *params);
 extern NSDictionary *SpliceKit_handleProjectOpen(NSDictionary *params);
 extern void SpliceKit_installMixerSkimHooks(void);
-extern void SpliceKit_installBRAWProviderShim(void);
-extern void SpliceKit_bootstrapBRAWAtLaunchPhase(NSString *phase);
-extern BOOL SpliceKit_installBRAWRAWSettingsHooks(void);
 extern void SpliceKitURLImport_bootstrapAtLaunchPhase(NSString *phase);
 extern void SpliceKitVP9_Bootstrap(void);
 
@@ -424,7 +420,6 @@ static void SpliceKit_checkCompatibility(void) {
 - (void)toggleTranscriptPanel:(id)sender;
 - (void)toggleCaptionPanel:(id)sender;
 - (void)toggleLiveCamPanel:(id)sender;
-- (void)toggleImmersiveViewer:(id)sender;
 - (void)toggleSections:(id)sender;
 - (void)toggleOverviewBar:(id)sender;
 - (void)toggleCommandPalette:(id)sender;
@@ -536,16 +531,6 @@ static void SpliceKit_checkCompatibility(void) {
         ((void (*)(id, SEL))objc_msgSend)(panel, @selector(showPanel));
     }
     [self updateLiveCamToolbarButtonState:!visible];
-}
-
-- (void)toggleImmersiveViewer:(id)sender {
-    SpliceKitImmersivePreviewPanel *panel = [SpliceKitImmersivePreviewPanel sharedPanel];
-
-    NSError *error = nil;
-    if (![panel showInViewerForCurrentSelection:&error]) {
-        SpliceKit_log(@"[ImmersiveViewer] native FCP viewer show failed: %@", error.localizedDescription ?: @"unknown error");
-        NSBeep();
-    }
 }
 
 - (void)toggleVisionProPanel:(id)sender {
@@ -2458,13 +2443,6 @@ static void SpliceKit_installMenu(void) {
     liveCamItem.target = [SpliceKitMenuController shared];
     [bridgeMenu addItem:liveCamItem];
 
-    NSMenuItem *immersiveViewerItem = [[NSMenuItem alloc]
-        initWithTitle:@"FCP 360 Viewer"
-               action:@selector(toggleImmersiveViewer:)
-        keyEquivalent:@""];
-    immersiveViewerItem.target = [SpliceKitMenuController shared];
-    [bridgeMenu addItem:immersiveViewerItem];
-
     NSMenuItem *visionProItem = [[NSMenuItem alloc]
         initWithTitle:@"Vision Pro Preview"
                action:@selector(toggleVisionProPanel:)
@@ -3271,19 +3249,11 @@ static void SpliceKit_appDidLaunch(void) {
     SpliceKit_checkCompatibility();
 
     // Guard against the VTCopyVideoDecoderExtensionProperties nil-property
-    // crash before BRAW bootstrap runs — registering BRAW variant FourCCs
-    // increases the surface area where a Media Extension with incomplete
-    // CodecInfo (e.g. BRAW Toolbox advertises only 'braw') can be queried for
-    // a codec it doesn't enumerate, and the resulting nil triggers
-    // -[__NSDictionaryM __setObject:forKey:] inside VT.
+    // crash: a third-party Media Extension with incomplete CodecInfo can be
+    // queried for a codec it doesn't enumerate, and the resulting nil triggers
+    // -[__NSDictionaryM __setObject:forKey:] inside VT, aborting FCP.
     SpliceKit_safeInstall("MediaExtensionGuard", ^{
         SpliceKit_installMediaExtensionGuard();
-    });
-
-    SpliceKit_bootstrapBRAWAtLaunchPhase(@"did-launch");
-
-    SpliceKit_safeInstall("BRAWRAWSettings", ^{
-        SpliceKit_installBRAWRAWSettingsHooks();
     });
 
     SpliceKit_safeInstall("VP9Bootstrap", ^{
@@ -3318,8 +3288,6 @@ static void SpliceKit_appDidLaunch(void) {
 
     // Install toolbar button in FCP's main window
     [SpliceKitMenuController installToolbarButton];
-
-    SpliceKit_log(@"[ImmersiveViewer] Built-in show360 bridge install skipped at launch; use SpliceKit immersive preview commands instead");
 
     [[NSNotificationCenter defaultCenter] addObserverForName:SpliceKitLiveCamVisibilityDidChangeNotification
                                                       object:nil
@@ -3502,8 +3470,24 @@ static void noopCloudContentFirstLaunchWithCompletion(id self, SEL _cmd, id comp
 }
 
 static BOOL returnNO(id self, SEL _cmd) {
-    SpliceKit_log(@"BLOCKED (returning NO): +[%@ %@]",
-                  NSStringFromClass(object_getClass(self)), NSStringFromSelector(_cmd));
+    // FCP polls some of these (e.g. +[CloudContentFeatureFlag isEnabled]) about
+    // once a second for the life of the app, so only log the first call per
+    // class/selector pair.
+    static NSMutableSet<NSString *> *sLogged = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ sLogged = [NSMutableSet set]; });
+    NSString *key = [NSString stringWithFormat:@"+[%@ %@]",
+                     NSStringFromClass(object_getClass(self)), NSStringFromSelector(_cmd)];
+    BOOL first = NO;
+    @synchronized (sLogged) {
+        if (![sLogged containsObject:key]) {
+            [sLogged addObject:key];
+            first = YES;
+        }
+    }
+    if (first) {
+        SpliceKit_log(@"BLOCKED (returning NO): %@ (further calls not logged)", key);
+    }
     return NO;
 }
 
@@ -3577,6 +3561,12 @@ static void SpliceKit_swizzleCloudContentClass(Class cls, const char *phase) {
 
     const char *name = class_getName(cls);
     if (!name) return;
+
+    // FCP 13 adds MVFXCloudContentCatalog for the built-in MotionVFX content.
+    // It isn't part of the CloudKit first-launch path we neutralize, and FCP
+    // 13 launches cleanly with it untouched, so never let the substring
+    // matching below disable it.
+    if (strstr(name, "MVFX")) return;
 
     if (strstr(name, "CCFirstLaunchHelper") || strstr(name, "CloudContentFirstLaunchHelper")) {
         SpliceKit_log(@"  [%s] Found class: %s", phase, name);
@@ -3676,8 +3666,136 @@ static void SpliceKit_swizzleKnownCloudContentClasses(const char *phase) {
 // Brute-force CloudContent neutralizer: first targets the known Swift/ObjC
 // classes by exact runtime name, then enumerates registered classes to catch
 // Apple renames between FCP editions and point releases.
+// FCP 13 MotionVFX remote content: MVFXRemoteContext resolves its service
+// endpoints through HostURLCache -> CloudContentCatalog.remoteAppConfig(environment:),
+// which goes straight to CloudKit. A re-signed FCP can't carry Apple's iCloud
+// entitlements, so CloudKit traps the process (EXC_BREAKPOINT on a cooperative
+// thread). Creator Studio 13.0 reaches this at launch: the $defer in Swift's
+// CloudContentFirstLaunchHelper.setupAndPresentFirstLaunchIfNeeded() calls these
+// @objc entry points even when the ObjC first-launch method is neutralized.
+// Complete them immediately with an empty context. The bundled MotionVFX manifest
+// ("[MissingContent] seed: source=bundled floor") is unaffected.
+static void SpliceKit_logMVFXRemoteContextBlockedOnce(SEL sel) {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        SpliceKit_log(@"BLOCKED MotionVFX remote context (-%@): CloudKit unavailable without "
+                      @"iCloud entitlements; returning an empty context (further calls not logged)",
+                      NSStringFromSelector(sel));
+    });
+}
+
+static void SpliceKit_mvfxEmptyRemoteContext(id self, SEL _cmd, id completion) {
+    SpliceKit_logMVFXRemoteContextBlockedOnce(_cmd);
+    if (completion) ((void (^)(NSDictionary *))completion)(@{});
+}
+
+static void SpliceKit_mvfxEmptyRemoteContextRefreshing(id self, SEL _cmd, id currentToken,
+                                                       BOOL force, id completion) {
+    (void)currentToken; (void)force;
+    SpliceKit_logMVFXRemoteContextBlockedOnce(_cmd);
+    if (completion) ((void (^)(NSDictionary *))completion)(@{});
+}
+
+static void SpliceKit_neutralizeMVFXRemoteContextClass(Class cls, const char *phase) {
+    if (!cls) return;
+    struct { SEL sel; IMP imp; } hooks[] = {
+        { NSSelectorFromString(@"remoteContextWithCompletionHandler:"),
+          (IMP)SpliceKit_mvfxEmptyRemoteContext },
+        { NSSelectorFromString(@"remoteContextRefreshingIfCurrent:WithForce:CompletionHandler:"),
+          (IMP)SpliceKit_mvfxEmptyRemoteContextRefreshing },
+    };
+    for (size_t i = 0; i < sizeof(hooks) / sizeof(hooks[0]); i++) {
+        Method m = class_getInstanceMethod(cls, hooks[i].sel);
+        if (!m || method_getImplementation(m) == hooks[i].imp) continue;
+        method_setImplementation(m, hooks[i].imp);
+        SpliceKit_log(@"  [%s] Swizzled %s -%@ -> empty context", phase, class_getName(cls),
+                      NSStringFromSelector(hooks[i].sel));
+        SpliceKit_trackSwizzle(@"MVFXRemoteContext.remoteContext", YES);
+    }
+}
+
+// With no remote context there is no MotionVFX base URL, so MVFXManifestFetcher's
+// background refresh asks MVFXNetworkClient to GET a nil URL string, and
+// +[NSURLComponents componentsWithString:nil] throws, aborting FCP. Treat a
+// missing URL as a failed request (nil data), which the fetcher already handles;
+// requests with a real URL are passed through untouched.
+static IMP sOrigMVFXFetchManifestData = NULL;
+static IMP sOrigMVFXAuthenticatedGET = NULL;
+static IMP sOrigMVFXSendGET = NULL;
+
+static BOOL SpliceKit_mvfxURLStringMissing(id urlString, SEL sel) {
+    if ([urlString isKindOfClass:[NSString class]] && [(NSString *)urlString length] > 0) return NO;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        SpliceKit_log(@"[MVFX] Skipping MotionVFX request with no URL (-%@); remote context "
+                      @"unavailable (further skips not logged)", NSStringFromSelector(sel));
+    });
+    return YES;
+}
+
+static id SpliceKit_mvfxFetchManifestData(id self, SEL _cmd, id urlString) {
+    if (SpliceKit_mvfxURLStringMissing(urlString, _cmd)) return nil;
+    return ((id (*)(id, SEL, id))sOrigMVFXFetchManifestData)(self, _cmd, urlString);
+}
+
+static id SpliceKit_mvfxAuthenticatedGET(id self, SEL _cmd, id urlString, BOOL setUserAgent,
+                                         NSInteger *statusCode) {
+    if (SpliceKit_mvfxURLStringMissing(urlString, _cmd)) {
+        if (statusCode) *statusCode = 0;
+        return nil;
+    }
+    return ((id (*)(id, SEL, id, BOOL, NSInteger *))sOrigMVFXAuthenticatedGET)(
+        self, _cmd, urlString, setUserAgent, statusCode);
+}
+
+static id SpliceKit_mvfxSendGET(id self, SEL _cmd, id urlString, id token, BOOL setUserAgent,
+                                NSInteger *statusCode) {
+    if (SpliceKit_mvfxURLStringMissing(urlString, _cmd)) {
+        if (statusCode) *statusCode = 0;
+        return nil;
+    }
+    return ((id (*)(id, SEL, id, id, BOOL, NSInteger *))sOrigMVFXSendGET)(
+        self, _cmd, urlString, token, setUserAgent, statusCode);
+}
+
+static void SpliceKit_guardMVFXNetworkClient(const char *phase) {
+    static BOOL sInstalled = NO;
+    if (sInstalled) return;
+    Class cls = objc_getClass("MVFXNetworkClient");   // MVFXContentKit.framework (FCP 13+)
+    if (!cls) return;
+    struct { NSString *sel; IMP imp; IMP *orig; } hooks[] = {
+        { @"fetchManifestDataAtURLString:", (IMP)SpliceKit_mvfxFetchManifestData, &sOrigMVFXFetchManifestData },
+        { @"authenticatedGETToURLString:setUserAgent:statusCode:", (IMP)SpliceKit_mvfxAuthenticatedGET, &sOrigMVFXAuthenticatedGET },
+        { @"sendGETToURLString:token:setUserAgent:statusCode:", (IMP)SpliceKit_mvfxSendGET, &sOrigMVFXSendGET },
+    };
+    for (size_t i = 0; i < sizeof(hooks) / sizeof(hooks[0]); i++) {
+        SEL sel = NSSelectorFromString(hooks[i].sel);
+        if (![cls instancesRespondToSelector:sel]) continue;
+        *hooks[i].orig = SpliceKit_swizzleMethod(cls, sel, hooks[i].imp);
+    }
+    sInstalled = YES;
+    SpliceKit_log(@"  [%s] Guarded MVFXNetworkClient against missing MotionVFX URLs "
+                  @"(fetchManifest:%s authGET:%s sendGET:%s)", phase,
+                  sOrigMVFXFetchManifestData ? "✓" : "✗",
+                  sOrigMVFXAuthenticatedGET ? "✓" : "✗",
+                  sOrigMVFXSendGET ? "✓" : "✗");
+}
+
+static void SpliceKit_neutralizeMVFXRemoteContext(const char *phase) {
+    const char *names[] = {
+        "_TtC13Final_Cut_Pro17MVFXRemoteContext",      // Final Cut Pro 13
+        "_TtC17Final_Cut_Pro_App17MVFXRemoteContext",  // Final Cut Pro Creator Studio 13
+        NULL
+    };
+    for (int i = 0; names[i]; i++) {
+        SpliceKit_neutralizeMVFXRemoteContextClass(objc_getClass(names[i]), phase);
+    }
+    SpliceKit_guardMVFXNetworkClient(phase);
+}
+
 static void SpliceKit_swizzleCloudContentClasses(const char *phase) {
     SpliceKit_swizzleKnownCloudContentClasses(phase);
+    SpliceKit_neutralizeMVFXRemoteContext(phase);
 
     int numClasses = objc_getClassList(NULL, 0);
     if (numClasses <= 0) return;
@@ -4150,7 +4268,6 @@ static void SpliceKit_init(void) {
             SpliceKit_swizzleCloudContentClasses("willLaunch");
             SpliceKit_logCloudContentGuardSummary(@"will-launch");
             SpliceKit_logLoadedFrameworks();
-            SpliceKit_bootstrapBRAWAtLaunchPhase(@"will-launch");
             SpliceKitURLImport_bootstrapAtLaunchPhase(@"will-launch");
             SpliceKit_safeInstall("MKVWillLaunchHooks", ^{
                 extern void SpliceKitMKV_bootstrapAtLaunchPhase(NSString *phase);

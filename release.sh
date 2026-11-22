@@ -17,8 +17,8 @@ if [ -z "$NOTES" ]; then
     NOTES="Bug fixes and improvements"
 fi
 
-SIGN_ID="Developer ID Application: Brian Tate (RH4U5VJHM6)"
-KEYCHAIN_PROFILE="SpliceKit"
+SIGN_ID="${SIGN_ID:-Developer ID Application: LateNite Films Pty Ltd (A5HDJTY9X5)}"
+KEYCHAIN_PROFILE="${KEYCHAIN_PROFILE:-SpliceKit}"
 XCODE_PROJECT="patcher/SpliceKit.xcodeproj"
 VERSION_FILE="patcher/SpliceKit/Configuration/Version.xcconfig"
 BUILD_DIR="patcher/build"
@@ -28,10 +28,12 @@ RUNTIME_DSYM="build/SpliceKit.dSYM"
 DMG_NAME="SpliceKit-v${VERSION}.dmg"
 DMG_PATH="patcher/${DMG_NAME}"
 SPARKLE_SIGN="/tmp/bin/sign_update"
+SPARKLE_GENERATE_KEYS="/tmp/bin/generate_keys"
+PATCHER_INFO_PLIST="patcher/SpliceKit/Resources/Info.plist"
 SENTRY_RELEASE_NAME="splicekit@${VERSION}"
 SENTRY_PATCHER_PROJECT="${SENTRY_PATCHER_PROJECT:-apple-macos}"
 SENTRY_RUNTIME_PROJECT="${SENTRY_RUNTIME_PROJECT:-apple-macos}"
-RELEASE_NOTES_URL="${RELEASE_NOTES_URL:-https://elliotttate.github.io/SpliceKit/releasenotes.html}"
+RELEASE_NOTES_URL="${RELEASE_NOTES_URL:-https://latenitefilms.github.io/SpliceKit/releasenotes.html}"
 RELEASE_NOTES_FILE="${RELEASE_NOTES_FILE:-docs/releasenotes.html}"
 
 # Auto-resolve Sentry auth from the new `sentry` CLI's OAuth store so dSYM
@@ -71,6 +73,29 @@ if ! xcrun notarytool history --keychain-profile "${KEYCHAIN_PROFILE}" >/dev/nul
     exit 1
 fi
 rm -f "${NOTARY_PREFLIGHT_LOG}"
+
+ensure_sparkle_tools() {
+    if [ -x "${SPARKLE_SIGN}" ] && [ -x "${SPARKLE_GENERATE_KEYS}" ]; then
+        return 0
+    fi
+    echo "  Downloading Sparkle tools..."
+    SPARKLE_URL=$(curl -s https://api.github.com/repos/sparkle-project/Sparkle/releases/latest | python3 -c "import sys,json; [print(a['browser_download_url']) for a in json.loads(sys.stdin.read())['assets'] if a['name'].endswith('.tar.xz')]")
+    curl -sL "${SPARKLE_URL}" -o /tmp/sparkle.tar.xz
+    (cd /tmp && tar xf sparkle.tar.xz)
+}
+
+# The patcher only accepts updates signed by the key whose public half is
+# SUPublicEDKey in its Info.plist. Refuse to release if that doesn't match the
+# Sparkle key in this Mac's keychain, or every installed copy would reject it.
+echo "[0/15] Checking Sparkle signing key..."
+ensure_sparkle_tools
+PLIST_ED_KEY="$(/usr/libexec/PlistBuddy -c "Print :SUPublicEDKey" "${PATCHER_INFO_PLIST}" 2>/dev/null || true)"
+SIGNING_ED_KEY="$("${SPARKLE_GENERATE_KEYS}" -p 2>/dev/null | tail -1 | tr -d '[:space:]')"
+if [ -z "${SIGNING_ED_KEY}" ] || [ "${PLIST_ED_KEY}" != "${SIGNING_ED_KEY}" ]; then
+    echo "ERROR: SUPublicEDKey in ${PATCHER_INFO_PLIST} (${PLIST_ED_KEY:-missing}) does not match" >&2
+    echo "       this Mac's Sparkle signing key (${SIGNING_ED_KEY:-not found; run ${SPARKLE_GENERATE_KEYS}})." >&2
+    exit 1
+fi
 
 resolve_built_app() {
     local products_dir="${BUILD_DIR}/Build/Products/Release"
@@ -230,7 +255,7 @@ make tools
 make symbols
 
 echo "[3/15] Building parakeet-transcriber..."
-PARAKEET_PKG_DIR="patcher/SpliceKitPatcher.app/Contents/Resources/tools/parakeet-transcriber"
+PARAKEET_PKG_DIR="tools/parakeet-transcriber"
 PARAKEET_BIN="${PARAKEET_PKG_DIR}/.build/release/parakeet-transcriber"
 if [ -d "${PARAKEET_PKG_DIR}" ]; then
     cd "${PARAKEET_PKG_DIR}" && swift build -c release 2>&1 | tail -3 && cd "${REPO_ROOT}"
@@ -244,7 +269,7 @@ else
 fi
 
 echo "[3b/15] Building whisper-transcriber..."
-WHISPER_PKG_DIR="patcher/SpliceKitPatcher.app/Contents/Resources/tools/whisper-transcriber"
+WHISPER_PKG_DIR="tools/whisper-transcriber"
 WHISPER_BIN="${WHISPER_PKG_DIR}/.build/release/whisper-transcriber"
 if [ -d "${WHISPER_PKG_DIR}" ]; then
     cd "${WHISPER_PKG_DIR}" && swift build -c release 2>&1 | tail -3 && cd "${REPO_ROOT}"
@@ -403,12 +428,7 @@ echo "  Stapled: ${DMG_PATH}"
 # ──────────────────────────────────────────────
 
 echo "[12/15] Generating Sparkle EdDSA signature..."
-if [ ! -f "${SPARKLE_SIGN}" ]; then
-    echo "  Downloading Sparkle tools..."
-    SPARKLE_URL=$(curl -s https://api.github.com/repos/sparkle-project/Sparkle/releases/latest | python3 -c "import sys,json; [print(a['browser_download_url']) for a in json.loads(sys.stdin.read())['assets'] if a['name'].endswith('.tar.xz')]")
-    curl -sL "${SPARKLE_URL}" -o /tmp/sparkle.tar.xz
-    cd /tmp && tar xf sparkle.tar.xz && cd -
-fi
+ensure_sparkle_tools
 SPARKLE_SIG=$("${SPARKLE_SIGN}" "${DMG_PATH}" | grep -o 'edSignature="[^"]*"' | sed 's/edSignature="//;s/"//')
 FILE_SIZE=$(stat -f%z "${DMG_PATH}")
 PUB_DATE=$(date -u "+%a, %d %b %Y %H:%M:%S +0000")

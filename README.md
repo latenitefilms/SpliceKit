@@ -1,6 +1,6 @@
 # SpliceKit
 
-[![Release](https://img.shields.io/github/v/release/elliotttate/SpliceKit)](https://github.com/elliotttate/SpliceKit/releases/latest)
+[![Release](https://img.shields.io/github/v/release/latenitefilms/SpliceKit)](https://github.com/latenitefilms/SpliceKit/releases/latest)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Discord](https://img.shields.io/badge/Discord-FCP%20Cafe-5865F2?logo=discord&logoColor=white)](https://discord.com/invite/HD3FPc4Azu)
 [![Docs](https://img.shields.io/badge/docs-splicekit.fcp.cafe-0A84FF)](https://splicekit.fcp.cafe)
@@ -11,7 +11,7 @@
 |---|---|---|
 | Hit `Cmd+Shift+P` and type what you want. Apple Intelligence runs it. | Any LLM can read and edit your timeline — and build new tools as it goes. | Every built-in feature is just an example plugin. You (or an AI) can ship more. |
 
-> **Editor? Start here.** The [official SpliceKit site](https://splicekit.fcp.cafe) and the [FAQ](https://splicekit.fcp.cafe/faq/) are the friendliest way in. Questions, help, or feature requests? Join the SpliceKit channels on the [FCP Cafe Discord](https://discord.com/invite/HD3FPc4Azu). Bug reports: [open a GitHub issue](https://github.com/elliotttate/SpliceKit/issues).
+> **Editor? Start here.** The [official SpliceKit site](https://splicekit.fcp.cafe) and the [FAQ](https://splicekit.fcp.cafe/faq/) are the friendliest way in. Questions, help, or feature requests? Join the SpliceKit channels on the [FCP Cafe Discord](https://discord.com/invite/HD3FPc4Azu). Bug reports: [open a GitHub issue](https://github.com/latenitefilms/SpliceKit/issues).
 >
 > Can't wait to see what you do with it. 🥳
 
@@ -129,8 +129,10 @@ Paste a YouTube, Vimeo, or Twitter link and pull it into your library as a real 
 ### Batch Export
 One command, every clip on your timeline exports as its own file — all effects, color grades, and transitions baked in.
 
-### Native BRAW and VP9 Support
-Drop Blackmagic RAW (`.braw`) and VP9/WebM files straight onto your timeline — no transcoding, no wrappers, no third-party toolkit install. SpliceKit ships a BRAW RAW Processor and a VP9 decoder that plug into FCP through Apple's MediaExtension framework, so the clips show up as first-class media with thumbnails, scrubbing, and full quality decode. A huge unlock for anyone cutting Blackmagic camera footage or pulling down WebM video from the web.
+### Native VP9 and MKV/WebM Support
+Drop VP9/WebM and MKV files straight onto your timeline — no transcoding, no wrappers. SpliceKit ships a VP9 decoder and an MKV/WebM format reader that plug into FCP, so the clips show up as first-class media with thumbnails, scrubbing, and full quality decode. Handy for anything pulled down from the web.
+
+For Blackmagic RAW (`.braw`), use [BRAW Toolbox](https://brawtoolbox.io) — SpliceKit no longer includes its own BRAW support.
 
 ### Dual Timelines, FlexMusic, Montage Maker, OpenTimelineIO exchange, Lua REPL, in-process debugger…
 …and more. Every one of them is code in `Sources/` you can read, fork, or gut for parts.
@@ -143,7 +145,7 @@ The easiest path is the GUI patcher. Download the latest release, open it, click
 
 [![Installation Guide](https://img.youtube.com/vi/NxbInKlXQVs/maxresdefault.jpg)](https://www.youtube.com/watch?v=NxbInKlXQVs)
 
-1. Download **SpliceKit** from the [latest release](https://github.com/elliotttate/SpliceKit/releases/latest)
+1. Download **SpliceKit** from the [latest release](https://github.com/latenitefilms/SpliceKit/releases/latest)
 2. Unzip and open the app
 3. Click **Patch** — it handles the rest
 
@@ -234,7 +236,7 @@ Short answers: **Yes, it's safe. Yes, it's legal. No, Apple won't ban you.**
 - **Fully reversible, any time.** SpliceKit never changes how FCP stores your projects, libraries, or media. Quit the patched copy whenever you want, open the exact same library in your vanilla App Store FCP, and keep editing with zero loss. Nothing is locked in, nothing is migrated.
 - **Same safety level as any FXPlug 4 plugin — with more headroom.** SpliceKit plugins run at the same level of trust as Apple's own FXPlug system, and the architecture gives us more tools than FXPlug does. Expensive work runs on background threads, hot paths are explicitly designed not to contend, and state changes are guarded so plugins don't step on FCP's internals. Where an FXPlug plugin has to hope FCP recovers from a performance spike, SpliceKit is built to prevent the spike from happening in the first place.
 - **SpliceKit actively fixes native FCP bugs.** A handful of long-standing issues in FCP are already patched in the modded copy, which means the patched build is measurably more stable than stock in those areas — [here's a video example](https://youtu.be/SNUpQvBef0k).
-- **Automatic crash reporting is built in** (via Sentry) for both the patcher and the injected runtime, so anything unexpected surfaces immediately and gets turned around fast. Sharing logs in the [Discord](https://discord.com/invite/HD3FPc4Azu) or on [GitHub Issues](https://github.com/elliotttate/SpliceKit/issues) is still useful for extra context.
+- **Automatic crash reporting is built in** (via Sentry) for both the patcher and the injected runtime, so anything unexpected surfaces immediately and gets turned around fast. Sharing logs in the [Discord](https://discord.com/invite/HD3FPc4Azu) or on [GitHub Issues](https://github.com/latenitefilms/SpliceKit/issues) is still useful for extra context.
 
 The full plain-English version is in [docs/WHAT_IS_SPLICEKIT.md](docs/WHAT_IS_SPLICEKIT.md).
 
@@ -278,12 +280,12 @@ SpliceKit injects a dynamic library into a re-signed copy of Final Cut Pro. Once
 
 ### Ways to build
 
-- **Native plugin** (ObjC / Swift / C++) — link against `SpliceKit.framework`, drop your dylib into the plugins folder, hot-load it with `debug.loadPlugin`. Examples in `Plugins/` and `Sources/`.
+- **Native plugin** (ObjC / Swift / C++) — link against `SpliceKit.framework`, drop your dylib into the plugins folder, hot-load it with `debug.loadPlugin`. Start from `examples/plugins/com.splicekit.hello-world`.
 - **Lua, inside FCP** — Ctrl+Opt+L opens a REPL with an `sk` module. Drop `.lua` files into `~/Library/Application Support/SpliceKit/lua/auto/` for live coding. Full SDK in [docs/LUA_SDK_REFERENCE.md](docs/LUA_SDK_REFERENCE.md).
 - **Python / any language with a TCP socket** — `python3 Scripts/splicekit_client.py` gives you an interactive runtime REPL. Or: `echo '{"jsonrpc":"2.0","method":"system.version","id":1}' | nc 127.0.0.1 9876`
 - **MCP tools** — expose your plugin's capabilities as MCP tools and any AI client can drive them.
 - **Ask an AI to build it** — the API reference in `docs/` is written to be AI-consumable. Describe what you want, hand the spec to Claude, and it can write the plugin for you.
-- **Open a PR to SpliceKit itself** — if the thing you built is useful to other editors, send it upstream. The bundled "features" (Text-Based Editor, Silence Remover, LiveCam, Song Cut, etc.) all started as plugins. Fork the repo, drop your plugin in `Plugins/` or `Sources/`, and open a [pull request](https://github.com/elliotttate/SpliceKit/pulls) — community plugins are how SpliceKit grows.
+- **Open a PR to SpliceKit itself** — if the thing you built is useful to other editors, send it upstream. The bundled "features" (Text-Based Editor, Silence Remover, LiveCam, Song Cut, etc.) all started as plugins. Fork the repo, drop your plugin in `Plugins/` or `Sources/`, and open a [pull request](https://github.com/latenitefilms/SpliceKit/pulls) — community plugins are how SpliceKit grows.
 
 ### Key FCP internals worth knowing
 
@@ -308,7 +310,7 @@ SpliceKit injects a dynamic library into a re-signed copy of Final Cut Pro. Once
 ### Build from source
 
 ```bash
-git clone https://github.com/elliotttate/SpliceKit.git
+git clone https://github.com/latenitefilms/SpliceKit.git
 cd SpliceKit
 make all && make deploy
 ```
@@ -332,7 +334,7 @@ make all && make deploy
 ## Community
 
 - **Questions, help, feature requests**: [FCP Cafe Discord](https://discord.com/invite/HD3FPc4Azu) (SpliceKit channels)
-- **Bug reports**: [GitHub Issues](https://github.com/elliotttate/SpliceKit/issues)
+- **Bug reports**: [GitHub Issues](https://github.com/latenitefilms/SpliceKit/issues)
 - **Features, videos, FAQ**: [splicekit.fcp.cafe](https://splicekit.fcp.cafe)
 
 There's a long tradition of community modding projects getting adopted back into the official products they extend. If SpliceKit helps push Final Cut Pro forward, everyone wins.

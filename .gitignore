@@ -49,7 +49,7 @@ Package.resolved
 patcher/SpliceKitPatcher-v*.zip
 patcher/SpliceKit-v*.dmg
 
-# Runtime metadata export (75MB+, regenerate with tools/fcp_runtime_export.py)
+# Runtime metadata export (75MB+, regenerate with tools/reverse-engineering/fcp_runtime_export.py)
 ida_export/
 
 # Decompilation analysis output (multi-GB, local scratch only)
@@ -64,3 +64,8 @@ edit-helper.yml
 
 # Claude Code per-project memory (never commit)
 .claude/
+
+# Local tool caches
+.codex-home/
+.xcode-derived-data/
+.xcode-source-packages/

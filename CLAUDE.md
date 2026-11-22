@@ -349,6 +349,13 @@ apply_transition(name="Flow")         # apply Flow transition there
 When clips don't have enough extra media beyond their edges for a transition, FCP normally
 shows a dialog offering to ripple trim. SpliceKit adds a third option: **"Use Freeze Frames"**.
 
+**FCP 13:** FCP 13.0 no longer asks first. It inserts the transition, ripple-trims, and
+then shows "Clips were trimmed to create the transition." (Keep Transition / Remove
+Transition), so the "Use Freeze Frames" button only appears on FCP 12.x. On FCP 13,
+`apply_transition()` (default `freeze_extend=True`) answers that alert with Keep Transition
+and returns `"rippleTrimmed": true`; with `freeze_extend=False` the native alert is left for
+the user.
+
 - **UI button**: Whenever the "not enough extra media" dialog appears (including manual use),
   a "Use Freeze Frames" button is added. It extends clip edges with freeze frames and
   re-applies the transition without shortening the project.
@@ -480,7 +487,7 @@ detect_beats(file_path="/path/to/song.mp3")         # detect beats, bars, sectio
 detect_beats(file_path="song.mp3", sensitivity=0.8) # more sensitive
 detect_beats(file_path="song.mp3", min_bpm=120, max_bpm=180) # for fast music
 ```
-Build first: `swiftc -O -o build/beat-detector tools/beat-detector.swift`
+Build first: `make tools` (builds `build/beat-detector`)
 
 ## Song Cut (Beat-Synced Video Assembly)
 
@@ -859,11 +866,11 @@ The `tools/` directory contains scripts for applying runtime metadata to IDA Pro
 
 ```bash
 # Step 1: Export runtime metadata from live FCP
-python3 tools/fcp_runtime_export.py --binary Flexo -o ida_export
+python3 tools/reverse-engineering/fcp_runtime_export.py --binary Flexo -o ida_export
 
 # Step 2: Run IDA headless with metadata enrichment + decompile
 RUNTIME_JSON=ida_export/Flexo.json DECOMPILE_OUTPUT_DIR=output \
-  idat -A -S"tools/ida_apply_and_decompile.py" /path/to/Flexo
+  idat -A -S"tools/reverse-engineering/ida_apply_and_decompile.py" /path/to/Flexo
 ```
 
 **What the IDA script does:**
@@ -876,11 +883,11 @@ RUNTIME_JSON=ida_export/Flexo.json DECOMPILE_OUTPUT_DIR=output \
 7. Triggers type propagation across the entire binary
 
 **Tools:**
-- `tools/fcp_runtime_export.py` — Collection script (connects to SpliceKit, dumps JSON per binary)
-- `tools/ida_apply_and_decompile.py` — IDAPython headless script (applies metadata + decompiles)
-- `tools/ida_objc_types.py` — ObjC type encoding parser (converts `@"NSArray"` → `NSArray *`)
-- `tools/ida_import_runtime.py` — Interactive IDAPython script (for use inside IDA GUI)
-- `tools/batch_enhanced_decompile.sh` — Batch process all 53 FCP binaries
+- `tools/reverse-engineering/fcp_runtime_export.py` — Collection script (connects to SpliceKit, dumps JSON per binary)
+- `tools/reverse-engineering/ida_apply_and_decompile.py` — IDAPython headless script (applies metadata + decompiles)
+- `tools/reverse-engineering/ida_objc_types.py` — ObjC type encoding parser (converts `@"NSArray"` → `NSArray *`)
+- `tools/reverse-engineering/ida_import_runtime.py` — Interactive IDAPython script (for use inside IDA GUI)
+- `tools/reverse-engineering/batch_enhanced_decompile.sh` — Batch process all 53 FCP binaries
 
 ## In-Process Debugging (Debugger Parity)
 
@@ -1091,6 +1098,6 @@ and complete cookbook examples.
 - `docs/CONTENT_EXCHANGE_GUIDE.md` — Content exchange mechanisms
 - `docs/FLEXMUSIC_AND_MONTAGE_GUIDE.md` — FlexMusic & Montage Maker
 - `docs/DEBUG_TOOLS_GUIDE.md` — In-process debugging (tracing, watching, crash handling, eval, hot-loading)
-- `tools/fcp_runtime_export.py` — Export runtime metadata for IDA Pro (usage: `--help`)
-- `tools/ida_apply_and_decompile.py` — IDAPython headless: apply metadata + decompile all functions
-- `tools/batch_enhanced_decompile.sh` — Batch decompile all 53 FCP binaries with runtime enrichment
+- `tools/reverse-engineering/fcp_runtime_export.py` — Export runtime metadata for IDA Pro (usage: `--help`)
+- `tools/reverse-engineering/ida_apply_and_decompile.py` — IDAPython headless: apply metadata + decompile all functions
+- `tools/reverse-engineering/batch_enhanced_decompile.sh` — Batch decompile all 53 FCP binaries with runtime enrichment

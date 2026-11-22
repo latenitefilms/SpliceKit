@@ -29,7 +29,6 @@ if [[ -z "${SOURCE_APP:-}" ]]; then
 fi
 DEFAULT_DEST="$HOME/Applications/SpliceKit"
 DEST_DIR="${DEST_DIR:-$DEFAULT_DEST}"
-APP_NAME="$(basename "$SOURCE_APP")"
 BRIDGE_PORT=9876
 VERSION="2.0.0"
 
@@ -51,10 +50,13 @@ step()  { echo -e "\n${CYAN}${BOLD}=== $* ===${NC}"; }
 detect_sign_identity() {
     /usr/bin/security find-identity -v -p codesigning 2>/dev/null | \
         awk '
-            /"Apple Development:/ { print $2; exit }
+            /"Apple Development:/ { print $2; printed = 1; exit }
             /"Developer ID Application:/ && developer == "" { developer = $2 }
             /[0-9]+\) [0-9A-F]+ "/ && first == "" { first = $2 }
             END {
+                # Local fix: awk still runs END after exit, which printed a second
+                # identity and broke codesign ("no identity found").
+                if (printed) exit;
                 if (developer != "") print developer;
                 else if (first != "") print first;
             }'
@@ -82,12 +84,6 @@ sign_modded_app() {
     # fail with "code object is not signed at all" on rebuild / no-copy flows.
     xattr -cr "$MODDED_APP" 2>/dev/null || true
 
-    if ! sign_if_present "$identity" "$MODDED_APP/Contents/PlugIns/Codecs/SpliceKitBRAWDecoder.bundle"; then
-        return 1
-    fi
-    if ! sign_if_present "$identity" "$MODDED_APP/Contents/PlugIns/FormatReaders/SpliceKitBRAWImport.bundle"; then
-        return 1
-    fi
     if ! sign_if_present "$identity" "$MODDED_APP/Contents/PlugIns/Codecs/SpliceKitVP9Decoder.bundle"; then
         return 1
     fi
@@ -167,6 +163,9 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# Derive the app name after argument parsing so --source picks the right
+# destination name (e.g. "Final Cut Pro Creator Studio.app").
+APP_NAME="$(basename "$SOURCE_APP")"
 MODDED_APP="$DEST_DIR/$APP_NAME"
 
 # ============================================================
@@ -320,16 +319,12 @@ if [ -d "$LUA_DIR" ]; then
     log "Built: $LUA_LIB"
 fi
 
-info "Compiling ${#SOURCES[@]} source files..."
-clang -arch arm64 -arch x86_64 \
-    -mmacosx-version-min=14.0 \
-    -framework Foundation -framework AppKit -framework AVFoundation -framework Speech -framework CoreServices \
-    -fobjc-arc -fmodules -Wno-deprecated-declarations \
-    -undefined dynamic_lookup -dynamiclib \
-    -install_name @rpath/SpliceKit.framework/Versions/A/SpliceKit \
-    -I "$REPO_DIR/Sources" \
-    "${SOURCES[@]}" $LUA_FLAGS \
-    -o "$BUILD_DIR/SpliceKit" 2>&1
+info "Compiling ${#SOURCES[@]} source files via Makefile (canonical flags: Sentry, Metal, Vision, C++)..."
+# Local change: the inline clang line shipped here was stale (no Sentry framework,
+# missing frameworks, no C++ lib). The Makefile is the canonical build the GUI
+# patcher uses, so delegate to it.
+make -C "$REPO_DIR" all 2>&1 | tail -5
+[[ -f "$BUILD_DIR/SpliceKit" ]] || { err "Makefile build failed (see output above)"; exit 1; }
 
 log "Built: $(file "$BUILD_DIR/SpliceKit" | grep -o 'universal.*')"
 
@@ -347,9 +342,13 @@ cp "$BUILD_DIR/SpliceKit" "$FW_DIR/Versions/A/SpliceKit"
 
 # Create symlinks. Use -n so repeated patch runs replace the symlink itself
 # instead of following it into Versions/A and creating recursive loops.
-cd "$FW_DIR/Versions" && ln -sfn A Current
-cd "$FW_DIR" && ln -sfn Versions/Current/SpliceKit SpliceKit
-cd "$FW_DIR" && ln -sfn Versions/Current/Resources Resources
+# Run in subshells so the script's working directory is unchanged: Step 7 writes
+# .mcp.json into the current directory, and leaving the cwd inside the framework
+# dropped that file into the signed bundle ("unsealed contents present in the
+# root directory of an embedded framework").
+(cd "$FW_DIR/Versions" && ln -sfn A Current)
+(cd "$FW_DIR" && ln -sfn Versions/Current/SpliceKit SpliceKit)
+(cd "$FW_DIR" && ln -sfn Versions/Current/Resources Resources)
 
 # Create Info.plist
 cat > "$FW_DIR/Versions/A/Resources/Info.plist" << 'PLIST'
@@ -369,6 +368,19 @@ PLIST
 
 log "Framework installed"
 
+# SpliceKit no longer ships BRAW support (use BRAW Toolbox instead). Remove
+# bundles left behind by older SpliceKit versions so they don't compete with
+# third-party BRAW Media Extensions.
+for legacy in \
+    "$MODDED_APP/Contents/PlugIns/Codecs/SpliceKitBRAWDecoder.bundle" \
+    "$MODDED_APP/Contents/PlugIns/FormatReaders/SpliceKitBRAWImport.bundle" \
+    "$MODDED_APP/Contents/Extensions/SpliceKitBRAWRAWProcessor.appex"; do
+    if [[ -e "$legacy" ]]; then
+        rm -rf "$legacy"
+        log "Removed legacy $(basename "$legacy")"
+    fi
+done
+
 # ============================================================
 # Step 4: Inject LC_LOAD_DYLIB
 # ============================================================
@@ -377,7 +389,9 @@ step "Step 4: Injecting dylib into FCP binary"
 BINARY="$MODDED_APP/Contents/MacOS/Final Cut Pro"
 
 # Check if already injected
-if otool -L "$BINARY" 2>/dev/null | grep -q SpliceKit; then
+# Local fix: match the load command itself, not the otool header line, which
+# already contains "SpliceKit" via the ~/Applications/SpliceKit/ install path.
+if otool -L "$BINARY" 2>/dev/null | grep -q '@rpath/SpliceKit.framework/Versions/A/SpliceKit'; then
     log "Already injected (skipping)"
 else
     # Build insert_dylib if needed
@@ -419,6 +433,16 @@ fi
 # ============================================================
 step "Step 5: Re-signing (this takes a moment)"
 
+# Add speech, camera and microphone usage descriptions (transcripts, LiveCam, dictation).
+# This must happen BEFORE re-signing: Info.plist is sealed by the signature, so editing
+# it afterwards leaves an invalid signature and launchd refuses to spawn the app
+# ("Launchd job spawn failed", POSIX error 163).
+/usr/libexec/PlistBuddy -c "Set :NSSpeechRecognitionUsageDescription 'SpliceKit uses speech recognition for transcript editing and command palette voice dictation inside Final Cut Pro.'" "$MODDED_APP/Contents/Info.plist" 2>/dev/null || /usr/libexec/PlistBuddy -c "Add :NSSpeechRecognitionUsageDescription string 'SpliceKit uses speech recognition for transcript editing and command palette voice dictation inside Final Cut Pro.'" "$MODDED_APP/Contents/Info.plist" 2>/dev/null || true
+/usr/libexec/PlistBuddy -c "Set :NSMicrophoneUsageDescription 'SpliceKit uses the microphone for LiveCam capture and command palette voice dictation inside Final Cut Pro.'" "$MODDED_APP/Contents/Info.plist" 2>/dev/null || /usr/libexec/PlistBuddy -c "Add :NSMicrophoneUsageDescription string 'SpliceKit uses the microphone for LiveCam capture and command palette voice dictation inside Final Cut Pro.'" "$MODDED_APP/Contents/Info.plist" 2>/dev/null || true
+/usr/libexec/PlistBuddy -c "Set :NSCameraUsageDescription 'SpliceKit LiveCam uses the camera for native webcam recording inside Final Cut Pro.'" "$MODDED_APP/Contents/Info.plist" 2>/dev/null || /usr/libexec/PlistBuddy -c "Add :NSCameraUsageDescription string 'SpliceKit LiveCam uses the camera for native webcam recording inside Final Cut Pro.'" "$MODDED_APP/Contents/Info.plist" 2>/dev/null || true
+log "Speech recognition, camera and microphone usage descriptions configured"
+
+
 # Create entitlements
 ENTITLEMENTS="$BUILD_DIR/entitlements.plist"
 cat > "$ENTITLEMENTS" << 'ENT'
@@ -430,6 +454,8 @@ cat > "$ENTITLEMENTS" << 'ENT'
     <key>com.apple.security.cs.disable-library-validation</key><true/>
     <key>com.apple.security.cs.allow-dyld-environment-variables</key><true/>
     <key>com.apple.security.get-task-allow</key><true/>
+    <!-- Preserve Photos imports when replacing FCP's original entitlements. -->
+    <key>com.apple.security.personal-information.photos-library</key><true/>
 </dict>
 </plist>
 ENT
@@ -470,26 +496,36 @@ else
 fi
 
 # Verify entitlements applied
-if codesign -d --entitlements - "$MODDED_APP" 2>&1 | grep -q "disable-library-validation"; then
-    log "Entitlements applied (no sandbox, library validation disabled)"
-else
-    err "Entitlements not applied correctly"
+SIGNED_ENTITLEMENTS="$BUILD_DIR/signed-entitlements.plist"
+if ! codesign -d --entitlements - --xml "$MODDED_APP" > "$SIGNED_ENTITLEMENTS"; then
+    err "Unable to read signed application entitlements"
     exit 1
 fi
+
+for entitlement in \
+    com.apple.security.cs.disable-library-validation \
+    com.apple.security.personal-information.photos-library; do
+    # Escape dots so plutil treats each entitlement as a single dictionary key.
+    keypath="${entitlement//./\\.}"
+    if [[ "$(/usr/bin/plutil -extract "$keypath" raw -expect bool -o - "$SIGNED_ENTITLEMENTS" 2>/dev/null)" != "true" ]]; then
+        err "Required entitlement missing or disabled: $entitlement"
+        exit 1
+    fi
+done
+log "Entitlements applied (library validation disabled, Photos library access enabled)"
 
 # ============================================================
 # Step 6: Set up NSUserDefaults
 # ============================================================
 step "Step 6: Configuring defaults"
 
-defaults write com.apple.FinalCut CloudContentFirstLaunchCompleted -bool true 2>/dev/null || true
-defaults write com.apple.FinalCut FFCloudContentDisabled -bool true 2>/dev/null || true
-log "CloudContent defaults set"
+# Use the patched app's own bundle ID: Creator Studio is com.apple.FinalCutApp,
+# so writing to com.apple.FinalCut would leave its CloudContent flow enabled.
+FCP_BUNDLE_ID=$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$MODDED_APP/Contents/Info.plist" 2>/dev/null || echo "com.apple.FinalCut")
+defaults write "$FCP_BUNDLE_ID" CloudContentFirstLaunchCompleted -bool true 2>/dev/null || true
+defaults write "$FCP_BUNDLE_ID" FFCloudContentDisabled -bool true 2>/dev/null || true
+log "CloudContent defaults set ($FCP_BUNDLE_ID)"
 
-# Add speech and microphone usage descriptions for transcript + command palette dictation
-/usr/libexec/PlistBuddy -c "Set :NSSpeechRecognitionUsageDescription 'SpliceKit uses speech recognition for transcript editing and command palette voice dictation inside Final Cut Pro.'" "$MODDED_APP/Contents/Info.plist" 2>/dev/null || /usr/libexec/PlistBuddy -c "Add :NSSpeechRecognitionUsageDescription string 'SpliceKit uses speech recognition for transcript editing and command palette voice dictation inside Final Cut Pro.'" "$MODDED_APP/Contents/Info.plist" 2>/dev/null || true
-/usr/libexec/PlistBuddy -c "Set :NSMicrophoneUsageDescription 'SpliceKit uses the microphone for LiveCam capture and command palette voice dictation inside Final Cut Pro.'" "$MODDED_APP/Contents/Info.plist" 2>/dev/null || /usr/libexec/PlistBuddy -c "Add :NSMicrophoneUsageDescription string 'SpliceKit uses the microphone for LiveCam capture and command palette voice dictation inside Final Cut Pro.'" "$MODDED_APP/Contents/Info.plist" 2>/dev/null || true
-log "Speech recognition and microphone permissions configured"
 
 # ============================================================
 # Step 7: Create MCP config

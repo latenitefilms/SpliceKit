@@ -250,6 +250,6 @@ Version-specific UTI alone (without generic) does NOT enable paste.
 
 ## Related Documentation
 
-- `docs/FCP_PASTEBOARD_MEDIA_LINKING.md` — Pasteboard format testing results
+- `docs/research/FCP_PASTEBOARD_MEDIA_LINKING.md` — Pasteboard format testing results
 - `docs/CAPTION_SYSTEM_INTERNALS.md` — Caption system architecture
 - `docs/FCPXML_FORMAT_REFERENCE.md` — FCPXML specification

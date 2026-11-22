@@ -6,6 +6,71 @@ notarization ticket, and Sparkle signature live on the
 Sparkle users are notified automatically; manual download is available from the
 same page or via `appcast.xml`.
 
+## [Unreleased]
+
+### Added
+- **Final Cut Pro 13.0 and Final Cut Pro 13.0 Creator Studio are supported.**
+  SpliceKit loads, starts its control server and installs its CloudContent
+  guards on FCP 13.0 (build 460023). Clip pasteboard writes fall back to FCP
+  13's `writeAnchoredObjects:userInfo:options:`, and FCP 13's new MotionVFX
+  content catalog is left untouched.
+- **Final Cut Pro Creator Studio 13 no longer crashes at launch.** Its new
+  MotionVFX remote-content service reached CloudKit (unavailable to a re-signed
+  app) and then requested a nil URL; SpliceKit now returns an empty remote
+  context and skips URL-less MotionVFX requests. Bundled MotionVFX content is
+  unaffected; online MotionVFX downloads are unavailable in the patched app.
+
+### Changed
+- **Patcher updates now come from this repository.** Sparkle reads
+  `appcast.xml` from `latenitefilms/SpliceKit`, and releases are published
+  here.
+- **FCP 13 no longer asks before ripple-trimming for a transition**, so
+  SpliceKit's "Use Freeze Frames" dialog button can no longer appear there. FCP
+  13 inserts the transition and then shows "Clips were trimmed to create the
+  transition." `apply_transition()` now keeps the transition, answers that alert
+  for you, and reports `rippleTrimmed` (previously the API call silently removed
+  the transition on FCP 13).
+- **Photos imports work in the patched app again.** The Photos-library
+  entitlement is now preserved when FCP is re-signed (upstream #98).
+- **The media-extension crash guard is now purely a crash guard.** It still
+  stops an incomplete third-party Media Extension from aborting FCP, but no
+  longer overrides which decoder FCP picks.
+
+### Removed
+- **Built-in Blackmagic RAW support has been removed. Use
+  [BRAW Toolbox](https://brawtoolbox.io) for `.braw` media.** This removes the
+  BRAW decoder, format reader, RAW processor, RAW settings HUD and inspector
+  tile, the `braw.*` RPCs and `braw_probe` MCP tool, and the BRAW-only
+  Immersive Preview (FCP 360 Viewer) with its `immersivePreview.*` RPCs. The
+  Vision Pro preview panel remains. Patching or updating removes SpliceKit
+  BRAW bundles left in the patched app by older versions.
+
+### Fixed
+- **Release builds include `parakeet-transcriber` and `whisper-transcriber`.**
+  The build looked for their sources in a folder that is no longer in the
+  repository, so releases skipped them; it now uses `tools/`. `make tools` also
+  builds `beat-detector` for the MCP `detect_beats()` tool.
+- **`browser.appendClip`, `browser.insertClip` and `browser.connectClip` find
+  clips by name or index again.** They enumerated events with `ownedClips`,
+  which FCP's event records don't implement, so only handles worked.
+- **RPC calls that open a modal panel (such as `project.createLibrary`) return a
+  clear "did not finish in time" error** instead of an internal nil-insert error.
+- **`+[CloudContentFeatureFlag isEnabled]` no longer writes a log line every
+  second**; each blocked call is logged once.
+- **The inspector no longer goes blank after switching away from FCP and back**
+  (upstream #94).
+- **Skimming with snapping on no longer crashes FCP on Intel Macs** (upstream
+  #92).
+- **Transcription is more reliable:** the patcher deploys
+  `whisper-transcriber`, one undecodable clip no longer aborts a Parakeet batch,
+  and `parakeet-transcriber` builds against current FluidAudio (upstream #85).
+- **`patcher/patch_fcp.sh` produces a launchable app again.** It builds through
+  the Makefile, detects existing injection correctly, picks one signing
+  identity, signs after editing `Info.plist`, no longer writes `.mcp.json` into
+  the signed framework, names the destination correctly for
+  `--source "…Creator Studio.app"`, and writes Creator Studio's CloudContent
+  defaults to `com.apple.FinalCutApp` (upstream #87 plus follow-up fixes).
+
 ## [3.3.9] — 2026-08-29
 
 ### Added

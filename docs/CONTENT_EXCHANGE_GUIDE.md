@@ -601,7 +601,7 @@ import_media(["/path/to/clip1.mov", "/path/to/clip2.mov"])
 ### Pasteboard Integration
 
 SpliceKit can work with FCP's native pasteboard for attribute-preserving operations
-(see [FCP Pasteboard & Media Linking](FCP_PASTEBOARD_MEDIA_LINKING.md)):
+(see [FCP Pasteboard & Media Linking](research/FCP_PASTEBOARD_MEDIA_LINKING.md)):
 
 ```python
 # Copy/paste with attributes preserved

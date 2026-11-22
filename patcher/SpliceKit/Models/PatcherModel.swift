@@ -268,15 +268,40 @@ class PatcherModel: ObservableObject {
         }
     }
 
+    /// SpliceKit no longer ships BRAW support (BRAW Toolbox covers it). Older
+    /// SpliceKit versions installed their own BRAW decoder, format reader and RAW
+    /// processor into the modded app; remove them so they can't compete with
+    /// third-party BRAW Media Extensions.
+    private nonisolated func removeLegacyBRAWBundles(from moddedApp: String) async {
+        let legacyBundles = [
+            moddedApp + "/Contents/PlugIns/Codecs/SpliceKitBRAWDecoder.bundle",
+            moddedApp + "/Contents/PlugIns/FormatReaders/SpliceKitBRAWImport.bundle",
+            moddedApp + "/Contents/Extensions/SpliceKitBRAWRAWProcessor.appex",
+        ]
+        for path in legacyBundles where FileManager.default.fileExists(atPath: path) {
+            shell("rm -rf \(shellQuote(path))")
+            await logAsync("Removed legacy \((path as NSString).lastPathComponent)")
+        }
+    }
+
     private func deployTools(to toolsDir: String,
                              silenceBin: String,
-                             parakeetBin: String) async {
+                             parakeetBin: String,
+                             whisperBin: String) async {
         shell("mkdir -p \(shellQuote(toolsDir))")
         if FileManager.default.fileExists(atPath: silenceBin) {
             shell("cp \(shellQuote(silenceBin)) \(shellQuote(toolsDir + "/silence-detector"))")
         }
         if FileManager.default.fileExists(atPath: parakeetBin) {
             shell("cp \(shellQuote(parakeetBin)) \(shellQuote(toolsDir + "/parakeet-transcriber"))")
+        }
+        if FileManager.default.fileExists(atPath: whisperBin) {
+            shell("cp \(shellQuote(whisperBin)) \(shellQuote(toolsDir + "/whisper-transcriber"))")
+        } else {
+            // Loud warning instead of silently skipping: a missing whisper-transcriber
+            // leaves the social-captions Whisper engines reporting "not found" at runtime
+            // even though the patch otherwise "succeeds".
+            await logAsync("WARNING: whisper-transcriber not staged; Whisper caption engines will be unavailable. Re-download the patcher if this persists.")
         }
 
         for toolName in ["yt-dlp", "ffmpeg"] {
@@ -889,6 +914,12 @@ class PatcherModel: ObservableObject {
             shell("cp '\(bundledParakeet)' '\(parakeetBin)'")
         }
 
+        let whisperBin = buildDir + "/whisper-transcriber"
+        let bundledWhisper = (Bundle.main.resourcePath ?? "") + "/tools/whisper-transcriber"
+        if FileManager.default.fileExists(atPath: bundledWhisper) {
+            shell("cp '\(bundledWhisper)' '\(whisperBin)'")
+        }
+
         await completeStepAsync(.buildDylib)
 
         // Step 4: Create macOS framework bundle (Versions/A + symlinks)
@@ -931,36 +962,11 @@ class PatcherModel: ObservableObject {
             shell("cp '\(sentryConfig.path)' '\(resourcesDir)/SpliceKitSentryConfig.plist'")
         }
 
-        // Install BRAW plugin bundles into FCP.app/Contents/PlugIns/
-        // Without these, FCP has no registered VideoToolbox decoder or
-        // MediaToolbox format reader for .braw files — drag/drop and Import
-        // Media both silently fail. The bundles were staged into our app
-        // Resources by bundle_resources.sh.
-        let brawBundleSource = (Bundle.main.resourcePath ?? "") + "/BRAWPlugins"
-        if FileManager.default.fileExists(atPath: brawBundleSource) {
-            let moddedPlugIns = moddedApp + "/Contents/PlugIns"
-            let moddedCodecs = moddedPlugIns + "/Codecs"
-            let moddedFormatReaders = moddedPlugIns + "/FormatReaders"
-            shell("mkdir -p '\(moddedCodecs)' '\(moddedFormatReaders)'")
-            let decoderSource = brawBundleSource + "/Codecs/SpliceKitBRAWDecoder.bundle"
-            let readerSource = brawBundleSource + "/FormatReaders/SpliceKitBRAWImport.bundle"
-            if FileManager.default.fileExists(atPath: decoderSource) {
-                shell("rm -rf '\(moddedCodecs)/SpliceKitBRAWDecoder.bundle'")
-                shell("cp -R '\(decoderSource)' '\(moddedCodecs)/SpliceKitBRAWDecoder.bundle'")
-                await logAsync("Installed SpliceKitBRAWDecoder.bundle")
-            }
-            if FileManager.default.fileExists(atPath: readerSource) {
-                shell("rm -rf '\(moddedFormatReaders)/SpliceKitBRAWImport.bundle'")
-                shell("cp -R '\(readerSource)' '\(moddedFormatReaders)/SpliceKitBRAWImport.bundle'")
-                await logAsync("Installed SpliceKitBRAWImport.bundle")
-            }
-        } else {
-            await logAsync("WARNING: BRAW plugin bundles missing from patcher Resources")
-        }
+        await removeLegacyBRAWBundles(from: moddedApp)
 
         // Deploy tools
         let toolsDir = NSHomeDirectory() + "/Applications/SpliceKit/tools"
-        await deployTools(to: toolsDir, silenceBin: silenceBin, parakeetBin: parakeetBin)
+        await deployTools(to: toolsDir, silenceBin: silenceBin, parakeetBin: parakeetBin, whisperBin: whisperBin)
 
         await logAsync("Framework installed")
         await completeStepAsync(.installFramework)
@@ -1004,6 +1010,8 @@ class PatcherModel: ObservableObject {
             <key>com.apple.security.cs.disable-library-validation</key><true/>
             <key>com.apple.security.cs.allow-dyld-environment-variables</key><true/>
             <key>com.apple.security.get-task-allow</key><true/>
+            <!-- Preserve Photos imports when replacing FCP's original entitlements. -->
+            <key>com.apple.security.personal-information.photos-library</key><true/>
             <key>com.apple.security.device.camera</key><true/>
             <key>com.apple.security.device.microphone</key><true/>
             <key>com.apple.security.device.audio-input</key><true/>
@@ -1019,9 +1027,7 @@ class PatcherModel: ObservableObject {
         // Sign inside-out: any nested SpliceKit plug-in bundles → framework → app.
         let signSpliceKitBundles: (String) -> String = { ident in
             let bundlePaths = [
-                moddedApp + "/Contents/PlugIns/Codecs/SpliceKitBRAWDecoder.bundle",
                 moddedApp + "/Contents/PlugIns/Codecs/SpliceKitVP9Decoder.bundle",
-                moddedApp + "/Contents/PlugIns/FormatReaders/SpliceKitBRAWImport.bundle",
                 moddedApp + "/Contents/PlugIns/FormatReaders/SpliceKitMKVImport.bundle"
             ]
             let parts = bundlePaths
@@ -1119,10 +1125,12 @@ class PatcherModel: ObservableObject {
         }
 
         // Verify app entitlements
-        let entOut = shell("codesign -d --entitlements - '\(moddedApp)' 2>&1")
-        let entKeys = ["app-sandbox", "disable-library-validation", "allow-dyld-environment-variables", "get-task-allow", "icloud-services"]
+        let entOut = shell("codesign -d --entitlements - --xml \(shellQuote(moddedApp)) 2>/dev/null")
+        let entKeys = ["app-sandbox", "disable-library-validation", "allow-dyld-environment-variables", "get-task-allow", "photos-library"]
         for key in entKeys {
-            let found = entOut.contains(key)
+            let found = key == "photos-library"
+                ? photosLibraryEntitlementEnabled(in: entOut)
+                : entOut.contains(key)
             await logAsync("Entitlement \(key): \(found ? "present" : "MISSING")")
         }
 
@@ -1167,6 +1175,12 @@ class PatcherModel: ObservableObject {
         if FileManager.default.fileExists(atPath: bundledParakeet) {
             shell("cp '\(bundledParakeet)' '\(parakeetBin)'")
         }
+
+        let whisperBin = buildDir + "/whisper-transcriber"
+        let bundledWhisper = (Bundle.main.resourcePath ?? "") + "/tools/whisper-transcriber"
+        if FileManager.default.fileExists(atPath: bundledWhisper) {
+            shell("cp '\(bundledWhisper)' '\(whisperBin)'")
+        }
         await completeStepAsync(.buildDylib)
 
         // Install framework (overwrite existing binary)
@@ -1205,32 +1219,11 @@ class PatcherModel: ObservableObject {
             shell("cp '\(sentryConfig.path)' '\(resourcesDir)/SpliceKitSentryConfig.plist'")
         }
 
-        // Refresh BRAW plugin bundles on upgrade. Same reasoning as fresh
-        // install — FCP needs the VT decoder + FormatReader bundles in
-        // PlugIns/ for .braw files to be recognized and playable.
-        let brawBundleSource = (Bundle.main.resourcePath ?? "") + "/BRAWPlugins"
-        if FileManager.default.fileExists(atPath: brawBundleSource) {
-            let moddedPlugIns = moddedApp + "/Contents/PlugIns"
-            let moddedCodecs = moddedPlugIns + "/Codecs"
-            let moddedFormatReaders = moddedPlugIns + "/FormatReaders"
-            shell("mkdir -p '\(moddedCodecs)' '\(moddedFormatReaders)'")
-            let decoderSource = brawBundleSource + "/Codecs/SpliceKitBRAWDecoder.bundle"
-            let readerSource = brawBundleSource + "/FormatReaders/SpliceKitBRAWImport.bundle"
-            if FileManager.default.fileExists(atPath: decoderSource) {
-                shell("rm -rf '\(moddedCodecs)/SpliceKitBRAWDecoder.bundle'")
-                shell("cp -R '\(decoderSource)' '\(moddedCodecs)/SpliceKitBRAWDecoder.bundle'")
-                await logAsync("Updated SpliceKitBRAWDecoder.bundle")
-            }
-            if FileManager.default.fileExists(atPath: readerSource) {
-                shell("rm -rf '\(moddedFormatReaders)/SpliceKitBRAWImport.bundle'")
-                shell("cp -R '\(readerSource)' '\(moddedFormatReaders)/SpliceKitBRAWImport.bundle'")
-                await logAsync("Updated SpliceKitBRAWImport.bundle")
-            }
-        }
+        await removeLegacyBRAWBundles(from: moddedApp)
 
         // Deploy tools
         let toolsDir = NSHomeDirectory() + "/Applications/SpliceKit/tools"
-        await deployTools(to: toolsDir, silenceBin: silenceBin, parakeetBin: parakeetBin)
+        await deployTools(to: toolsDir, silenceBin: silenceBin, parakeetBin: parakeetBin, whisperBin: whisperBin)
 
         await logAsync("Framework updated")
         await completeStepAsync(.installFramework)
@@ -1255,6 +1248,8 @@ class PatcherModel: ObservableObject {
             <key>com.apple.security.cs.disable-library-validation</key><true/>
             <key>com.apple.security.cs.allow-dyld-environment-variables</key><true/>
             <key>com.apple.security.get-task-allow</key><true/>
+            <!-- Preserve Photos imports when replacing FCP's original entitlements. -->
+            <key>com.apple.security.personal-information.photos-library</key><true/>
             <key>com.apple.security.device.camera</key><true/>
             <key>com.apple.security.device.microphone</key><true/>
             <key>com.apple.security.device.audio-input</key><true/>
@@ -1266,9 +1261,7 @@ class PatcherModel: ObservableObject {
         // Sign inside-out: any nested SpliceKit plug-in bundles → framework → app.
         let signSpliceKitBundles: (String) -> String = { ident in
             let bundlePaths = [
-                moddedApp + "/Contents/PlugIns/Codecs/SpliceKitBRAWDecoder.bundle",
                 moddedApp + "/Contents/PlugIns/Codecs/SpliceKitVP9Decoder.bundle",
-                moddedApp + "/Contents/PlugIns/FormatReaders/SpliceKitBRAWImport.bundle",
                 moddedApp + "/Contents/PlugIns/FormatReaders/SpliceKitMKVImport.bundle"
             ]
             let parts = bundlePaths
@@ -1349,10 +1342,13 @@ class PatcherModel: ObservableObject {
             await logAsync("WARNING: Framework binary NOT found")
         }
 
-        let entOut = shell("codesign -d --entitlements - '\(moddedApp)' 2>&1")
-        let entKeys = ["app-sandbox", "disable-library-validation", "allow-dyld-environment-variables", "get-task-allow"]
+        let entOut = shell("codesign -d --entitlements - --xml \(shellQuote(moddedApp)) 2>/dev/null")
+        let entKeys = ["app-sandbox", "disable-library-validation", "allow-dyld-environment-variables", "get-task-allow", "photos-library"]
         for key in entKeys {
-            await logAsync("Entitlement \(key): \(entOut.contains(key) ? "present" : "MISSING")")
+            let found = key == "photos-library"
+                ? photosLibraryEntitlementEnabled(in: entOut)
+                : entOut.contains(key)
+            await logAsync("Entitlement \(key): \(found ? "present" : "MISSING")")
         }
 
         await logAsync("Log saved to: ~/Library/Logs/SpliceKit/patcher.log")

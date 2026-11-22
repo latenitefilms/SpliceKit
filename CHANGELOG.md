@@ -51,13 +51,19 @@ same page or via `appcast.xml`.
   BRAW bundles left in the patched app by older versions.
 
 ### Fixed
+- **The FCP Native transcription engine works again.** It called
+  `modalTranscriptsForClips:locale:`, which Final Cut Pro replaced with
+  `modalTranscriptsForClips:locale:progressTitle:` (12.3 and 13 only have the
+  new form), so every FCP Native transcription failed.
 - **"Delete silences" no longer removes clips that couldn't be transcribed.**
   When one clip in a Parakeet batch fails (a still, graphic or clip with no
   decodable audio), the rest of the batch still transcribes, but that clip's
   range used to read as one long pause. Untranscribed clips (Parakeet, Apple
   Speech and FCP Native) are now excluded from silence detection, stay excluded
   after later edits move them, and the panel reports how many there were. A gap
-  split by such a clip now shows every remaining pause marker.
+  split by such a clip now shows every remaining pause marker. With FCP Native,
+  a second clip cut from the same file gets its words when its range was
+  transcribed, and any part of it FCP wasn't asked to transcribe is protected.
 - **Release builds include `parakeet-transcriber` and `whisper-transcriber`.**
   The build looked for their sources in a folder that is no longer in the
   repository, so releases skipped them; it now uses `tools/`. `make tools` also

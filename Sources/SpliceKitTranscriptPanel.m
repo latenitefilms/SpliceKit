@@ -156,19 +156,26 @@ static SpliceKitTranscriptWord *SpliceKitTranscript_wordFromDictionary(NSDiction
 // range can be recomputed after edits (see -remapUntranscribedRangesToClips:).
 // trimStart/duration are in FCP's timecode space, as returned by
 // -collectClipInfosForSequence:primaryObject:errorMessage:.
-static NSDictionary *SpliceKitTranscript_untranscribedEntry(NSDictionary *clipInfo) {
+static NSDictionary *SpliceKitTranscript_untranscribedEntryForSourceRange(NSDictionary *clipInfo,
+                                                                         double sourceStart,
+                                                                         double sourceEnd) {
     NSURL *mediaURL = clipInfo[@"mediaURL"];
     double trimStart = [clipInfo[@"trimStart"] doubleValue];
-    double duration = [clipInfo[@"duration"] doubleValue];
-    double timelineStart = [clipInfo[@"timelineStart"] doubleValue];
+    double timelineStart = [clipInfo[@"timelineStart"] doubleValue] + (sourceStart - trimStart);
     return @{
         @"path": mediaURL.path ?: @"",
         @"name": mediaURL.lastPathComponent ?: @"",
-        @"sourceStart": @(trimStart),
-        @"sourceEnd": @(trimStart + duration),
+        @"sourceStart": @(sourceStart),
+        @"sourceEnd": @(sourceEnd),
         @"timelineStart": @(timelineStart),
-        @"timelineEnd": @(timelineStart + duration),
+        @"timelineEnd": @(timelineStart + (sourceEnd - sourceStart)),
     };
+}
+
+static NSDictionary *SpliceKitTranscript_untranscribedEntry(NSDictionary *clipInfo) {
+    double trimStart = [clipInfo[@"trimStart"] doubleValue];
+    double duration = [clipInfo[@"duration"] doubleValue];
+    return SpliceKitTranscript_untranscribedEntryForSourceRange(clipInfo, trimStart, trimStart + duration);
 }
 
 static NSDictionary *SpliceKitTranscript_silenceToDictionary(SpliceKitTranscriptSilence *silence) {
@@ -1983,6 +1990,13 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
     __block NSArray *assetArray = nil;
     __block NSMapTable *clipInfosByAsset = nil;
     __block NSDictionary<NSString *, NSArray<NSDictionary *> *> *clipInfosByPath = nil;
+    // Source ranges ([start, end], FCP timecode space) actually submitted for
+    // transcription, per media path. FCP only transcribes the range of each clip it
+    // is given, so a clip skipped by the dedup below is only partly (or not at all)
+    // covered by the transcript of its file.
+    __block NSMutableDictionary<NSString *, NSMutableArray<NSArray<NSNumber *> *> *> *submittedSourceRanges =
+        [NSMutableDictionary dictionary];
+    __block BOOL submittedWholeSequence = NO;
 
     SpliceKit_executeOnMainThread(^{
         @try {
@@ -2062,6 +2076,15 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
                         }
 
                         [clipObjects addObject:candidate];
+                        if (mediaURL.path.length > 0) {
+                            NSMutableArray *ranges = submittedSourceRanges[mediaURL.path];
+                            if (!ranges) {
+                                ranges = [NSMutableArray array];
+                                submittedSourceRanges[mediaURL.path] = ranges;
+                            }
+                            double ts = [clipInfo[@"trimStart"] doubleValue];
+                            [ranges addObject:@[@(ts), @(ts + [clipInfo[@"duration"] doubleValue])]];
+                        }
                         SpliceKit_log(@"[Transcript] Item %@ has %lu assets",
                             NSStringFromClass([candidate class]), (unsigned long)[(NSSet *)itemAssets count]);
 
@@ -2092,6 +2115,7 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
             // If no items had assets, try the sequence itself
             if (clipObjects.count == 0 && [sequence respondsToSelector:assetsSel]) {
                 [clipObjects addObject:sequence];
+                submittedWholeSequence = YES;
                 SpliceKit_log(@"[Transcript] Using sequence as clip source");
             }
 
@@ -2157,10 +2181,22 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
         SpliceKit_log(@"[Transcript] Calling modalTranscriptsForClips with %lu assets, locale=%@",
                       (unsigned long)assetArray.count, localeID);
 
-        // modalTranscriptsForClips:locale: — synchronous, must be called off main thread
-        // It internally calls [clip assets] on each item, so we pass the assets array
+        // modalTranscriptsForClips:locale:progressTitle: (FCP 12.3+; the old two-argument
+        // form no longer exists) — synchronous, must be called off main thread. It
+        // internally calls [clip assets] on each item, so we pass the assets array.
+        SEL modalTitleSel = NSSelectorFromString(@"modalTranscriptsForClips:locale:progressTitle:");
         SEL modalSel = NSSelectorFromString(@"modalTranscriptsForClips:locale:");
-        id resultMap = ((id (*)(id, SEL, id, id))objc_msgSend)(coordinator, modalSel, assetArray, localeID);
+        id resultMap = nil;
+        if ([coordinator respondsToSelector:modalTitleSel]) {
+            resultMap = ((id (*)(id, SEL, id, id, id))objc_msgSend)(coordinator, modalTitleSel,
+                                                                  assetArray, localeID, @"Transcribing");
+        } else if ([coordinator respondsToSelector:modalSel]) {
+            resultMap = ((id (*)(id, SEL, id, id))objc_msgSend)(coordinator, modalSel, assetArray, localeID);
+        } else {
+            [self setErrorState:@"This version of Final Cut Pro doesn't expose FCP Native transcription. "
+                                "Try Parakeet or Apple Speech."];
+            return;
+        }
 
         if (!resultMap) {
             [self setErrorState:@"FCP transcription returned no results. Try Apple Speech engine."];
@@ -2180,6 +2216,7 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
         NSUInteger totalWords = 0;
         // Clip infos whose asset came back with a transcript (identity-based).
         NSHashTable *coveredClipInfos = [NSHashTable hashTableWithOptions:NSPointerFunctionsObjectPointerPersonality];
+        NSMutableArray<NSDictionary *> *partiallyUntranscribed = [NSMutableArray array];
 
         @try {
             // NSMapTable enumeration
@@ -2219,13 +2256,44 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
                                   NSStringFromClass([asset class]));
                     continue;
                 }
-                // Mark every clip that uses this media as covered, including clips the
-                // shared-asset dedup above left out of clipInfosByAsset.
-                for (NSDictionary *covered in matchingClipInfos) {
-                    [coveredClipInfos addObject:covered];
-                    NSString *coveredPath = ((NSURL *)covered[@"mediaURL"]).path;
-                    for (NSDictionary *sibling in (coveredPath.length > 0 ? clipInfosByPath[coveredPath] : nil)) {
-                        [coveredClipInfos addObject:sibling];
+                // Produce words for every clip that uses this media, each within its own
+                // in/out range (as the Parakeet path does). The shared-asset dedup above
+                // leaves later clips of the same file out of clipInfosByAsset, so add them
+                // back by path. Skip clips that already got words from an earlier
+                // transcript so each clip is filled exactly once, and only mark the clips
+                // that actually get words as covered.
+                NSMutableArray<NSDictionary *> *targetClipInfos = [NSMutableArray array];
+                for (NSDictionary *matched in matchingClipInfos) {
+                    NSString *matchedPath = ((NSURL *)matched[@"mediaURL"]).path;
+                    NSArray *siblings = matchedPath.length > 0 ? clipInfosByPath[matchedPath] : nil;
+                    for (NSDictionary *candidate in [@[matched] arrayByAddingObjectsFromArray:siblings ?: @[]]) {
+                        if ([coveredClipInfos containsObject:candidate]) continue;
+                        [coveredClipInfos addObject:candidate];
+                        [targetClipInfos addObject:candidate];
+
+                        // Any part of this clip's source range outside what was submitted
+                        // was never transcribed: keep it out of silence detection.
+                        NSString *candidatePath = ((NSURL *)candidate[@"mediaURL"]).path;
+                        if (submittedWholeSequence || candidatePath.length == 0) continue;
+                        double cs = [candidate[@"trimStart"] doubleValue];
+                        double ce = cs + [candidate[@"duration"] doubleValue];
+                        NSMutableArray<NSArray<NSNumber *> *> *pieces = [NSMutableArray arrayWithObject:@[@(cs), @(ce)]];
+                        for (NSArray<NSNumber *> *sub in submittedSourceRanges[candidatePath]) {
+                            double ss = sub[0].doubleValue, se = sub[1].doubleValue;
+                            NSMutableArray<NSArray<NSNumber *> *> *next = [NSMutableArray array];
+                            for (NSArray<NSNumber *> *piece in pieces) {
+                                double ps = piece[0].doubleValue, pe = piece[1].doubleValue;
+                                if (se <= ps || ss >= pe) { [next addObject:piece]; continue; }
+                                if (ss > ps) [next addObject:@[@(ps), @(ss)]];
+                                if (se < pe) [next addObject:@[@(se), @(pe)]];
+                            }
+                            pieces = next;
+                        }
+                        for (NSArray<NSNumber *> *piece in pieces) {
+                            if (piece[1].doubleValue - piece[0].doubleValue < 0.05) continue;
+                            [partiallyUntranscribed addObject:SpliceKitTranscript_untranscribedEntryForSourceRange(
+                                candidate, piece[0].doubleValue, piece[1].doubleValue)];
+                        }
                     }
                 }
 
@@ -2271,7 +2339,7 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
                     }
                 }
 
-                for (NSDictionary *clipInfo in matchingClipInfos) {
+                for (NSDictionary *clipInfo in targetClipInfos) {
                     double timelineStart = [clipInfo[@"timelineStart"] doubleValue];
                     double trimStart = [clipInfo[@"trimStart"] doubleValue];
                     double clipDuration = [clipInfo[@"duration"] doubleValue];
@@ -2314,8 +2382,14 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
 
         SpliceKit_log(@"[Transcript] Extracted %lu words from FCP native transcription", (unsigned long)totalWords);
 
-        // Clips FCP returned no transcript for are unknown content, not silence.
-        NSMutableArray<NSDictionary *> *failedClips = [NSMutableArray array];
+        // Clips FCP returned no transcript for are unknown content, not silence, as
+        // are the parts of clips outside the source ranges FCP was asked to transcribe.
+        NSMutableArray<NSDictionary *> *failedClips = [partiallyUntranscribed mutableCopy];
+        for (NSDictionary *partial in partiallyUntranscribed) {
+            SpliceKit_log(@"[Transcript] %@ source %.2f-%.2fs was not submitted for transcription; "
+                          "excluding it from silence detection", partial[@"name"],
+                          [partial[@"sourceStart"] doubleValue], [partial[@"sourceEnd"] doubleValue]);
+        }
         for (NSArray<NSDictionary *> *clipsForPath in clipInfosByPath.allValues) {
             for (NSDictionary *clipInfo in clipsForPath) {
                 if (![coveredClipInfos containsObject:clipInfo]) {

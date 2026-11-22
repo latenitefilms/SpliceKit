@@ -637,7 +637,7 @@ debug.observeNotification(action="removeAll")
 | FFImportDidBegin | Import operation starts |
 | FFQTMovieExporterFinishedNotification | Export completes |
 
-See `fcp_symbols/notifications.txt` for the full list of 337 notification names.
+See `docs/research/fcp_symbols/notifications.txt` for the full list of 337 notification names.
 
 ## Direct Timeline Actions (`timeline.directAction`)
 
@@ -905,11 +905,11 @@ timeline_action("toggleVerifyObjectAlignment")
 
 ## Symbol Dump Tool
 
-The `tools/dump_fcp_symbols.sh` script extracts metadata from FCP's binaries that
+The `tools/reverse-engineering/dump_fcp_symbols.sh` script extracts metadata from FCP's binaries that
 IDA Pro decompilation misses. Run it to generate reference files:
 
 ```bash
-./tools/dump_fcp_symbols.sh [output_dir]
+./tools/reverse-engineering/dump_fcp_symbols.sh [output_dir]
 ```
 
 Output files:
@@ -1002,7 +1002,7 @@ debug.eval(expression="NSApp.delegate", storeResult=True)
 # Use the handle to explore further...
 
 # Or check the static dump:
-# See fcp_symbols/defaults_keys.txt for 426 known feature flag keys
+# See docs/research/fcp_symbols/defaults_keys.txt for 426 known feature flag keys
 # Set one:
 debug.setConfig(key="FFCinematicToolEnable", value=True)
 ```

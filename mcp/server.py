@@ -6261,7 +6261,7 @@ def debug_observe_notification(action: str = "list", name: str = "",
     - FFAssetMediaChangedNotification: media asset changes
     - FFBeatGridSettingsChangedNotification: beat grid toggled
     - FFQTMovieExporterFinishedNotification: export completes
-    See fcp_symbols/notifications.txt for all 337 notification names.
+    See docs/research/fcp_symbols/notifications.txt for all 337 notification names.
     """
     params = {"action": action}
     if name:

@@ -365,7 +365,7 @@ timeline-only insertion without library side effects.
   that embed in FCP's UI
 - [FCPXML Format Reference](FCPXML_FORMAT_REFERENCE.md) — Complete FCPXML
   element and attribute documentation
-- [FCP Pasteboard & Media Linking](FCP_PASTEBOARD_MEDIA_LINKING.md) — How FCP's
+- [FCP Pasteboard & Media Linking](research/FCP_PASTEBOARD_MEDIA_LINKING.md) — How FCP's
   clipboard system works internally
 - [Content Exchange Guide](CONTENT_EXCHANGE_GUIDE.md) — Patterns for data
   exchange between extensions and FCP

@@ -21,8 +21,7 @@ class PhotosLibraryEntitlementTests(unittest.TestCase):
             "entitlements.plist": 1,
             "patcher/patch_fcp.sh": 1,
             "patcher/SpliceKit/Models/PatcherModel.swift": 2,
-            "patcher/SpliceKitPatcher/main.swift": 2,
-        }
+            }
         for relative_path, expected_count in templates.items():
             source = (ROOT / relative_path).read_text(encoding="utf-8")
             plists = [

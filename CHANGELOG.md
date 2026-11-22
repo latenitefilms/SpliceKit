@@ -21,6 +21,9 @@ same page or via `appcast.xml`.
   unaffected; online MotionVFX downloads are unavailable in the patched app.
 
 ### Changed
+- **Patcher updates now come from this repository.** Sparkle reads
+  `appcast.xml` from `latenitefilms/SpliceKit`, and releases are published
+  here.
 - **FCP 13 no longer asks before ripple-trimming for a transition**, so
   SpliceKit's "Use Freeze Frames" dialog button can no longer appear there. FCP
   13 inserts the transition and then shows "Clips were trimmed to create the
@@ -43,6 +46,10 @@ same page or via `appcast.xml`.
   BRAW bundles left in the patched app by older versions.
 
 ### Fixed
+- **Release builds include `parakeet-transcriber` and `whisper-transcriber`.**
+  The build looked for their sources in a folder that is no longer in the
+  repository, so releases skipped them; it now uses `tools/`. `make tools` also
+  builds `beat-detector` for the MCP `detect_beats()` tool.
 - **`browser.appendClip`, `browser.insertClip` and `browser.connectClip` find
   clips by name or index again.** They enumerated events with `ownedClips`,
   which FCP's event records don't implement, so only handles worked.

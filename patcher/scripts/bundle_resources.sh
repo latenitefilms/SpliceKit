@@ -53,7 +53,7 @@ if [ -f "$REPO_DIR/tools/silence-detector.swift" ]; then
 fi
 
 # Copy parakeet-transcriber: prefer pre-built binary, fall back to sources
-PARAKEET_SRC="$REPO_DIR/patcher/SpliceKitPatcher.app/Contents/Resources/tools/parakeet-transcriber"
+PARAKEET_SRC="$REPO_DIR/tools/parakeet-transcriber"
 PARAKEET_RELEASE_BIN="$PARAKEET_SRC/.build/release/parakeet-transcriber"
 PARAKEET_DEBUG_BIN="$PARAKEET_SRC/.build/debug/parakeet-transcriber"
 if [ -f "$PARAKEET_RELEASE_BIN" ]; then
@@ -71,7 +71,7 @@ elif [ -d "$PARAKEET_SRC" ]; then
 fi
 
 # Copy whisper-transcriber: prefer pre-built binary, fall back to sources
-WHISPER_SRC="$REPO_DIR/patcher/SpliceKitPatcher.app/Contents/Resources/tools/whisper-transcriber"
+WHISPER_SRC="$REPO_DIR/tools/whisper-transcriber"
 WHISPER_RELEASE_BIN="$WHISPER_SRC/.build/release/whisper-transcriber"
 WHISPER_DEBUG_BIN="$WHISPER_SRC/.build/debug/whisper-transcriber"
 if [ -f "$WHISPER_RELEASE_BIN" ]; then

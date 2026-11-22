@@ -4,14 +4,15 @@
 #
 # Produces structured reference files for SpliceKit development.
 #
-# Usage: ./tools/dump_fcp_symbols.sh [output_dir]
+# Usage: ./tools/reverse-engineering/dump_fcp_symbols.sh [output_dir]
 
 set -uo pipefail
 
 FCP_APP="/Applications/Final Cut Pro.app"
 FCP_BIN="$FCP_APP/Contents/MacOS/Final Cut Pro"
 FCP_FW="$FCP_APP/Contents/Frameworks"
-OUT="${1:-$(pwd)/fcp_symbols}"
+REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+OUT="${1:-$REPO_ROOT/docs/research/fcp_symbols}"
 
 mkdir -p "$OUT"
 

@@ -255,7 +255,7 @@ make tools
 make symbols
 
 echo "[3/15] Building parakeet-transcriber..."
-PARAKEET_PKG_DIR="patcher/SpliceKitPatcher.app/Contents/Resources/tools/parakeet-transcriber"
+PARAKEET_PKG_DIR="tools/parakeet-transcriber"
 PARAKEET_BIN="${PARAKEET_PKG_DIR}/.build/release/parakeet-transcriber"
 if [ -d "${PARAKEET_PKG_DIR}" ]; then
     cd "${PARAKEET_PKG_DIR}" && swift build -c release 2>&1 | tail -3 && cd "${REPO_ROOT}"
@@ -269,7 +269,7 @@ else
 fi
 
 echo "[3b/15] Building whisper-transcriber..."
-WHISPER_PKG_DIR="patcher/SpliceKitPatcher.app/Contents/Resources/tools/whisper-transcriber"
+WHISPER_PKG_DIR="tools/whisper-transcriber"
 WHISPER_BIN="${WHISPER_PKG_DIR}/.build/release/whisper-transcriber"
 if [ -d "${WHISPER_PKG_DIR}" ]; then
     cd "${WHISPER_PKG_DIR}" && swift build -c release 2>&1 | tail -3 && cd "${REPO_ROOT}"

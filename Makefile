@@ -43,6 +43,7 @@ PROAPP_SUPPORT_FRAMEWORK = $(MODDED_APP)/Contents/Frameworks/ProAppSupport.frame
 
 SILENCE_DETECTOR = $(BUILD_DIR)/silence-detector
 STRUCTURE_ANALYZER = $(BUILD_DIR)/structure-analyzer
+BEAT_DETECTOR = $(BUILD_DIR)/beat-detector
 MIXER_APP = $(BUILD_DIR)/SpliceKitMixer
 AUDIO_BUS_PROBE_DIR = tools/audio-bus-probe-au
 AUDIO_BUS_PROBE_COMPONENT = $(BUILD_DIR)/SpliceKitAudioBusProbe.component
@@ -51,10 +52,10 @@ AUDIO_BUS_PROBE_INFO = $(AUDIO_BUS_PROBE_DIR)/Info.plist
 AUDIO_BUS_PROBE_SOURCE = $(AUDIO_BUS_PROBE_DIR)/SpliceKitAudioBusProbe.c
 AUDIO_BUS_PROBE_INSTALL_DIR = $(HOME)/Library/Audio/Plug-Ins/Components
 TOOLS_DIR = $(HOME)/Applications/SpliceKit/tools
-PARAKEET_PKG_DIR = patcher/SpliceKitPatcher.app/Contents/Resources/tools/parakeet-transcriber
+PARAKEET_PKG_DIR = tools/parakeet-transcriber
 PARAKEET_RELEASE_BIN = $(PARAKEET_PKG_DIR)/.build/release/parakeet-transcriber
 PARAKEET_DEBUG_BIN = $(PARAKEET_PKG_DIR)/.build/debug/parakeet-transcriber
-WHISPER_PKG_DIR = patcher/SpliceKitPatcher.app/Contents/Resources/tools/whisper-transcriber
+WHISPER_PKG_DIR = tools/whisper-transcriber
 WHISPER_RELEASE_BIN = $(WHISPER_PKG_DIR)/.build/release/whisper-transcriber
 WHISPER_DEBUG_BIN = $(WHISPER_PKG_DIR)/.build/debug/whisper-transcriber
 
@@ -94,7 +95,7 @@ all: $(OUTPUT)
 
 symbols: $(DSYM)
 
-tools: $(SILENCE_DETECTOR) $(STRUCTURE_ANALYZER) $(MIXER_APP)
+tools: $(SILENCE_DETECTOR) $(STRUCTURE_ANALYZER) $(BEAT_DETECTOR) $(MIXER_APP)
 
 audio-bus-probe: $(AUDIO_BUS_PROBE_BINARY)
 	@echo "Built: $(AUDIO_BUS_PROBE_COMPONENT)"
@@ -214,6 +215,11 @@ $(SILENCE_DETECTOR): tools/silence-detector.swift | $(BUILD_DIR)
 $(STRUCTURE_ANALYZER): tools/structure-analyzer.swift | $(BUILD_DIR)
 	swiftc -O -suppress-warnings -o $(STRUCTURE_ANALYZER) tools/structure-analyzer.swift
 	@echo "Built: $(STRUCTURE_ANALYZER)"
+
+# Used by the MCP server's detect_beats() tool (mcp/server.py looks in build/).
+$(BEAT_DETECTOR): tools/beat-detector.swift | $(BUILD_DIR)
+	swiftc -O -suppress-warnings -o $(BEAT_DETECTOR) tools/beat-detector.swift
+	@echo "Built: $(BEAT_DETECTOR)"
 
 MIXER_SOURCES = $(wildcard tools/mixer-app/*.swift)
 $(MIXER_APP): $(MIXER_SOURCES) | $(BUILD_DIR)

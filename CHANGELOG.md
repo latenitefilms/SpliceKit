@@ -14,6 +14,11 @@ same page or via `appcast.xml`.
   guards on FCP 13.0 (build 460023). Clip pasteboard writes fall back to FCP
   13's `writeAnchoredObjects:userInfo:options:`, and FCP 13's new MotionVFX
   content catalog is left untouched.
+- **Final Cut Pro Creator Studio 13 no longer crashes at launch.** Its new
+  MotionVFX remote-content service reached CloudKit (unavailable to a re-signed
+  app) and then requested a nil URL; SpliceKit now returns an empty remote
+  context and skips URL-less MotionVFX requests. Bundled MotionVFX content is
+  unaffected; online MotionVFX downloads are unavailable in the patched app.
 
 ### Changed
 - **FCP 13 no longer asks before ripple-trimming for a transition**, so

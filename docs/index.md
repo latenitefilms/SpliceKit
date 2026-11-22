@@ -53,5 +53,4 @@ Reverse-engineering reports and raw data gathered while building SpliceKit. Usef
 
 ## Maintainers
 
-- [Sentry Setup](SentrySetup.md) — Crash reporting configuration for the injected runtime and the patcher
 - [Release Notes](releasenotes.html) — Published via GitHub Pages and linked from the Sparkle appcast

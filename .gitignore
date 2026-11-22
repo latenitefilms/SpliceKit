@@ -30,6 +30,7 @@ patcher/SpliceKit.xcodeproj/project.xcworkspace/xcuserdata/
 
 # Pre-built patcher app (generate via release.sh, distribute via GitHub Releases)
 patcher/SpliceKitPatcher.app/
+# Left over from the removed Sentry integration
 patcher/Frameworks/Sentry.framework/
 patcher/Frameworks/.sentry-sdk-version
 

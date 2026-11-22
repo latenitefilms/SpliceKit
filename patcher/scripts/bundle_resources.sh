@@ -20,9 +20,8 @@ mkdir -p "$APP_RESOURCES/mcp"
 cp "$REPO_DIR/mcp/server.py" "$APP_RESOURCES/mcp/server.py"
 echo "Bundled mcp/server.py"
 
-# Generate bundled Sentry config from the current build environment.
-bash "$REPO_DIR/Scripts/generate_sentry_config.sh" "$APP_RESOURCES/SpliceKitSentryConfig.plist"
-echo "Bundled SpliceKitSentryConfig.plist"
+# Sentry was removed; drop any config left from an earlier incremental build.
+rm -f "$APP_RESOURCES/SpliceKitSentryConfig.plist"
 
 # Copy Lua scripts
 if [ -d "$REPO_DIR/Scripts/lua" ]; then

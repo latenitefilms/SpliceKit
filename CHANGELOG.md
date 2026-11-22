@@ -37,6 +37,11 @@ same page or via `appcast.xml`.
   longer overrides which decoder FCP picks.
 
 ### Removed
+- **Sentry crash reporting has been removed.** Neither the patcher nor the
+  injected runtime sends crash reports or logs automatically; crashes are
+  written to `~/Library/Logs/SpliceKit/splicekit.log`, and the patcher's
+  **Share Logs** button uploads logs only when you click it. This also drops the Sentry SDK
+  from the patcher and halves the size of the SpliceKit framework.
 - **Built-in Blackmagic RAW support has been removed. Use
   [BRAW Toolbox](https://brawtoolbox.io) for `.braw` media.** This removes the
   BRAW decoder, format reader, RAW processor, RAW settings HUD and inspector
@@ -46,6 +51,19 @@ same page or via `appcast.xml`.
   BRAW bundles left in the patched app by older versions.
 
 ### Fixed
+- **The FCP Native transcription engine works again.** It called
+  `modalTranscriptsForClips:locale:`, which Final Cut Pro replaced with
+  `modalTranscriptsForClips:locale:progressTitle:` (12.3 and 13 only have the
+  new form), so every FCP Native transcription failed.
+- **"Delete silences" no longer removes clips that couldn't be transcribed.**
+  When one clip in a Parakeet batch fails (a still, graphic or clip with no
+  decodable audio), the rest of the batch still transcribes, but that clip's
+  range used to read as one long pause. Untranscribed clips (Parakeet, Apple
+  Speech and FCP Native) are now excluded from silence detection, stay excluded
+  after later edits move them, and the panel reports how many there were. A gap
+  split by such a clip now shows every remaining pause marker. With FCP Native,
+  a second clip cut from the same file gets its words when its range was
+  transcribed, and any part of it FCP wasn't asked to transcribe is protected.
 - **Release builds include `parakeet-transcriber` and `whisper-transcriber`.**
   The build looked for their sources in a folder that is no longer in the
   repository, so releases skipped them; it now uses `tools/`. `make tools` also

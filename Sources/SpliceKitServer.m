@@ -13,7 +13,6 @@
 //
 
 #import "SpliceKit.h"
-#import "SpliceKitSentry.h"
 #import "SpliceKitLogPanel.h"
 #import "SpliceKitTranscriptPanel.h"
 #import "SpliceKitCaptionPanel.h"
@@ -27680,7 +27679,6 @@ NSDictionary *SpliceKit_handleRequest(NSDictionary *request) {
         return @{@"error": @{@"code": @(-32600), @"message": @"Invalid Request: method required"}};
     }
 
-    SpliceKit_sentrySetLastRPCMethod(method);
 
     SpliceKit_installEffectDragSwizzlesNow();
 
@@ -28315,12 +28313,6 @@ static void SpliceKit_handleClient(int clientFd) {
                 } @catch (NSException *exception) {
                     SpliceKit_log(@"Exception handling request: %@ - %@",
                                   exception.name, exception.reason);
-                    SpliceKit_sentryCaptureException(exception,
-                                                     @"runtime.rpc.exception",
-                                                     @{
-                                                         @"method": method ?: @"<unknown>",
-                                                         @"params": request[@"params"] ?: @{}
-                                                     });
                     response[@"error"] = @{
                         @"code": @(-32000),
                         @"message": [NSString stringWithFormat:@"Internal error: %@", exception.reason]

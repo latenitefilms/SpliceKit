@@ -3546,6 +3546,12 @@ static void SpliceKit_swizzleCloudContentClass(Class cls, const char *phase) {
     const char *name = class_getName(cls);
     if (!name) return;
 
+    // FCP 13 adds MVFXCloudContentCatalog for the built-in MotionVFX content.
+    // It isn't part of the CloudKit first-launch path we neutralize, and FCP
+    // 13 launches cleanly with it untouched, so never let the substring
+    // matching below disable it.
+    if (strstr(name, "MVFX")) return;
+
     if (strstr(name, "CCFirstLaunchHelper") || strstr(name, "CloudContentFirstLaunchHelper")) {
         SpliceKit_log(@"  [%s] Found class: %s", phase, name);
 

@@ -30,13 +30,11 @@ struct CheckForUpdatesView: View {
 @main
 struct SpliceKitApp: App {
     private static let helpURL = URL(string: "https://splicekit.fcp.cafe/installation/")!
-    private static let sentryCrashTestMessage = "Sentry test crash triggered from patcher menu bar"
     private let updaterController: SPUStandardUpdaterController
     @StateObject private var checkForUpdatesVM: CheckForUpdatesViewModel
     @StateObject private var model = PatcherModel()
 
     init() {
-        PatcherSentry.start()
         let controller = SPUStandardUpdaterController(
             startingUpdater: true,
             updaterDelegate: nil,
@@ -46,15 +44,6 @@ struct SpliceKitApp: App {
         self._checkForUpdatesVM = StateObject(wrappedValue:
             CheckForUpdatesViewModel(updater: controller.updater)
         )
-    }
-
-    private static func triggerSentryCrashTest() {
-        PatcherSentry.addBreadcrumb(
-            "Manual crash test triggered from menu bar",
-            category: "patcher.debug",
-            level: .error
-        )
-        fatalError(sentryCrashTestMessage)
     }
 
     var body: some Scene {
@@ -74,12 +63,6 @@ struct SpliceKitApp: App {
             CommandGroup(replacing: .help) {
                 Button("SpliceKit Help") {
                     NSWorkspace.shared.open(Self.helpURL)
-                }
-            }
-
-            CommandMenu("Debug") {
-                Button("Crash Patcher for Sentry Test") {
-                    Self.triggerSentryCrashTest()
                 }
             }
         }

@@ -319,9 +319,9 @@ if [ -d "$LUA_DIR" ]; then
     log "Built: $LUA_LIB"
 fi
 
-info "Compiling ${#SOURCES[@]} source files via Makefile (canonical flags: Sentry, Metal, Vision, C++)..."
-# Local change: the inline clang line shipped here was stale (no Sentry framework,
-# missing frameworks, no C++ lib). The Makefile is the canonical build the GUI
+info "Compiling ${#SOURCES[@]} source files via Makefile (canonical flags: Metal, Vision, C++)..."
+# Local change: the inline clang line shipped here was stale (missing
+# frameworks, no C++ lib). The Makefile is the canonical build the GUI
 # patcher uses, so delegate to it.
 make -C "$REPO_DIR" all 2>&1 | tail -5
 [[ -f "$BUILD_DIR/SpliceKit" ]] || { err "Makefile build failed (see output above)"; exit 1; }

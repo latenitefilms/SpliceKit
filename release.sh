@@ -30,24 +30,9 @@ DMG_PATH="patcher/${DMG_NAME}"
 SPARKLE_SIGN="/tmp/bin/sign_update"
 SPARKLE_GENERATE_KEYS="/tmp/bin/generate_keys"
 PATCHER_INFO_PLIST="patcher/SpliceKit/Resources/Info.plist"
-SENTRY_RELEASE_NAME="splicekit@${VERSION}"
-SENTRY_PATCHER_PROJECT="${SENTRY_PATCHER_PROJECT:-apple-macos}"
-SENTRY_RUNTIME_PROJECT="${SENTRY_RUNTIME_PROJECT:-apple-macos}"
 RELEASE_NOTES_URL="${RELEASE_NOTES_URL:-https://latenitefilms.github.io/SpliceKit/releasenotes.html}"
 RELEASE_NOTES_FILE="${RELEASE_NOTES_FILE:-docs/releasenotes.html}"
 
-# Auto-resolve Sentry auth from the new `sentry` CLI's OAuth store so dSYM
-# upload works without manually hardcoding a token. The new CLI refreshes
-# its token via OAuth device flow; we just reuse whatever it has. Classic
-# sentry-cli (used for debug-files upload below) reads SENTRY_AUTH_TOKEN
-# from env.
-if [ -z "${SENTRY_AUTH_TOKEN:-}" ] && command -v sentry >/dev/null 2>&1; then
-    SENTRY_AUTH_TOKEN="$(sentry auth token 2>/dev/null || true)"
-    [ -n "${SENTRY_AUTH_TOKEN}" ] && export SENTRY_AUTH_TOKEN
-fi
-if [ -z "${SENTRY_ORG:-}" ]; then
-    export SENTRY_ORG=splicekit
-fi
 CURRENT_BRANCH="$(git branch --show-current)"
 PUSH_REMOTE="$(git config --get branch.${CURRENT_BRANCH}.remote || echo origin)"
 PUSH_BRANCH="$(git config --get branch.${CURRENT_BRANCH}.merge | sed 's#refs/heads/##')"
@@ -139,40 +124,6 @@ if count != 1:
     raise SystemExit(f"ERROR: failed to update SPLICEKIT_VERSION in {path}")
 path.write_text(updated)
 PY
-}
-
-maybe_upload_sentry_symbols() {
-    if [ -z "${SENTRY_AUTH_TOKEN:-}" ] || [ -z "${SENTRY_ORG:-}" ]; then
-        echo "  Skipping Sentry symbol upload (set SENTRY_AUTH_TOKEN and SENTRY_ORG to enable)"
-        return
-    fi
-
-    local sentry_cli
-    sentry_cli="$(command -v sentry-cli || true)"
-    if [ -z "${sentry_cli}" ]; then
-        echo "ERROR: sentry-cli not found in PATH" >&2
-        exit 1
-    fi
-
-    if [ -d "${RUNTIME_DSYM}" ]; then
-        echo "  Uploading runtime dSYM to ${SENTRY_RUNTIME_PROJECT}..."
-        "${sentry_cli}" debug-files upload \
-            --org "${SENTRY_ORG}" \
-            --project "${SENTRY_RUNTIME_PROJECT}" \
-            "${RUNTIME_DSYM}"
-    else
-        echo "  WARNING: runtime dSYM missing at ${RUNTIME_DSYM}"
-    fi
-
-    if [ -d "${PATCHER_DSYM}" ]; then
-        echo "  Uploading patcher dSYM to ${SENTRY_PATCHER_PROJECT}..."
-        "${sentry_cli}" debug-files upload \
-            --org "${SENTRY_ORG}" \
-            --project "${SENTRY_PATCHER_PROJECT}" \
-            "${PATCHER_DSYM}"
-    else
-        echo "  WARNING: patcher dSYM missing at ${PATCHER_DSYM}"
-    fi
 }
 
 update_release_notes_html() {
@@ -340,9 +291,6 @@ cp "${INSERT_DYLIB_BIN}" "${APP_RES}/tools/insert_dylib"
 chmod +x "${APP_RES}/tools/insert_dylib"
 echo "  Bundled insert_dylib helper"
 
-echo "[6/15] Uploading Sentry symbols..."
-maybe_upload_sentry_symbols
-
 # ──────────────────────────────────────────────
 # SIGN
 # ──────────────────────────────────────────────
@@ -373,13 +321,6 @@ fi
 # Sign Sparkle framework
 codesign --force --options runtime --timestamp --sign "${SIGN_ID}" "${SPARKLE_FW}"
 echo "  Signed: Sparkle.framework"
-
-# Sign Sentry framework (SPM ships it without a secure timestamp or Developer ID)
-SENTRY_FW="${BUILT_APP}/Contents/Frameworks/Sentry.framework"
-if [ -d "${SENTRY_FW}" ]; then
-    codesign --force --options runtime --timestamp --sign "${SIGN_ID}" "${SENTRY_FW}"
-    echo "  Signed: Sentry.framework"
-fi
 
 # Sign all Mach-O binaries in Resources (dylib, tools)
 find "${BUILT_APP}/Contents/Resources" -type f | while read f; do
@@ -514,7 +455,6 @@ echo "========================================="
 echo ""
 echo "  - Built via Xcode, signed, notarized, stapled"
 echo "  - DMG: ${DMG_PATH}"
-echo "  - Sentry release: ${SENTRY_RELEASE_NAME}"
 echo "  - Appcast updated with EdDSA signature"
 echo "  - Release notes HTML updated"
 echo "  - Pushed to main, GitHub release created"

@@ -38,8 +38,7 @@ enum WizardPanel: Int {
 enum PatchError: LocalizedError {
     case msg(String)
     /// User-prerequisite failure (e.g. Xcode CLT not installed, license not accepted).
-    /// Surfaces to the user normally but does NOT report to Sentry — these are
-    /// expected setup steps, not SpliceKit bugs.
+    /// These are expected setup steps, not SpliceKit bugs.
     case userPrereq(String)
     var errorDescription: String? {
         switch self {
@@ -79,7 +78,6 @@ private func patcherLogWrite(_ text: String) {
         handle.write(line.data(using: .utf8) ?? Data())
         handle.closeFile()
     }
-    PatcherSentry.addBreadcrumb(text)
 }
 
 // MARK: - Model
@@ -640,15 +638,6 @@ class PatcherModel: ObservableObject {
                 await MainActor.run {
                     self.errorMessage = error.localizedDescription
                     self.appendLog("ERROR: \(error.localizedDescription)")
-                    if (error as? PatchError)?.isUserPrereq == true {
-                        // User prerequisite (e.g. Xcode CLT) — surfaced to the user
-                        // but not a SpliceKit bug, so don't pollute Sentry.
-                        self.appendLog("Skipping Sentry report: user-prerequisite failure.")
-                    } else {
-                        PatcherSentry.capture(error: error,
-                                              context: "patch.run",
-                                              extras: ["current_step": self.currentStep?.rawValue ?? "unknown"])
-                    }
                 }
             }
             await MainActor.run {
@@ -666,8 +655,8 @@ class PatcherModel: ObservableObject {
         // (not patching, not launching, not running) — it does not verify the
         // modded bundle is still on disk. If the user deleted it or the patch
         // never completed, NSWorkspace.openApplication surfaces this as a raw
-        // NSCocoaErrorDomain Code 4 ("file doesn't exist") in Sentry with no
-        // actionable message. Catch it early with a clear log line instead.
+        // NSCocoaErrorDomain Code 4 ("file doesn't exist") with no actionable
+        // message. Catch it early with a clear log line instead.
         guard FileManager.default.fileExists(atPath: binary) else {
             appendLog("Cannot launch: modded Final Cut Pro is missing at \(moddedApp). Run the patch again from the Welcome panel.")
             syncModdedFCPRunningState()
@@ -721,9 +710,6 @@ class PatcherModel: ObservableObject {
                     self.isLaunchInProgress = false
                     self.syncModdedFCPRunningState()
                     self.appendLog("Failed to launch Final Cut Pro: \(error.localizedDescription)")
-                    PatcherSentry.capture(error: error,
-                                          context: "patcher.launch",
-                                          extras: ["binary": binary])
                     return
                 }
                 guard let runningApp else {
@@ -819,9 +805,6 @@ class PatcherModel: ObservableObject {
                 await MainActor.run {
                     self.errorMessage = error.localizedDescription
                     self.appendLog("ERROR: \(error.localizedDescription)")
-                    PatcherSentry.capture(error: error,
-                                          context: "patch.update",
-                                          extras: ["current_step": self.currentStep?.rawValue ?? "unknown"])
                 }
             }
             await MainActor.run {
@@ -958,9 +941,6 @@ class PatcherModel: ObservableObject {
             </dict></plist>
             """
         try plist.write(toFile: resourcesDir + "/Info.plist", atomically: true, encoding: .utf8)
-        if let sentryConfig = Bundle.main.url(forResource: "SpliceKitSentryConfig", withExtension: "plist") {
-            shell("cp '\(sentryConfig.path)' '\(resourcesDir)/SpliceKitSentryConfig.plist'")
-        }
 
         await removeLegacyBRAWBundles(from: moddedApp)
 
@@ -1215,9 +1195,6 @@ class PatcherModel: ObservableObject {
             </dict></plist>
             """
         try plist.write(toFile: resourcesDir + "/Info.plist", atomically: true, encoding: .utf8)
-        if let sentryConfig = Bundle.main.url(forResource: "SpliceKitSentryConfig", withExtension: "plist") {
-            shell("cp '\(sentryConfig.path)' '\(resourcesDir)/SpliceKitSentryConfig.plist'")
-        }
 
         await removeLegacyBRAWBundles(from: moddedApp)
 
@@ -1566,36 +1543,8 @@ class PatcherModel: ObservableObject {
                 appendLog(line)
             }
 
-            // Only report to Sentry if there's an actual failure signal. A user
-            // quitting FCP within 90s after launching it from the patcher is
-            // normal and should not produce a crash event. Real signals:
-            //   1. A FCP crash report newer than launchTime exists.
-            //   2. The injected dylib never initialized (splicekit.log unchanged).
-            //   3. Runtime was extremely short (< 5s) — likely instant exit.
-            let hasCrashReport = latestCrashReportURL(after: launchTime) != nil
-            let dylibNeverLoaded = diagnostics.contains {
-                $0.contains("dylib likely never initialized")
-            }
-            let cleanShutdown = diagnostics.contains {
-                $0.contains("App terminating") || $0.contains("Server socket closed")
-            }
-            let abnormal = hasCrashReport || dylibNeverLoaded || (runtime < 5 && !cleanShutdown)
-
-            if abnormal {
-                PatcherSentry.captureMessage(
-                    "Final Cut Pro terminated shortly after launch",
-                    level: .error,
-                    context: "patcher.launch_termination",
-                    extras: [
-                        "runtime_seconds": runtime,
-                        "has_crash_report": hasCrashReport,
-                        "dylib_never_loaded": dylibNeverLoaded,
-                        "clean_shutdown": cleanShutdown,
-                        "diagnostics": diagnostics
-                    ]
-                )
-            } else {
-                appendLog("Skipping Sentry report: no crash report and dylib initialized cleanly (likely user-initiated quit).")
+            if let crashReport = latestCrashReportURL(after: launchTime) {
+                appendLog("Final Cut Pro crash report: \(crashReport.path)")
             }
         }
         if launchedFCPRunningApp?.processIdentifier == app.processIdentifier {
@@ -1635,16 +1584,10 @@ class PatcherModel: ObservableObject {
     }
 
     private nonisolated func setStepAsync(_ step: PatchStep) async {
-        PatcherSentry.addBreadcrumb(step.rawValue,
-                                    category: "patch.step",
-                                    data: ["step": step.rawValue])
         await MainActor.run { self.currentStep = step }
     }
 
     private nonisolated func completeStepAsync(_ step: PatchStep) async {
-        PatcherSentry.addBreadcrumb("Completed \(step.rawValue)",
-                                    category: "patch.step",
-                                    data: ["step": step.rawValue, "status": "completed"])
         await MainActor.run { _ = self.completedSteps.insert(step) }
     }
 }

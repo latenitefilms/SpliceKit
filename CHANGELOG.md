@@ -37,6 +37,10 @@ same page or via `appcast.xml`.
   longer overrides which decoder FCP picks.
 
 ### Removed
+- **Sentry crash reporting has been removed.** Neither the patcher nor the
+  injected runtime sends crash or diagnostic data anywhere; crashes are written
+  to `~/Library/Logs/SpliceKit/splicekit.log`. This also drops the Sentry SDK
+  from the patcher and halves the size of the SpliceKit framework.
 - **Built-in Blackmagic RAW support has been removed. Use
   [BRAW Toolbox](https://brawtoolbox.io) for `.braw` media.** This removes the
   BRAW decoder, format reader, RAW processor, RAW settings HUD and inspector

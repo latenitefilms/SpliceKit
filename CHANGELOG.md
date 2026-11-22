@@ -46,6 +46,11 @@ same page or via `appcast.xml`.
   BRAW bundles left in the patched app by older versions.
 
 ### Fixed
+- **"Delete silences" no longer removes clips that couldn't be transcribed.**
+  When one clip in a Parakeet batch fails (a still, graphic or clip with no
+  decodable audio), the rest of the batch still transcribes, but that clip's
+  range used to read as one long pause. It's now excluded from silence
+  detection, and the panel reports how many clips weren't transcribed.
 - **Release builds include `parakeet-transcriber` and `whisper-transcriber`.**
   The build looked for their sources in a folder that is no longer in the
   repository, so releases skipped them; it now uses `tools/`. `make tools` also

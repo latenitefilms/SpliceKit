@@ -444,6 +444,10 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
 @property (nonatomic, readwrite) SpliceKitTranscriptStatus status;
 @property (nonatomic, readwrite, strong) NSMutableArray<SpliceKitTranscriptWord *> *mutableWords;
 @property (nonatomic, readwrite, strong) NSMutableArray<SpliceKitTranscriptSilence *> *mutableSilences;
+// Timeline ranges ([start, end] seconds) of clips the engine could not transcribe.
+// Silence detection never reports pauses inside these, so "delete silences" can't
+// remove footage just because its transcription failed.
+@property (nonatomic, copy) NSArray<NSArray<NSNumber *> *> *untranscribedRanges;
 @property (nonatomic, readwrite, copy) NSString *fullText;
 @property (nonatomic, readwrite, copy) NSString *errorMessage;
 
@@ -498,6 +502,7 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
         _status = SpliceKitTranscriptStatusIdle;
         _mutableWords = [NSMutableArray array];
         _mutableSilences = [NSMutableArray array];
+        _untranscribedRanges = @[];
         _pendingTranscriptions = [NSMutableArray array];
         _searchResultRanges = [NSMutableArray array];
         _currentSearchIndex = -1;
@@ -884,6 +889,7 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
             [self.mutableWords removeAllObjects];
         }
         [self.mutableSilences removeAllObjects];
+        self.untranscribedRanges = @[];
         self.fullText = nil;
         self.status = SpliceKitTranscriptStatusIdle;
         self.lastRestoredSequenceKey = nil;
@@ -945,6 +951,9 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
         @"words": wordDicts,
         @"silences": silenceDicts,
     } mutableCopy];
+    if (self.untranscribedRanges.count > 0) {
+        section[@"untranscribedRanges"] = self.untranscribedRanges;
+    }
 
     NSString *engineName = (self.engine == SpliceKitTranscriptEngineFCPNative) ? @"fcpNative" :
                            (self.engine == SpliceKitTranscriptEngineParakeet) ? @"parakeet" : @"appleSpeech";
@@ -1002,6 +1011,7 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
             [self.mutableWords removeAllObjects];
         }
         [self.mutableSilences removeAllObjects];
+        self.untranscribedRanges = @[];
         self.fullText = nil;
         self.status = SpliceKitTranscriptStatusIdle;
         self.lastRestoredSequenceKey = sequenceKey;
@@ -1025,6 +1035,7 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
             [self.mutableWords removeAllObjects];
         }
         [self.mutableSilences removeAllObjects];
+        self.untranscribedRanges = @[];
         self.fullText = nil;
         self.status = SpliceKitTranscriptStatusIdle;
         self.errorMessage = nil;
@@ -1060,6 +1071,17 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
             self.mutableWords[i].wordIndex = i;
         }
     }
+
+    NSMutableArray<NSArray<NSNumber *> *> *restoredRanges = [NSMutableArray array];
+    NSArray *rangeList = [transcript[@"untranscribedRanges"] isKindOfClass:[NSArray class]]
+        ? transcript[@"untranscribedRanges"] : nil;
+    for (id entry in rangeList) {
+        if ([entry isKindOfClass:[NSArray class]] && [(NSArray *)entry count] == 2 &&
+            [entry[0] isKindOfClass:[NSNumber class]] && [entry[1] isKindOfClass:[NSNumber class]]) {
+            [restoredRanges addObject:@[entry[0], entry[1]]];
+        }
+    }
+    self.untranscribedRanges = restoredRanges;
 
     [self.mutableSilences removeAllObjects];
     NSArray *silenceDicts = [transcript[@"silences"] isKindOfClass:[NSArray class]] ? transcript[@"silences"] : nil;
@@ -1119,6 +1141,7 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
         [self.mutableWords removeAllObjects];
     }
     [self.mutableSilences removeAllObjects];
+    self.untranscribedRanges = @[];
     self.fullText = nil;
     self.status = SpliceKitTranscriptStatusIdle;
     self.errorMessage = nil;
@@ -2059,6 +2082,7 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
 
     [self.mutableWords removeAllObjects];
     [self.mutableSilences removeAllObjects];
+    self.untranscribedRanges = @[];
 
     // Call FFTranscriptionCoordinator.modalTranscriptsForClips:locale:
     // This must run off the main thread (the decompiled code asserts this)
@@ -2346,6 +2370,7 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
 
     [self.mutableWords removeAllObjects];
     [self.mutableSilences removeAllObjects];
+    self.untranscribedRanges = @[];
     self.completedTranscriptions = 0;
     self.totalTranscriptions = 0;
 
@@ -2776,6 +2801,7 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
 
     [self.mutableWords removeAllObjects];
     [self.mutableSilences removeAllObjects];
+    self.untranscribedRanges = @[];
 
     dispatch_async(dispatch_get_main_queue(), ^{
         [self updateStatusUI:[NSString stringWithFormat:@"Transcribing %lu clips with Parakeet...",
@@ -3087,15 +3113,27 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
     SpliceKit_log(@"[Transcript] Got results for %lu files", (unsigned long)batchResults.count);
     SpliceKitTranscriptDiag_logParsedResults(batchResults);
 
-    // Map results back to clips by file path
+    // Map results back to clips by file path. A result with an "error" (e.g. a
+    // still, PDF or clip with no decodable audio) is a failed transcription, not
+    // an empty one: its clip must not be treated as one long pause.
     NSMutableDictionary *resultsByFile = [NSMutableDictionary dictionary];
+    NSMutableDictionary<NSString *, NSString *> *errorsByFile = [NSMutableDictionary dictionary];
     for (NSDictionary *result in batchResults) {
+        if (![result isKindOfClass:[NSDictionary class]]) continue;
         NSString *file = result[@"file"];
         NSArray *words = result[@"words"];
+        id error = result[@"error"];
+        if ([file isKindOfClass:[NSString class]] && [error isKindOfClass:[NSString class]] &&
+            [(NSString *)error length] > 0) {
+            errorsByFile[file] = error;
+            continue;
+        }
         if (file && [words isKindOfClass:[NSArray class]]) {
             resultsByFile[file] = words;
         }
     }
+    NSMutableArray<NSArray<NSNumber *> *> *failedRanges = [NSMutableArray array];
+    NSMutableArray<NSString *> *failedClipNames = [NSMutableArray array];
 
     // Process results for each clip
     @synchronized (self.mutableWords) {
@@ -3109,7 +3147,11 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
 
             NSArray *wordDicts = resultsByFile[mediaURL.path];
             if (!wordDicts) {
-                SpliceKit_log(@"[Transcript] No results for %@", mediaURL.lastPathComponent);
+                NSString *reason = errorsByFile[mediaURL.path] ?: @"no result";
+                SpliceKit_log(@"[Transcript] Could not transcribe %@ (%@); excluding its range from silence detection",
+                              mediaURL.lastPathComponent, reason);
+                [failedRanges addObject:@[@(timelineStart), @(timelineStart + clipDuration)]];
+                if (mediaURL.lastPathComponent) [failedClipNames addObject:mediaURL.lastPathComponent];
                 continue;
             }
 
@@ -3190,6 +3232,7 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
             }
         }
 
+        self.untranscribedRanges = failedRanges;
         [self detectSilences];
         [self assignSpeakers];
 
@@ -3203,8 +3246,15 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
         self.refreshButton.enabled = YES;
         self.deleteSilencesButton.enabled = (self.mutableSilences.count > 0);
 
-        [self updateStatusUI:[NSString stringWithFormat:@"%lu words, %lu pauses (Parakeet)",
-            (unsigned long)self.mutableWords.count, (unsigned long)self.mutableSilences.count]];
+        NSString *statusText = [NSString stringWithFormat:@"%lu words, %lu pauses (Parakeet)",
+            (unsigned long)self.mutableWords.count, (unsigned long)self.mutableSilences.count];
+        if (failedClipNames.count > 0) {
+            statusText = [statusText stringByAppendingFormat:@" — %lu clip%@ couldn't be transcribed",
+                (unsigned long)failedClipNames.count, failedClipNames.count == 1 ? @"" : @"s"];
+            SpliceKit_log(@"[Transcript] %lu clip(s) not transcribed: %@",
+                (unsigned long)failedClipNames.count, [failedClipNames componentsJoinedByString:@", "]);
+        }
+        [self updateStatusUI:statusText];
 
         SpliceKit_log(@"[Transcript] Parakeet transcription complete: %lu words, %lu silences",
             (unsigned long)self.mutableWords.count, (unsigned long)self.mutableSilences.count);
@@ -3331,9 +3381,58 @@ static double CMTimeToSeconds(SpliceKitTranscript_CMTime t) {
         }];
     }
 
+    [self excludeUntranscribedRangesFromSilences];
+
     SpliceKit_log(@"[Transcript] Detected %lu silences (threshold: %.2fs, suspectThreshold: %.2fs)",
                   (unsigned long)self.mutableSilences.count, self.silenceThreshold,
                   self.silenceThreshold * 2.0);
+}
+
+// Remove the parts of each detected silence that fall inside a clip the engine
+// couldn't transcribe. A gap spanning a failed clip is unknown content, not a
+// pause; only leftover pieces that still meet the threshold are kept.
+- (void)excludeUntranscribedRangesFromSilences {
+    NSArray<NSArray<NSNumber *> *> *ranges = self.untranscribedRanges;
+    if (ranges.count == 0 || self.mutableSilences.count == 0) return;
+
+    NSMutableArray<SpliceKitTranscriptSilence *> *kept = [NSMutableArray array];
+    NSUInteger removed = 0;
+    for (SpliceKitTranscriptSilence *silence in self.mutableSilences) {
+        NSMutableArray<NSArray<NSNumber *> *> *pieces =
+            [NSMutableArray arrayWithObject:@[@(silence.startTime), @(silence.endTime)]];
+        for (NSArray<NSNumber *> *range in ranges) {
+            double rs = range[0].doubleValue, re = range[1].doubleValue;
+            NSMutableArray<NSArray<NSNumber *> *> *next = [NSMutableArray array];
+            for (NSArray<NSNumber *> *piece in pieces) {
+                double ps = piece[0].doubleValue, pe = piece[1].doubleValue;
+                if (re <= ps || rs >= pe) { [next addObject:piece]; continue; }
+                if (rs > ps) [next addObject:@[@(ps), @(rs)]];
+                if (re < pe) [next addObject:@[@(re), @(pe)]];
+            }
+            pieces = next;
+        }
+
+        BOOL unchanged = pieces.count == 1 &&
+            pieces[0][0].doubleValue == silence.startTime && pieces[0][1].doubleValue == silence.endTime;
+        if (unchanged) { [kept addObject:silence]; continue; }
+        removed++;
+        for (NSArray<NSNumber *> *piece in pieces) {
+            double start = piece[0].doubleValue, end = piece[1].doubleValue;
+            if (end - start < self.silenceThreshold) continue;
+            SpliceKitTranscriptSilence *trimmed = [[SpliceKitTranscriptSilence alloc] init];
+            trimmed.startTime = start;
+            trimmed.endTime = end;
+            trimmed.duration = end - start;
+            trimmed.afterWordIndex = silence.afterWordIndex;
+            [kept addObject:trimmed];
+        }
+    }
+
+    if (removed > 0) {
+        SpliceKit_log(@"[Transcript] Trimmed %lu silence(s) overlapping %lu untranscribed clip range(s)",
+                      (unsigned long)removed, (unsigned long)ranges.count);
+        [self.mutableSilences setArray:kept];
+    }
 }
 
 - (void)redetectSilencesAndRefreshUI {

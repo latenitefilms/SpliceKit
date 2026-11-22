@@ -3470,8 +3470,24 @@ static void noopCloudContentFirstLaunchWithCompletion(id self, SEL _cmd, id comp
 }
 
 static BOOL returnNO(id self, SEL _cmd) {
-    SpliceKit_log(@"BLOCKED (returning NO): +[%@ %@]",
-                  NSStringFromClass(object_getClass(self)), NSStringFromSelector(_cmd));
+    // FCP polls some of these (e.g. +[CloudContentFeatureFlag isEnabled]) about
+    // once a second for the life of the app, so only log the first call per
+    // class/selector pair.
+    static NSMutableSet<NSString *> *sLogged = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ sLogged = [NSMutableSet set]; });
+    NSString *key = [NSString stringWithFormat:@"+[%@ %@]",
+                     NSStringFromClass(object_getClass(self)), NSStringFromSelector(_cmd)];
+    BOOL first = NO;
+    @synchronized (sLogged) {
+        if (![sLogged containsObject:key]) {
+            [sLogged addObject:key];
+            first = YES;
+        }
+    }
+    if (first) {
+        SpliceKit_log(@"BLOCKED (returning NO): %@ (further calls not logged)", key);
+    }
     return NO;
 }
 

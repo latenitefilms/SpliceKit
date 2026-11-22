@@ -61,6 +61,7 @@ static int sServerFd = -1;
 
 // Forward declarations
 static NSDictionary *SpliceKit_sendAppAction(NSString *selectorName);
+static NSArray *SpliceKit_copyBrowserClipsForEvent(id event);
 static NSDictionary *SpliceKit_sendPlayerAction(NSString *selectorName);
 id SpliceKit_getActiveTimelineModule(void);
 static id SpliceKit_getEditorContainer(void);
@@ -9501,6 +9502,30 @@ static int SpliceKit_swizzled_defaultTransitionOverlapType(id self, SEL _cmd) {
 }
 
 static IMP sOrigDisplayTransitionAlert = NULL;
+// FCP 13: set when the post-insert "Clips were trimmed" alert was auto-answered
+// with Keep Transition during a freezeExtend API call.
+static BOOL sFreezeExtendAutoKeptTrimmedTransition = NO;
+
+// Look up one of Flexo's FFLocalizable strings so alert matching also works in
+// localized FCP builds. Falls back to the English text if the key is missing.
+static NSString *SpliceKit_flexoLocalizedString(NSString *key, NSString *fallback) {
+    Class cls = objc_getClass("FFAnchoredSequence");
+    NSBundle *bundle = cls ? [NSBundle bundleForClass:cls] : nil;
+    NSString *value = [bundle localizedStringForKey:key value:nil table:@"FFLocalizable"];
+    if (value.length == 0 || [value isEqualToString:key]) return fallback;
+    return value;
+}
+
+// FCP 13.0 no longer asks before ripple-trimming for a transition; it inserts
+// the transition, trims, and then shows "Clips were trimmed to create the
+// transition." with Keep Transition (first button) / Remove Transition.
+static BOOL SpliceKit_isTransitionAutoTrimmedAlert(NSAlert *alert) {
+    if (![alert isKindOfClass:[NSAlert class]]) return NO;
+    NSString *message = [alert messageText] ?: @"";
+    NSString *expected = SpliceKit_flexoLocalizedString(@"FFTransitionAutoTrimmedMessageText",
+        @"Clips were trimmed to create the transition.");
+    return [message isEqualToString:expected];
+}
 
 static BOOL SpliceKit_isTransitionAvailableMediaAlert(NSAlert *alert) {
     if (![alert isKindOfClass:[NSAlert class]]) return NO;
@@ -10553,6 +10578,15 @@ static NSModalResponse SpliceKit_swizzled_NSAlert_runModal(id self, SEL _cmd) {
     // completely unmodified so the user sees the original FCP behavior.
     if (!sFreezeExtendPendingAutoAccept && !sFreezeExtendInTransitionAlert) {
         return ((NSModalResponse (*)(id, SEL))sOrigNSAlertRunModal)(self, _cmd);
+    }
+
+    if (sFreezeExtendPendingAutoAccept && SpliceKit_isTransitionAutoTrimmedAlert(self)) {
+        // FCP 13: the transition is already in place. Returning the generic
+        // auto-accept value (0) here would read as "Remove Transition", so the
+        // API call would silently insert nothing. Keep it and report the trim.
+        SpliceKit_log(@"[FreezeExtend] FCP 13 auto-trim alert: keeping transition");
+        sFreezeExtendAutoKeptTrimmedTransition = YES;
+        return NSAlertFirstButtonReturn;
     }
 
     if (sFreezeExtendPendingAutoAccept) {
@@ -13008,6 +13042,7 @@ NSDictionary *SpliceKit_handleTransitionsApply(NSDictionary *params) {
             // internal range calculations can succeed, and pre-force overlapType=2
             // so FCP uses freeze-frame paths on the very first pass (avoiding the
             // "not enough extra media" dialog entirely when possible).
+            sFreezeExtendAutoKeptTrimmedTransition = NO;
             if (freezeExtend) {
                 // Freeze-extend auto-hold is disabled pending further development.
                 // Just set the fallback auto-accept flag for the API path.
@@ -13133,8 +13168,23 @@ NSDictionary *SpliceKit_handleTransitionsApply(NSDictionary *params) {
 
             BOOL inserted = SpliceKit_waitForTransitionInsertion(
                 timelineModule, transitionsBefore, freezeExtend ? 2.0 : 0.5);
+            if (inserted && freezeExtend) {
+                // FCP 13 inserts the transition first and then queues
+                // +[FFAddTransitionUserPrompt presentPromptForClipsTrimmed...]
+                // on the main queue. Drain it while auto-accept is still active
+                // so the API call keeps the transition instead of leaving a
+                // modal "Clips were trimmed" alert behind.
+                NSDate *promptDeadline = [NSDate dateWithTimeIntervalSinceNow:0.25];
+                while (!sFreezeExtendAutoKeptTrimmedTransition &&
+                       [promptDeadline timeIntervalSinceNow] > 0.0) {
+                    [[NSRunLoop currentRunLoop] runUntilDate:
+                        [NSDate dateWithTimeIntervalSinceNow:0.02]];
+                }
+            }
             BOOL freezeExtended = sFreezeExtendDidApply;
+            BOOL rippleTrimmed = sFreezeExtendAutoKeptTrimmedTransition;
             sFreezeExtendDidApply = NO;
+            sFreezeExtendAutoKeptTrimmedTransition = NO;
             SpliceKit_clearFreezeExtendTransientState();
 
             // Restore the original default transition
@@ -13157,9 +13207,11 @@ NSDictionary *SpliceKit_handleTransitionsApply(NSDictionary *params) {
                 @"transition": [appliedName isKindOfClass:[NSString class]] ? appliedName : @"Unknown",
                 @"effectID": resolvedID,
                 @"freezeExtended": @(freezeExtended),
+                @"rippleTrimmed": @(rippleTrimmed),
             };
         } @catch (NSException *e) {
             sFreezeExtendDidApply = NO;
+            sFreezeExtendAutoKeptTrimmedTransition = NO;
             SpliceKit_clearFreezeExtendTransientState();
             result = @{@"error": [NSString stringWithFormat:@"Exception: %@", e.reason]};
         }
@@ -13944,12 +13996,13 @@ static NSDictionary *SpliceKit_handleBrowserPlaceClip(NSDictionary *params,
                         NSInteger currentIdx = 0;
 
                         for (id event in (NSArray *)events) {
-                            SEL clipsSel = NSSelectorFromString(@"ownedClips");
-                            if (![event respondsToSelector:clipsSel]) continue;
-                            id clips = ((id (*)(id, SEL))objc_msgSend)(event, clipsSel);
-                            if (![clips isKindOfClass:[NSArray class]]) continue;
+                            // FFEventRecord (FCP 12.x and 13) only exposes
+                            // displayOwnedClips, which returns an NSSet; use the
+                            // same enumeration as browser.listClips so names and
+                            // indexes resolve to the clips it reports.
+                            NSArray *clips = SpliceKit_copyBrowserClipsForEvent(event);
 
-                            for (id c in (NSArray *)clips) {
+                            for (id c in clips) {
                                 if (currentIdx == targetIdx) { clip = c; break; }
                                 if (name && [c respondsToSelector:@selector(displayName)]) {
                                     NSString *dn = ((id (*)(id, SEL))objc_msgSend)(c, @selector(displayName));
@@ -28173,6 +28226,17 @@ NSDictionary *SpliceKit_handleRequest(NSDictionary *request) {
             return @{@"error": @{@"code": @(-32601), @"message":
                          [NSString stringWithFormat:@"Method not found: %@", method]}};
         }
+    }
+
+    // A nil result means the handler's main-thread block never finished within
+    // SpliceKit_executeOnMainThread's timeout — typically because the action
+    // opened a modal panel (e.g. File > New > Library's save panel). The action
+    // may still be running; don't surface it as an NSDictionary nil-insert crash.
+    if (!result) {
+        return @{@"error": @{@"code": @(-32000), @"message":
+                     [NSString stringWithFormat:@"%@ did not finish in time; Final Cut Pro may be "
+                                                @"showing a modal dialog or panel (see dialog.detect)",
+                                                method ?: @"request"]}};
     }
 
     if (result[@"error"] && ![result[@"error"] isKindOfClass:[NSDictionary class]]) {

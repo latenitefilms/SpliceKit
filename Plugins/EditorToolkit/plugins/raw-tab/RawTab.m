@@ -238,9 +238,17 @@ static NSButton *RFindButton(NSView *v, SEL action) {
         }
         if (info < 0) { RLog(@"RED: Info tab not found in %@", tv.tabViewItems); return; }
         ((void(*)(id,SEL,NSUInteger))objc_msgSend)(gTabModule, NSSelectorFromString(@"selectInspectorTab:"), (NSUInteger)info);
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        [self sk_pressREDButtonAfter:0.3 triesLeft:5];
+    } @catch (id e) { RLog(@"loadRED threw %@", e); }
+}
+// The Info tab builds its RED button a moment after it is selected, and on a busy or slow machine that can take
+// longer than one fixed wait: look for it a few times (~2 s in all) before deciding Final Cut has no RED settings.
+- (void)sk_pressREDButtonAfter:(double)delay triesLeft:(int)tries {
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        @try {
             NSButton *b = nil;
             for (NSWindow *w in NSApp.windows) { b = RFindButton(w.contentView, NSSelectorFromString(@"modifyRedRawSettingsButtonPressed:")); if (b) break; }
+            if (!b && tries > 0) { [self sk_pressREDButtonAfter:0.35 triesLeft:tries - 1]; return; }
             RLog(@"RED: native button %@", b ? @"found - pressing" : @"not found");
             if (b) [NSApp sendAction:b.action to:b.target from:b];   // Final Cut's own button action, no synthetic click
             else {
@@ -252,8 +260,8 @@ static NSButton *RFindButton(NSView *v, SEL action) {
                     if (tv2.tabViewItems[i].identifier == gModule || [tv2.tabViewItems[i].identifier isEqual:kTabIdent]) {
                         ((void(*)(id,SEL,NSUInteger))objc_msgSend)(gTabModule, NSSelectorFromString(@"selectInspectorTab:"), i); break; }
             }
-        });
-    } @catch (id e) { RLog(@"loadRED threw %@", e); }
+        } @catch (id e) { RLog(@"RED button lookup threw %@", e); }
+    });
 }
 @end
 
@@ -392,7 +400,11 @@ static void rawtab_install(void) {
         Method m = h ? class_getInstanceMethod(h, @selector(openHUD)) : NULL;
         if (!m) { RLog(@"%s: %s not available", kProviders[i].name, kProviders[i].hudClass); continue; }
         if (method_getImplementation(m) == (IMP)h_openHUD) continue;   // shared/inherited openHUD already hooked
-        gOpenHUD[NSStringFromClass(h)] = [NSValue valueWithPointer:(void *)method_setImplementation(m, (IMP)h_openHUD)];
+        // record the original under the class that defines this openHUD (it may be inherited), so h_openHUD finds it
+        // from every subclass that shares it - not just the first provider that happened to be hooked
+        Class owner = h;
+        for (Class sup = class_getSuperclass(h); sup && class_getInstanceMethod(sup, @selector(openHUD)) == m; sup = class_getSuperclass(sup)) owner = sup;
+        gOpenHUD[NSStringFromClass(owner)] = [NSValue valueWithPointer:(void *)method_setImplementation(m, (IMP)h_openHUD)];
     }
     RLog(@"RAW Tab loaded (ids=%d image=%d alt=%d button=%d) providers=%@", o_ids != NULL, o_image != NULL, o_alt != NULL, o_button != NULL, gOpenHUD.allKeys);
 }

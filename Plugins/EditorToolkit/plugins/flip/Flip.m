@@ -80,6 +80,18 @@ static double ReadScale(NSTextField *s);
 @property (weak) NSView *root;
 @property (weak) SKFlipButton *h, *v;
 @end
+// sets a Final Cut value scrubber the way typing a value does: scrubber value + controller action, one undoable edit
+static void SetScrub(NSTextField *s, double nv) {
+    id ctl = s.target; if (!s || !ctl) return;
+    SEL setSV = NSSelectorFromString(@"setScrubberValue:");
+    if ([s respondsToSelector:setSV]) [s performSelector:setSV withObject:@(nv)];
+    s.doubleValue = nv;
+    SEL st = NSSelectorFromString(@"startSegmentedScrubberAction:"), en = NSSelectorFromString(@"endSegmentedScrubberAction:");
+    if ([ctl respondsToSelector:st]) ((void(*)(id,SEL,id))objc_msgSend)(ctl, st, s);
+    ((void(*)(id,SEL,id))objc_msgSend)(ctl, NSSelectorFromString(@"setChannelValueAction:"), s);
+    if ([ctl respondsToSelector:en]) ((void(*)(id,SEL,id))objc_msgSend)(ctl, en, s);
+    if ([ctl respondsToSelector:NSSelectorFromString(@"update")]) ((void(*)(id,SEL))objc_msgSend)(ctl, NSSelectorFromString(@"update"));
+}
 @implementation SKFlipTarget
 - (void)refresh {
     NSTextField *sx = ScrubberFor(self.root, @"Scale X"), *sy = ScrubberFor(self.root, @"Scale Y");
@@ -99,14 +111,8 @@ static double ReadScale(NSTextField *s) {
         if (v == 0) return;
         double nv = -v;
         // 1) the same path as typing a value into the field: scrubber value + controller action, wrapped as one undoable edit
-        SEL setSV = NSSelectorFromString(@"setScrubberValue:");
-        if ([s respondsToSelector:setSV]) [s performSelector:setSV withObject:@(nv)];
-        s.doubleValue = nv;
+        SetScrub(s, nv);
         SEL st = NSSelectorFromString(@"startSegmentedScrubberAction:"), en = NSSelectorFromString(@"endSegmentedScrubberAction:");
-        if ([ctl respondsToSelector:st]) ((void(*)(id,SEL,id))objc_msgSend)(ctl, st, s);
-        ((void(*)(id,SEL,id))objc_msgSend)(ctl, NSSelectorFromString(@"setChannelValueAction:"), s);
-        if ([ctl respondsToSelector:en]) ((void(*)(id,SEL,id))objc_msgSend)(ctl, en, s);
-        if ([ctl respondsToSelector:NSSelectorFromString(@"update")]) ((void(*)(id,SEL))objc_msgSend)(ctl, NSSelectorFromString(@"update"));
         double after = ReadScale(s);
         FL([NSString stringWithFormat:@"flip %@ via action: %.2f -> want %.2f, channel now %.2f", b.vertical ? @"V" : @"H", v, nv, after]);
         // 2) fallback: write the channel directly through the controller
@@ -125,17 +131,6 @@ static double ReadScale(NSTextField *s) {
 @end
 
 // ---------- image orientation (0 / 90 right / 180 / 90 left), done with fcp's own rotation + scale ----------
-static void SetScrub(NSTextField *s, double nv) {
-    id ctl = s.target; if (!s || !ctl) return;
-    SEL setSV = NSSelectorFromString(@"setScrubberValue:");
-    if ([s respondsToSelector:setSV]) [s performSelector:setSV withObject:@(nv)];
-    s.doubleValue = nv;
-    SEL st = NSSelectorFromString(@"startSegmentedScrubberAction:"), en = NSSelectorFromString(@"endSegmentedScrubberAction:");
-    if ([ctl respondsToSelector:st]) ((void(*)(id,SEL,id))objc_msgSend)(ctl, st, s);
-    ((void(*)(id,SEL,id))objc_msgSend)(ctl, NSSelectorFromString(@"setChannelValueAction:"), s);
-    if ([ctl respondsToSelector:en]) ((void(*)(id,SEL,id))objc_msgSend)(ctl, en, s);
-    if ([ctl respondsToSelector:NSSelectorFromString(@"update")]) ((void(*)(id,SEL))objc_msgSend)(ctl, NSSelectorFromString(@"update"));
-}
 static const double kOrientAngle[4] = { 0, -90, 180, 90 };          // fcp rotation: positive = counter-clockwise
 static NSString *const kOrientTitle[4] = { @"0°", @"90° right", @"180°", @"90° left" };
 static int OrientFromRotation(double rot) {
@@ -284,6 +279,7 @@ static NSView *MakeRow(NSView *anchorRow, NSView *root) {
         b.bordered = NO; b.title = @""; b.buttonType = NSButtonTypeMomentaryChange;
         b.target = t; b.action = @selector(flip:);
         b.toolTip = b.vertical ? @"Flip Vertical" : @"Flip Horizontal";
+        b.accessibilityLabel = b.toolTip;   // icon-only button: give VoiceOver a name
         [row addSubview:b];
     }
     t.h = h; t.v = v;

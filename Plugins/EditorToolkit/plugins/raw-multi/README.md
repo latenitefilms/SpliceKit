@@ -9,7 +9,7 @@ Matching a scene shot on one camera usually means setting the same ISO, white ba
 ## How it works
 
 - Sliders, menus and the ↺ reset buttons keep working with mixed selections.
-- Values that differ show a small **Multiple** chip (menus show `--`), drawn on top of the control, so Final Cut's own data is never altered just to display it.
+- Values that differ are marked on top of the control, so Final Cut's own data is never altered just to display it: a small `--` chip over sliders and value fields, and **Multiple** (or *Mixed* where there's less room) over menus.
 - Dragging, typing or picking a value sets it on all selected clips.
 
 ## Requires

@@ -8,7 +8,7 @@ Timelines that come from other apps (Resolve, Premiere, an online editor, a colo
 
 ## How it works
 
-- Hooks Final Cut's XML importer; when the imported timeline opens (within 20 seconds of the import finishing), each source clip and collection is revealed in the browser once. If no timeline opens in that time, nothing is changed.
+- Hooks Final Cut's XML importer; when a timeline that import created opens (within 20 seconds of the import finishing), each source clip and collection is revealed in the browser once. Any other project you open is left alone, and if the imported timeline doesn't open in that time, nothing is changed.
 - Your selection is restored afterwards.
 
 ## Requires

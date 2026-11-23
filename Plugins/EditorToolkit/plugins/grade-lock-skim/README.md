@@ -14,7 +14,7 @@ With nothing selected, Final Cut's inspector shows whatever is on top under the 
 
 ## Requires
 
-Grade Lock (same `lock` naming rule).
+Nothing: it works on its own. It pairs with Grade Lock, which uses the same `lock` naming rule (Grade Lock stops clicks selecting locked layers; this makes the inspector look through them).
 
 ## Install
 

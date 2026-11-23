@@ -2,7 +2,7 @@
 
 Small native SpliceKit plugins for Final Cut Pro. Each one fixes a specific friction from day-to-day finishing work on fashion films, luxury commercials and branded spots, shot on a Blackmagic Cinema Camera 6K in Blackmagic RAW.
 
-Install all of them, a themed preset, or any single plugin. Each plugin is independent, and removing one never affects the others.
+Install all of them, a themed preset, or any single plugin. Each plugin installs and runs on its own, but a few are meant to be used together: Grade Lock Skim pairs with Grade Lock, and RAW Multi, RAW Gyro and Shortcuts' Edit RAW Properties work best with RAW Tab installed (`install.sh` says so when you leave the partner out).
 
 ## The thinking behind it
 
@@ -50,7 +50,11 @@ Restart Final Cut Pro afterwards. Plugins are built from source, ad-hoc signed, 
 
 ## Tested on
 
-Final Cut Pro 12.4 (build 454072), SpliceKit 3.3.9, macOS 27.2, Apple Silicon. The plugins rely on private Final Cut classes, so a Final Cut update can break any of them. Each checks for what it needs at load time and logs what it found.
+Written and used on Final Cut Pro 12.4 (build 454072) with SpliceKit 3.3.9, macOS 27.2, Apple Silicon.
+
+In this repository, on Final Cut Pro 13.0 (and Creator Studio 13.0 for the classes and methods): every private class and method the plugins use exists, and all 14 build and load into a running Final Cut. Exercised in Final Cut 13.0: Topmost, Paste Below Lock, XML Clips and Inspector Refresh. Not yet exercised there: RAW Tab, RAW Multi and RAW Gyro with RAW media (BRAW, ProRes RAW, RED), the Playback Frame Rate readout during playback, Batch Sync Audio's sync, Flip, Shortcuts' commands (they register), Grade Lock, Grade Lock Skim and Workspace Collapse (Vertical Workspace).
+
+The plugins rely on private Final Cut classes, so a Final Cut update can break any of them. Each checks for what it needs at load time and logs what it found.
 
 ## Layout
 
@@ -70,7 +74,7 @@ Imported from [ishubhampratap/SpliceKit `editor-toolkit`](https://github.com/ish
 
 - **Topmost** is off until you turn it on, and only redirects commands you issue (menu, shortcut, toolbar). SpliceKit's own programmatic `blade:`/`copy:` calls (transcript editing, `bladeAtTimes`) always get Final Cut's normal behaviour.
 - **Playback Frame Rate** holds viewer destinations weakly, so closing a viewer (full screen, Event Viewer, closing a project) can't crash Final Cut.
-- **XML Clips** only acts on a timeline that opens within 20 seconds of an import, instead of whatever project you open in the next 10 minutes.
+- **XML Clips** only acts on a timeline the import itself created, opened within 20 seconds of it, instead of whatever project you open in the next 10 minutes, and tells sources apart by their media rather than their name.
 - **Grade Lock Skim** looks up `SpliceKit_getActiveTimelineModule` by its real (C) symbol name, so "show the clip below" works.
 - Leftover in-process test hooks (Batch Sync Audio's `SKAS` notifications, which could apply a sync without the review panel; Flip's and Workspace Collapse's test notifications; the FPS meter's debug dump) are removed.
 - **Workspace Fix** isn't included: it disabled parts of SpliceKit's dual-timeline support from outside the core. The crash it worked around should be fixed in SpliceKit itself.
@@ -78,4 +82,4 @@ Imported from [ishubhampratap/SpliceKit `editor-toolkit`](https://github.com/ish
 
 ## Credits
 
-By Shubham Pratap. RAW Tab's inspector-tab plumbing is modelled on [Transcript Tab](https://github.com/bcassin/fcp-transcript-tab) (MIT). MIT licensed, like SpliceKit.
+By Shubham Pratap. RAW Tab's inspector-tab plumbing is modelled on [Transcript Tab](https://github.com/bcassin/fcp-transcript-tab) (MIT). The toolkit from upstream PR #100 is MIT licensed, like SpliceKit. RAW Tab v2.0.0 and Inspector Refresh come from separate repositories ([splicekit-raw-tab](https://github.com/ishubhampratap/splicekit-raw-tab), [splicekit-inspector-refresh](https://github.com/ishubhampratap/splicekit-inspector-refresh)) that don't declare a license.

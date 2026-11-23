@@ -24,7 +24,10 @@ static BOOL GLLocked(id o) {
     NSString *n = GLName(o);
     return n && [n rangeOfString:@"lock" options:NSCaseInsensitiveSearch].location != NSNotFound;
 }
+// Selection callbacks fire many times a second during a marquee drag, so this log is capped per session.
 static void GLLog(NSString *s) {
+    static int logged = 0;
+    if (logged++ >= 40) return;
     FILE *f = fopen([[NSHomeDirectory() stringByAppendingPathComponent:@"Library/Logs/SpliceKit/gradelock.log"] fileSystemRepresentation], "a");
     if (f) { fprintf(f, "%s\n", s.UTF8String); fclose(f); }
 }

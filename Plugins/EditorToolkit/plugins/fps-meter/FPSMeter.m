@@ -48,15 +48,28 @@ static ptrdiff_t gOffLastFrame = -1;
 static IMP oDraw, oHealth;
 static volatile BOOL gEnabled = YES;
 
+// Lock order: gSlotsLock, then a slot's lock. A slot can be handed to another destination at any time
+// (eviction, or Refresh forgetting a dead viewer), so whoever locks a slot must re-check its dest.
+static void ResetSlot(Slot *s, void *d) {   // caller holds s->lock; the lock itself is never touched
+    s->lastFrame = kCMTimeInvalid; s->head = s->count = 0; s->frameDur = s->rate = 0;
+    s->playStart = s->lastSeen = 0; s->health = -1;
+    s->runFrames = s->runSkipped = 0; s->runFirst = s->runLast = s->runMaxHold = 0;
+    s->dest = d;
+}
 static Slot *SlotFor(void *d, BOOL create) {
     for (int i = 0; i < 4; i++) if (gSlots[i].dest == d) return &gSlots[i];
     if (!create) return NULL;
     os_unfair_lock_lock(&gSlotsLock);
     Slot *s = NULL;
-    for (int i = 0; i < 4 && !s; i++) if (!gSlots[i].dest) s = &gSlots[i];
-    if (!s) { double oldest = 1e300; for (int i = 0; i < 4; i++) if (gSlots[i].lastSeen < oldest) { oldest = gSlots[i].lastSeen; s = &gSlots[i]; } }
-    memset(s, 0, sizeof *s); s->lock = OS_UNFAIR_LOCK_INIT; s->lastFrame = kCMTimeInvalid; s->health = -1; s->dest = d;
-    gSlotDest[s - gSlots] = (__bridge id)d;   // d is the live caller (self)
+    for (int i = 0; i < 4 && !s; i++) if (gSlots[i].dest == d) s = &gSlots[i];   // another thread just made it
+    if (!s) {
+        for (int i = 0; i < 4 && !s; i++) if (!gSlots[i].dest) s = &gSlots[i];
+        if (!s) { double oldest = 1e300; for (int i = 0; i < 4; i++) if (gSlots[i].lastSeen < oldest) { oldest = gSlots[i].lastSeen; s = &gSlots[i]; } }
+        os_unfair_lock_lock(&s->lock);   // waits for a draw or Read still using the slot
+        ResetSlot(s, d);
+        os_unfair_lock_unlock(&s->lock);
+        gSlotDest[s - gSlots] = (__bridge id)d;   // d is the live caller (self)
+    }
     os_unfair_lock_unlock(&gSlotsLock);
     return s;
 }
@@ -68,18 +81,26 @@ static int hDraw(id self, SEL _cmd, const void *ts) {
     if (!s) return r;
     double now = HostNow();
     os_unfair_lock_lock(&s->lock);
+    if (s->dest != (__bridge void *)self) { os_unfair_lock_unlock(&s->lock); return r; }   // slot was just given to another viewer
     if (!playing) { s->lastFrame = kCMTimeInvalid; s->playStart = 0; os_unfair_lock_unlock(&s->lock); return r; }
     void *fp = *(void **)((char *)(__bridge void *)self + gOffLastFrame);
     if (fp) {
         CMTime t = ((CMTime(*)(id, SEL))objc_msgSend)((__bridge id)fp, @selector(time));
         if (!s->playStart) { s->playStart = now; s->head = s->count = 0; s->runFrames = s->runSkipped = 0; s->runFirst = s->runLast = 0; s->runMaxHold = 0; s->lastFrame = t; }
         else if (CMTIME_IS_VALID(t) && CMTimeCompare(t, s->lastFrame) != 0) {
+            id pl = ((id(*)(id, SEL))objc_msgSend)(self, @selector(player));
+            double rate = pl ? ((double(*)(id, SEL))objc_msgSend)(pl, @selector(rate)) : 1;
+            if (s->runFrames && fabs(rate - s->rate) > 0.001) {
+                // the speed changed without stopping (J/L): measure the new speed as a new run, so the
+                // target, the expected frame step and the skip count all use the speed actually playing
+                s->playStart = now; s->head = s->count = 0;
+                s->runFrames = s->runSkipped = 0; s->runFirst = s->runLast = 0; s->runMaxHold = 0;
+            }
             if (!s->runFrames || s->frameDur <= 0) {
                 CMTime sd = ((CMTime(*)(id, SEL))objc_msgSend)(self, @selector(sampleDuration));
                 s->frameDur = CMTimeGetSeconds(sd);
-                id pl = ((id(*)(id, SEL))objc_msgSend)(self, @selector(player));
-                s->rate = pl ? ((double(*)(id, SEL))objc_msgSend)(pl, @selector(rate)) : 1;
             }
+            s->rate = rate;
             double dt = CMTimeGetSeconds(CMTimeSubtract(t, s->lastFrame));
             long n = s->frameDur > 0 ? lround(fabs(dt) / s->frameDur) : 1;
             long expected = MAX(1, lround(fabs(s->rate)));         // at 2x every other frame is skipped by design
@@ -101,7 +122,8 @@ static int hDraw(id self, SEL _cmd, const void *ts) {
     return r;
 }
 static void hHealth(id self, SEL _cmd, float h, float d) {
-    Slot *s = SlotFor((__bridge void *)self, NO); if (s) s->health = h;
+    Slot *s = SlotFor((__bridge void *)self, NO);
+    if (s) { os_unfair_lock_lock(&s->lock); if (s->dest == (__bridge void *)self) s->health = h; os_unfair_lock_unlock(&s->lock); }
     ((void(*)(id, SEL, float, float))oHealth)(self, _cmd, h, d);
 }
 
@@ -177,9 +199,10 @@ static NSString *Num(double fps) { return fabs(fps - round(fps)) < 0.005 ? [NSSt
 
 #pragma mark - UI refresh (main thread, 4x a second)
 typedef struct { BOOL valid, playing; double fps, target, rate, health, maxHold, span; long skipped1s, skipped3s, runFrames, runSkipped; double runFps; } Reading;
-static Reading Read(Slot *s, double now) {
+static Reading Read(Slot *s, void *dest, double now) {
     Reading r = {0};
     os_unfair_lock_lock(&s->lock);
+    if (s->dest != dest) { os_unfair_lock_unlock(&s->lock); return r; }   // reassigned since Refresh picked it
     r.playing = s->playStart > 0 && now - s->lastSeen < 0.25;
     r.target = s->frameDur > 0 ? fabs(s->rate ?: 1) / s->frameDur : 0; r.rate = s->rate ?: 1; r.health = s->health;
     double since = r.playing ? now - s->playStart : 0;
@@ -226,17 +249,22 @@ static void Refresh(void) {
         id live = gSlotDest[i];
         if (!live) {   // viewer destination went away: forget the slot instead of messaging freed memory
             os_unfair_lock_lock(&gSlotsLock);
-            if (gShownDest == gSlots[i].dest) gShownDest = NULL;
-            gSlots[i].dest = NULL;
+            os_unfair_lock_lock(&gSlots[i].lock);
+            if (!gSlotDest[i]) {   // still dead (not just reused by a new viewer)
+                if (gShownDest == gSlots[i].dest) gShownDest = NULL;
+                gSlots[i].dest = NULL;
+            }
+            os_unfair_lock_unlock(&gSlots[i].lock);
             os_unfair_lock_unlock(&gSlotsLock);
             continue;
         }
         if (gSlots[i].runLast > bestT) { bestT = gSlots[i].runLast; best = &gSlots[i]; bestDest = live; }
     }
     NSTextField *bestInfo = bestDest ? InfoLabelForDest((__bridge void *)bestDest) : nil;
-    for (FMIndicator *ind in [[gIndicators objectEnumerator] allObjects]) if (!gEnabled || (best && ind.info != bestInfo)) ind.hidden = YES;
-    if (!gEnabled || !best) return;
-    Reading r = Read(best, now);
+    // hide every indicator but the one for that viewer - all of them when no viewer is live any more
+    for (FMIndicator *ind in [[gIndicators objectEnumerator] allObjects]) if (!gEnabled || !best || ind.info != bestInfo) ind.hidden = YES;
+    if (!gEnabled || !best) { gShownDest = NULL; return; }
+    Reading r = Read(best, (__bridge void *)bestDest, now);
     FMIndicator *ind = IndicatorFor(bestInfo);
     if (!ind) return;
     NSString *target = r.target > 0 ? Num(r.target) : @"?";

@@ -117,14 +117,17 @@ static IMP o_blade, o_copy, o_paste, o_pasteAnchored, o_actionEnd;
 static BOOL gHaveCopy; static long gCopyLane; static NSInteger gCopyChange;
 static BOOL gPasteActive, gPasteHandled; static NSSet *gPasteBefore; static long gPasteLane;
 
-// run Final Cut's own command on the topmost clip; returns NO if this press isn't ours to handle
-static BOOL RunOnTopmost(id tm, SEL cmd, id sender, IMP orig, NSString *what, long *outLane) {
+// run Final Cut's own command on the topmost clip; returns NO if this press isn't ours to handle.
+// *ran is set once Final Cut's command has been sent to the topmost clip, so a caller that catches an
+// exception knows not to run the command natively as well (that would cut or copy a second time).
+static BOOL RunOnTopmost(id tm, SEL cmd, id sender, IMP orig, NSString *what, long *outLane, BOOL *ran) {
+    if (!Enabled()) return NO;   // off (the default): ordinary editing, nothing to do or log
     // Only redirect commands the user issued (menu item, shortcut, toolbar: all pass a sender).
     // Programmatic calls (SpliceKit's transcript editing, bladeAtTimes, other plugins) send nil
     // and expect Final Cut's normal behaviour.
     if (!sender) { TL(@"%@: programmatic call (no sender) -> native", what); return NO; }
     NSUInteger nsel = Selection(tm).count;
-    if (!Enabled() || nsel) { TL(@"%@: %@ -> native", what, !Enabled() ? @"toggle off" : [NSString stringWithFormat:@"%lu item(s) selected", (unsigned long)nsel]); return NO; }
+    if (nsel) { TL(@"%@: %lu item(s) selected -> native", what, (unsigned long)nsel); return NO; }
     if (tm != ActiveTM()) TL(@"%@: note, not the active timeline module (%@ vs %@)", what, tm, ActiveTM());
     CMTime t = EditTime(tm);
     SKTarget tg = FindTopmost(tm, t);
@@ -132,6 +135,7 @@ static BOOL RunOnTopmost(id tm, SEL cmd, id sender, IMP orig, NSString *what, lo
     if (tg.lane == 0 && !tg.inStoryline) { TL(@"%@ at %.3f: topmost video is on the primary storyline -> native", what, CMTimeGetSeconds(t)); return NO; }
     TL(@"%@ at %.3f: target '%@' lane %ld%@", what, CMTimeGetSeconds(t), O(tg.item, @"displayName"), tg.lane, tg.inStoryline ? @" (in connected storyline)" : @"");
     SetSelection(tm, @[tg.item]);
+    if (ran) *ran = YES;
     @try { ((void(*)(id, SEL, id))orig)(tm, cmd, sender); }
     @finally {
         SetSelection(tm, @[]);
@@ -156,13 +160,16 @@ static BOOL RunOnTopmost(id tm, SEL cmd, id sender, IMP orig, NSString *what, lo
     return YES;
 }
 static void h_blade(id self, SEL _cmd, id sender) {
-    @try { if (RunOnTopmost(self, _cmd, sender, o_blade, @"blade", NULL)) return; } @catch (id e) { TL(@"blade hook threw %@", e); }
+    BOOL ran = NO;
+    @try { if (RunOnTopmost(self, _cmd, sender, o_blade, @"blade", NULL, &ran)) return; }
+    @catch (id e) { TL(@"blade hook threw %@", e); if (ran) return; }   // the topmost clip may already be cut
     ((void(*)(id, SEL, id))o_blade)(self, _cmd, sender);
 }
 static void h_copy(id self, SEL _cmd, id sender) {
     long lane = 0;
-    BOOL ours = NO;
-    @try { ours = RunOnTopmost(self, _cmd, sender, o_copy, @"copy", &lane); } @catch (id e) { TL(@"copy hook threw %@", e); }
+    BOOL ours = NO, ran = NO;
+    @try { ours = RunOnTopmost(self, _cmd, sender, o_copy, @"copy", &lane, &ran); }
+    @catch (id e) { TL(@"copy hook threw %@", e); if (ran) { gHaveCopy = NO; return; } }   // don't copy the storyline over it
     if (ours) { gHaveCopy = YES; gCopyLane = lane; gCopyChange = [NSPasteboard generalPasteboard].changeCount; return; }
     gHaveCopy = NO;                                              // an ordinary copy: paste behaves natively
     ((void(*)(id, SEL, id))o_copy)(self, _cmd, sender);

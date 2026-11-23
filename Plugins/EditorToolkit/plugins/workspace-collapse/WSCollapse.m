@@ -84,7 +84,8 @@ static BOOL hUnhide(id self, SEL _cmd, id sub) {
     @try { if (!gBusy && IsPanelRow(self)) {
         id parent = O(self, @"supermodule");
         if (parent && !Visible(parent, self) && WorkspaceActive()) {   // the row was collapsed by us: bring it back first
-            gBusy = YES; @try { ((BOOL(*)(id, SEL, id))oUnhide)(parent, _cmd, self); } @finally { gBusy = NO; }
+            // a normal message, so an override on the parent's class still runs; gBusy keeps our hook out of it
+            gBusy = YES; @try { ((BOOL(*)(id, SEL, id))objc_msgSend)(parent, @selector(unhideSubmodule:), self); } @finally { gBusy = NO; }
             WLog(@"restored panel row (for %@)", O(sub, @"identifier"));
         }
     } } @catch (NSException *e) { WLog(@"unhide pre-step threw %@", e.reason); }
@@ -110,7 +111,7 @@ static void Settle(id row, NSString *why) {
     }
     if (active && bVis && iVis && gSaved) { @try { RestoreRow(row); } @catch (NSException *e) { WLog(@"restore threw %@", e.reason); } gSaved = nil; }
     if (active && !bVis && !iVis && parent && Visible(parent, row)) {
-        gBusy = YES; @try { ((BOOL(*)(id, SEL, id))oHide)(parent, @selector(hideSubmodule:), row); } @finally { gBusy = NO; }
+        gBusy = YES; @try { ((BOOL(*)(id, SEL, id))objc_msgSend)(parent, @selector(hideSubmodule:), row); } @finally { gBusy = NO; }   // normal message: see hUnhide
         WLog(@"%@: both panels closed - collapsed the row, timeline takes the space", why);
     } else WLog(@"%@: browser %d inspector %d (workspace %@)%@", why, bVis, iVis, active ? @"vertical" : @"other", gStretchInspector ? @", inspector fills the row" : @"");
 }

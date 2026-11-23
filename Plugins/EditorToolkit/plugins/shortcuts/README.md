@@ -10,7 +10,7 @@ Some of the things done most often in a RAW-heavy grade have no keyboard command
 
 | Command | What it does |
 |---|---|
-| **Edit RAW Properties** | Jumps the inspector to the RAW tab for the selected BRAW clip; press again to hide the inspector |
+| **Edit RAW Properties** | Jumps the inspector to the RAW tab for the selected RAW clip (BRAW, ProRes RAW or RED); press again to hide the inspector |
 | **Toggle Stabilization** | Turns Final Cut's Stabilization on/off for the selected clips (presses the same checkbox, so undo and multi-clip behaviour are native) |
 | **Zoom to Fit (Toggle)** | Fits the whole timeline; press again to return to the exact zoom and scroll position you had |
 | **Show Video Inspector** / **Show Info Inspector** | Switches to that tab; pressing again on that tab hides the inspector |

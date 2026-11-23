@@ -23,6 +23,9 @@ PRESET_editing="topmost paste-below-lock xml-clips audio-sync flip inspector-ref
 PRESET_monitoring="fps-meter"
 
 all_plugins() { ls -1 "$ROOT/plugins"; }
+# A plugin name is only ever one of the folders in plugins/ - never a path (e.g. "../plugins/raw-tab" would
+# otherwise build into the source folder, and "--uninstall .." would delete the whole SpliceKit plugins folder).
+is_plugin() { [[ "$1" != */* && "$1" != .* ]] && all_plugins | grep -qx -- "$1"; }
 json_field() { /usr/bin/python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))[sys.argv[2]])' "$1" "$2" 2>/dev/null || true; }
 
 list() {
@@ -38,7 +41,7 @@ need_clang() {
 
 build_one() {
   local p="$1" dir="$ROOT/plugins/$1"
-  [ -d "$dir" ] || { echo "unknown plugin: $p (see --list)"; exit 1; }
+  is_plugin "$p" || { echo "unknown plugin: $p (see --list)"; exit 1; }
   # shellcheck disable=SC1091
   SOURCE=""; PRODUCT=""; FRAMEWORKS=""; source "$dir/build.env"
   local fw=""; for f in $FRAMEWORKS; do fw="$fw -framework $f"; done
@@ -62,12 +65,8 @@ install_one() {
 }
 
 uninstall_one() {
-  # Only ever remove a plugin this toolkit ships: never a path built from arbitrary input
-  # (e.g. "--uninstall .." would otherwise delete the whole SpliceKit plugins folder).
   local p="$1"
-  if [[ "$p" == */* || "$p" == .* ]] || ! all_plugins | grep -qx -- "$p"; then
-    echo "unknown plugin: $p (see --list)"; return
-  fi
+  is_plugin "$p" || { echo "unknown plugin: $p (see --list)"; return; }
   local t="$DEST/$p"
   [ -d "$t" ] || { echo "not installed: $p"; return; }
   rm -rf -- "$t" && echo "removed $p"

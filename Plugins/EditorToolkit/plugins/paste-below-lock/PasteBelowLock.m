@@ -58,8 +58,13 @@ static NSSet *Snapshot(id seq) {
     return s;
 }
 
-// what was copied: "name|duration" -> above a lock at the source (NSNumber), valid while the pasteboard is unchanged
-static NSMutableDictionary *gCopied; static NSInteger gCopyChange = -1;
+// what was copied, valid while the pasteboard is unchanged: "name|duration" -> one entry per copied clip with
+// that key, in time order (then lane): @{start, lane, locks: the lock names it sat above at the source}
+static NSMutableDictionary<NSString *, NSMutableArray<NSDictionary *> *> *gCopied; static NSInteger gCopyChange = -1;
+static NSComparisonResult ByTimeThenLane(double sa, long la, double sb, long lb) {
+    if (fabs(sa - sb) > 0.0005) return sa < sb ? NSOrderedAscending : NSOrderedDescending;
+    return la < lb ? NSOrderedAscending : la > lb ? NSOrderedDescending : NSOrderedSame;
+}
 static NSString *Key(id o) {
     SEL s = NSSelectorFromString(@"duration");
     double d = 0;
@@ -81,18 +86,37 @@ static void NoteCopy(id tm) {
         NSArray *all = AnchoredItems(prim);
         gCopied = [NSMutableDictionary dictionary];
         for (id x in sel) {
-            NSSet *below = LocksBelow(x, prim, all);
+            CMTimeRange r = RangeIn(x, prim);
             NSString *k = Key(x);
-            if (below.count || !gCopied[k]) gCopied[k] = below;
+            if (!gCopied[k]) gCopied[k] = [NSMutableArray array];
+            [gCopied[k] addObject:@{ @"start": @(CMTIMERANGE_IS_VALID(r) ? CMTimeGetSeconds(r.start) : 0), @"lane": @(Lane(x)), @"locks": LocksBelow(x, prim, all) }];
         }
+        for (NSMutableArray *a in gCopied.allValues)
+            [a sortUsingComparator:^NSComparisonResult(NSDictionary *p, NSDictionary *q) { return ByTimeThenLane([p[@"start"] doubleValue], [p[@"lane"] longValue], [q[@"start"] doubleValue], [q[@"lane"] longValue]); }];
         gCopyChange = -2;   // filled in after Final Cut writes the pasteboard
         dispatch_async(dispatch_get_main_queue(), ^{ gCopyChange = [NSPasteboard generalPasteboard].changeCount; });
         PL([NSString stringWithFormat:@"copy noted: %@", gCopied]);
     } @catch (id e) { PL([NSString stringWithFormat:@"note copy threw %@", e]); gCopied = nil; }
 }
-static NSSet *SourceLocksBelow(id n) {
-    if (!gCopied || (gCopyChange != -2 && gCopyChange != [NSPasteboard generalPasteboard].changeCount)) return [NSSet set];
-    return gCopied[Key(n)] ?: [NSSet set];
+// For each pasted clip, the locks it sat above where it was copied from. Clips that share a name and
+// duration are told apart by order: a paste keeps the copied clips' relative timing (and stacking), so the
+// k-th pasted clip with a key is the k-th copied one. If the counts don't line up, a clip may only stay
+// above the locks every copied clip with its key sat above.
+static NSMapTable *SourceLocksBelow(NSArray *added, id prim) {
+    NSMapTable *out = [NSMapTable mapTableWithKeyOptions:NSPointerFunctionsStrongMemory | NSPointerFunctionsObjectPointerPersonality
+                                            valueOptions:NSPointerFunctionsStrongMemory];   // keyed by clip identity
+    BOOL valid = gCopied && (gCopyChange == -2 || gCopyChange == [NSPasteboard generalPasteboard].changeCount);
+    NSMutableDictionary<NSString *, NSMutableArray *> *pasted = [NSMutableDictionary dictionary];
+    for (id n in added) { NSString *k = Key(n); if (!pasted[k]) pasted[k] = [NSMutableArray array]; [pasted[k] addObject:n]; }
+    for (NSString *k in pasted) {
+        NSMutableArray *ps = pasted[k]; NSArray *src = valid ? gCopied[k] : nil;
+        [ps sortUsingComparator:^NSComparisonResult(id a, id b) { return ByTimeThenLane(CMTimeGetSeconds(RangeIn(a, prim).start), Lane(a), CMTimeGetSeconds(RangeIn(b, prim).start), Lane(b)); }];
+        NSMutableSet *common = nil;
+        for (NSDictionary *e in src) { if (!common) common = [e[@"locks"] mutableCopy]; else [common intersectSet:e[@"locks"]]; }
+        for (NSUInteger i = 0; i < ps.count; i++)
+            [out setObject:(src.count == ps.count ? src[i][@"locks"] : common) ?: [NSSet set] forKey:ps[i]];
+    }
+    return out;
 }
 
 // `seq` is the sequence the paste went into; `before` is its connected clips just before the paste
@@ -110,11 +134,12 @@ static BOOL FixAfterPaste(id seq, NSSet *before, BOOL ownAction) {
         if (!anyLock) return YES;
         [added sortUsingComparator:^NSComparisonResult(id a, id b) { return Lane(a) < Lane(b) ? NSOrderedAscending : Lane(a) > Lane(b) ? NSOrderedDescending : NSOrderedSame; }];
         BOOL began = NO;
+        NSMapTable *sourceLocks = SourceLocksBelow(added, prim);   // before any lane moves
         for (id n in added) {
             CMTimeRange r = RangeIn(n, prim);
             // keep the clip's relation to each lock as it was where it was copied from: it may stay above the
             // locks it sat above there, and goes under the lowest overlapping lock it was NOT above
-            NSSet *wasAbove = SourceLocksBelow(n);
+            NSSet *wasAbove = [sourceLocks objectForKey:n] ?: [NSSet set];
             long L = LONG_MAX;
             for (id l in all) if (Locked(l) && Lane(l) > 0 && Overlap(r, RangeIn(l, prim)) && ![wasAbove containsObject:O(l, @"displayName") ?: @""]) L = MIN(L, Lane(l));
             if (L == LONG_MAX || Lane(n) < L) { if (wasAbove.count) PL([NSString stringWithFormat:@"'%@' kept on lane %ld (was above %@)", O(n, @"displayName"), Lane(n), [wasAbove.allObjects componentsJoinedByString:@", "]]); continue; }

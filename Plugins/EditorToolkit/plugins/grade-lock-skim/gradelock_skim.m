@@ -21,7 +21,10 @@ static BOOL GSLocked(id o) {
     NSString *n = GSName(o);
     return n && [n rangeOfString:@"lock" options:NSCaseInsensitiveSearch].location != NSNotFound;
 }
+// The filters run on every skimmer/playhead move, so this log is capped per session.
 static void GSLog(NSString *s) {
+    static int logged = 0;
+    if (logged++ >= 40) return;
     FILE *f = fopen([[NSHomeDirectory() stringByAppendingPathComponent:@"Library/Logs/SpliceKit/gradelock.log"] fileSystemRepresentation], "a");
     if (f) { fprintf(f, "%s\n", s.UTF8String); fclose(f); }
 }
@@ -41,8 +44,7 @@ static id GSFilter(id c, NSString *where) {
     NSMutableArray *keep = [NSMutableArray array]; NSUInteger dropped = 0;
     for (id o in c) { if (GSLocked(o)) dropped++; else [keep addObject:o]; }
     if (!dropped) return c;
-    static int logged = 0;
-    if (logged++ < 40) GSLog([NSString stringWithFormat:@"%@: in=%@ kept=%lu", where, GSDescribe(c), (unsigned long)keep.count]);
+    GSLog([NSString stringWithFormat:@"%@: in=%@ kept=%lu", where, GSDescribe(c), (unsigned long)keep.count]);
     if ([c isKindOfClass:[NSSet class]]) return [NSSet setWithArray:keep];
     if ([c isKindOfClass:[NSOrderedSet class]]) return [NSOrderedSet orderedSetWithArray:keep];
     return keep;
@@ -62,6 +64,7 @@ static id GSReplacementBelow(void) {
     if (!CMTIME_IS_VALID(t) && [module respondsToSelector:phSel]) t = ((CMTime(*)(id, SEL))objc_msgSend)(module, phSel);
     if (!CMTIME_IS_VALID(t)) return nil;
     SEL visSel = NSSelectorFromString(@"_visibleItemsAtPlayhead:includeTransitions:includeAll:");
+    if (![module respondsToSelector:visSel]) { GSLog(@"insp: no _visibleItemsAtPlayhead:includeTransitions:includeAll:"); return nil; }
     id items = ((id(*)(id, SEL, CMTime, BOOL, BOOL))objc_msgSend)(module, visSel, t, NO, YES);
     id best = nil; long bestLane = -1000;
     for (id o in items) {

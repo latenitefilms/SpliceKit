@@ -38,10 +38,10 @@ static NSMutableSet *gDiffKeys;
     if (value && ctrl) {
       @try {
         ((void(*)(id,SEL,id))objc_msgSend)(hud, NSSelectorFromString(@"settingsChangeBegin:"), nil);
-        BOOL ok = ((BOOL(*)(id,SEL,id,id))objc_msgSend)(ctrl, @selector(setValue:forKey:), value, self.key);
-        ((void(*)(id,SEL,id))objc_msgSend)(hud, NSSelectorFromString(@"settingsChangeEnd:"), nil);
+        @try { ((void(*)(id,SEL,id,id))objc_msgSend)(ctrl, @selector(setValue:forKey:), value, self.key); }   // returns void
+        @finally { ((void(*)(id,SEL,id))objc_msgSend)(hud, NSSelectorFromString(@"settingsChangeEnd:"), nil); }
         ((void(*)(id,SEL))objc_msgSend)(hud, NSSelectorFromString(@"refreshOrRebuildUI"));
-        MLog([NSString stringWithFormat:@"reset %@ -> %@ on all selected (%d)", self.key, value, ok]);
+        MLog([NSString stringWithFormat:@"reset %@ -> %@ on all selected", self.key, value]);
       } @catch (id e) { MLog([NSString stringWithFormat:@"reset %@ threw %@", self.key, e]); }
     } else {
         MLog([NSString stringWithFormat:@"reset %@: no default value, skipped", self.key]);
@@ -205,7 +205,7 @@ static void h_setItems(id self, SEL _cmd, id items) { [gDiffKeys removeAllObject
 static void h_rebuild(id self, SEL _cmd) { [gDiffKeys removeAllObjects]; ((void(*)(id,SEL))o_rebuild)(self, _cmd); }
 static BOOL h_equal(id self, SEL _cmd, id key, id perController) {
     BOOL really = ((BOOL(*)(id,SEL,id,id))o_equal)(self, _cmd, key, perController);
-    if (!really && key) [gDiffKeys addObject:key];
+    if (key) { if (really) [gDiffKeys removeObject:key]; else [gDiffKeys addObject:key]; }   // values can match again (e.g. after a reset)
     return YES;
 }
 static void h_update(id self, SEL _cmd, id arg) {

@@ -367,10 +367,20 @@ static NSArray *AllBrowserClips(void) {
     return all;
 }
 static BOOL IsAudioOnly(id x);
-static id BrowserClipForURL(NSURL *u) {
-    for (id c in AllBrowserClips()) if ([ItemURL(c).path isEqualToString:u.path] && IsAudioOnly(c)) return c;
-    for (id c in AllBrowserClips()) if ([ItemURL(c).path isEqualToString:u.path]) return c;
-    return nil;
+// file path -> the browser clips made from that file. Walking every browser clip (and asking each for its media)
+// is slow on a big library, so Gather builds this once instead of once per selected clip.
+static NSDictionary<NSString *, NSArray *> *BrowserClipsByPath(void) {
+    NSMutableDictionary<NSString *, NSMutableArray *> *d = [NSMutableDictionary dictionary];
+    for (id c in AllBrowserClips()) {
+        NSString *p = ItemURL(c).path; if (!p) continue;
+        if (!d[p]) d[p] = [NSMutableArray array];
+        [d[p] addObject:c];
+    }
+    return d;
+}
+static id BrowserClipFrom(NSArray *clips) {   // of a file's browser clips, the audio-only one if there is one
+    for (id c in clips) if (IsAudioOnly(c)) return c;
+    return clips.firstObject;
 }
 static NSArray *BrowserSelection(void) {
     id app = ((id(*)(id, SEL))objc_msgSend)(objc_getClass("PEAppController"), NSSelectorFromString(@"appController"));
@@ -394,13 +404,15 @@ static BOOL Gather(NSMutableArray<ASVideo *> *videos, NSMutableArray<ASAudio *> 
     id tm = ActiveTM(); id seq = O(tm, @"sequence"); id prim = O(seq, @"primaryObject");
     if (!prim) { *why = @"Open a project first."; return NO; }
     NSArray *sel = ((id(*)(id, SEL, BOOL, BOOL))objc_msgSend)(tm, NSSelectorFromString(@"selectedItems:includeItemBeforePlayheadIfLast:"), NO, NO);
+    __block NSDictionary<NSString *, NSArray *> *byPath = nil;   // built on first use
+    NSArray *(^clipsFor)(NSURL *) = ^NSArray *(NSURL *u) { if (!byPath) byPath = BrowserClipsByPath(); return byPath[u.path] ?: @[]; };
     NSMutableSet *seenAudio = [NSMutableSet set];   // RecordingKeys of every recording already listed
     BOOL (^seen)(NSArray *) = ^BOOL(NSArray *keys) { for (NSString *k in keys) if ([seenAudio containsObject:k]) return YES; return NO; };
     for (id it in sel) {
         NSURL *u = ItemURL(it);
         if (!u) continue;
         if (IsAudioOnly(it)) {   // an external recording already in the timeline
-            id clip = BrowserClipForURL(u);
+            id clip = BrowserClipFrom(clipsFor(u));
             if (!clip) { ALog(@"no browser clip for %@", u.path); continue; }
             NSArray *keys = RecordingKeys(u);
             if (seen(keys)) {   // the same recording again: one entry, but remember every timeline copy of it
@@ -417,7 +429,7 @@ static BOOL Gather(NSMutableArray<ASVideo *> *videos, NSMutableArray<ASAudio *> 
         v.inFile = Sec(cr.start) - Sec(mr.start); v.dur = Sec(cr.duration);
         {   // a clip whose frame rate Final Cut conforms keeps its times in project-rate units: bring them back to file time
             double fileLen = 0;
-            for (id c in AllBrowserClips()) if (!IsAudioOnly(c) && [ItemURL(c).path isEqualToString:u.path]) { fileLen = Sec(OR(c, @"mediaRange").duration); break; }
+            for (id c in clipsFor(u)) if (!IsAudioOnly(c)) { fileLen = Sec(OR(c, @"mediaRange").duration); break; }
             double sc = (fileLen > 0 && Sec(mr.duration) > 0) ? fileLen / Sec(mr.duration) : 1;
             if (fabs(sc - 1) >= 0.0005) { v.inFile *= sc; v.dur *= sc; }
         }

@@ -1,6 +1,6 @@
 // SpliceKit Shortcuts: adds two commands to Final Cut Pro's own Command Editor
 // (Final Cut Pro > Commands > Customize...), so they can be given any key like a native command.
-//   "Edit RAW Properties"  - jumps the inspector to the RAW tab for the selected BRAW clip (again = back)
+//   "Edit RAW Properties"  - jumps the inspector to the RAW tab for the selected RAW clip (BRAW, ProRes RAW, RED; again = back)
 //   "Toggle Stabilization" - turns Final Cut's Stabilization on/off for the selected timeline clips
 //   "Show Video Inspector" / "Show Info Inspector" - switch to that tab; again on it hides the inspector
 // Ships with no keys assigned; assignments are saved in the user's command set by identifier.
@@ -97,7 +97,7 @@ static void DoEditRAW(BOOL openedInspector) {
     NSInteger raw = RAWTabIndex(module, &tv);
     NSInteger cur = tv.selectedTabViewItem ? [tv indexOfTabViewItem:tv.selectedTabViewItem] : -1;
     if (raw < 0) {
-        NSBeep(); SLog(@"RAW: no RAW tab (selection is not a BRAW clip)");
+        NSBeep(); SLog(@"RAW: no RAW tab (selection is not a RAW clip)");
         if (openedInspector) ToggleInspector();       // we opened it only for this, so put it back
         return;
     }
@@ -164,13 +164,16 @@ static NSButton *FindStabilizationCheckbox(NSView *v, int depth) {
     for (NSView *sv in v.subviews) { NSButton *b = FindStabilizationCheckbox(sv, depth + 1); if (b) return b; }
     return nil;
 }
+// For handing a hidden inspector back from the RAW tab: the Video tab, or else the first tab. Any tab but RAW
+// will do there (so Final Cut's own commands don't reopen the inspector on RAW); callers skip it if the
+// first tab is the RAW tab itself.
 static NSInteger VideoTabIndexQuiet(NSTabView *tv) {
     for (NSUInteger i = 0; i < tv.tabViewItems.count; i++) {
         id ident = tv.tabViewItems[i].identifier;
         NSString *s = [ident isKindOfClass:[NSString class]] ? ident : NSStringFromClass([ident class]);
         if ([s rangeOfString:@"Video" options:NSCaseInsensitiveSearch].location != NSNotFound) return (NSInteger)i;
     }
-    return 0;
+    return 0;   // no Video tab: the first tab (see above)
 }
 static NSInteger VideoTabIndex(NSTabView *tv) {
     for (NSUInteger i = 0; i < tv.tabViewItems.count; i++) {
@@ -412,18 +415,27 @@ static void Register(id cc, NSString *ident, NSString *sel, NSString *name, NSSt
     SLog(@"registered %@ (%@) in %@", ident, name, group);
 }
 __attribute__((visibility("default"))) void SpliceKitPlugin_init(void *api) { (void)api; }
-static void install(void) {
-    static BOOL done; if (done) return; done = YES;
-    AddAction(@"spliceKitEditRAWProperties:", ^{ DoEditRAW(NO); });
-    AddAction(@"spliceKitToggleStabilization:", ^{ DoToggleStabilization(NO); });
-    AddAction(@"spliceKitZoomToFitToggle:", ^{ DoZoomToFitToggle(); });
-    AddAction(@"spliceKitShowVideoInspector:", ^{ DoShowInspectorTab(@[@"Video"], @"VIDEO", NO); });
-    AddAction(@"spliceKitShowInfoInspector:", ^{ DoShowInspectorTab(@[@"Info", @"Metadata"], @"INFO", NO); });
-    HookToggleInspector();
+static void install(int attempt) {
+    static BOOL actionsAdded, registered;
+    if (registered) return;
+    if (!actionsAdded) {
+        actionsAdded = YES;
+        AddAction(@"spliceKitEditRAWProperties:", ^{ DoEditRAW(NO); });
+        AddAction(@"spliceKitToggleStabilization:", ^{ DoToggleStabilization(NO); });
+        AddAction(@"spliceKitZoomToFitToggle:", ^{ DoZoomToFitToggle(); });
+        AddAction(@"spliceKitShowVideoInspector:", ^{ DoShowInspectorTab(@[@"Video"], @"VIDEO", NO); });
+        AddAction(@"spliceKitShowInfoInspector:", ^{ DoShowInspectorTab(@[@"Info", @"Metadata"], @"INFO", NO); });
+        HookToggleInspector();
+    }
     id cc = ((id(*)(id, SEL))objc_msgSend)(objc_getClass("LKCommandsController"), NSSelectorFromString(@"sharedController"));
-    if (!cc) { SLog(@"no LKCommandsController"); return; }
+    if (!cc) {   // Final Cut's command system isn't up yet: try again shortly rather than never registering
+        if (attempt < 10) dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ install(attempt + 1); });
+        else SLog(@"no LKCommandsController after %d tries; commands not registered", attempt + 1);
+        return;
+    }
+    registered = YES;
     Register(cc, kRAWCmd, @"spliceKitEditRAWProperties:", @"Edit RAW Properties",
-             @"Show or hide the RAW properties for the selected BRAW clip", @"General");
+             @"Show or hide the RAW properties for the selected RAW clip", @"General");
     Register(cc, kStabCmd, @"spliceKitToggleStabilization:", @"Toggle Stabilization",
              @"Turn Stabilization on or off for the selected clips", @"Effects");
     Register(cc, @"SpliceKitZoomToFitToggle", @"spliceKitZoomToFitToggle:", @"Zoom to Fit (Toggle)",
@@ -436,5 +448,5 @@ static void install(void) {
     if ([[NSUserDefaults standardUserDefaults] boolForKey:@"SpliceKitShortcutsRebindKey2"]) MoveKey2ToVideoInspector(cc);
 }
 __attribute__((constructor)) static void shortcuts_init(void) {
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ install(); });
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ install(0); });
 }

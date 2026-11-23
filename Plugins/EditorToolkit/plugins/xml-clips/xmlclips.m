@@ -66,13 +66,25 @@ static void AddClipsToBrowser(void) {
         XL([NSString stringWithFormat:@"%@: checked %d sources, added %d to browser", XO(seq, @"displayName"), tried, added]);
     } @catch (id e) { XL([NSString stringWithFormat:@"threw %@", e]); }
 }
-static IMP gOrigImport;
+static IMP gOrigImport, gOrigCreate;
 static id ActiveSeq(void) { return XO(XO(XO([NSApp delegate], @"activeEditorContainer"), @"timelineModule"), @"sequence"); }
 static NSTimer *gWatch;
-static __weak id gSeqBeforeImport; static BOOL gImporting;
+// The projects the current import created (FFXMLImporter -createSequenceProject:name:error:). A timeline's
+// -targetTimelineProject is that same object, which is how we know an open timeline came from this import.
+static NSHashTable *gCreated;
+static id h_create(id self, SEL _cmd, id xmlProject, id name, id *err) {
+    id r = ((id(*)(id,SEL,id,id,id*))gOrigCreate)(self, _cmd, xmlProject, name, err);
+    if (r) [gCreated addObject:r];
+    return r;
+}
+static BOOL FromThisImport(id seq, id before) {
+    if (!gOrigCreate) return seq != before;   // can't tell on this Final Cut version: any newly opened timeline
+    id p = XO(seq, @"targetTimelineProject");
+    return p && [gCreated containsObject:p];
+}
 // After an import, wait briefly for the imported timeline to open, then fill the browser. Final Cut
-// opens an imported timeline as soon as the import finishes; a long window would instead catch
-// whatever project the user happens to open minutes later and add *its* clips to the library.
+// opens an imported timeline as soon as the import finishes. Only a timeline this import created counts,
+// so a project the user opens instead never gets *its* clips added to the library.
 static const int kWatchSeconds = 20;
 static void WatchForNewTimeline(id before) {
     __block int ticks = 0;
@@ -81,17 +93,21 @@ static void WatchForNewTimeline(id before) {
     gWatch = [NSTimer scheduledTimerWithTimeInterval:1.0 repeats:YES block:^(NSTimer *t) {
         ticks++;
         id seq = ActiveSeq();
-        if (seq && seq != weakBefore && XO(seq, @"primaryObject")) {
+        if (seq && FromThisImport(seq, weakBefore) && XO(seq, @"primaryObject")) {
             [t invalidate]; gWatch = nil;
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ AddClipsToBrowser(); });
         } else if (ticks > kWatchSeconds) { [t invalidate]; gWatch = nil; XL(@"no imported timeline opened; nothing added"); }
     }];
 }
 static id h_import(id self, SEL _cmd, id *err) {
-    gImporting = YES;
+    gCreated = [NSHashTable weakObjectsHashTable];
+    // only needed when we can't tell which projects the import made (see FromThisImport)
+    id before = (!gOrigCreate && [NSThread isMainThread]) ? ActiveSeq() : nil;
     id r = ((id(*)(id,SEL,id*))gOrigImport)(self, _cmd, err);
-    XL(@"xml import finished, waiting for timeline");
-    dispatch_async(dispatch_get_main_queue(), ^{ gImporting = NO; WatchForNewTimeline(gSeqBeforeImport); });
+    NSUInteger made = gCreated.count;
+    if (gOrigCreate && !made) { XL(@"xml import finished; it made no timeline, nothing to add"); return r; }
+    XL([NSString stringWithFormat:@"xml import finished (%lu timeline(s)), waiting for one to open", (unsigned long)made]);
+    dispatch_async(dispatch_get_main_queue(), ^{ WatchForNewTimeline(before); });
     return r;
 }
 static void Install(void) {
@@ -101,9 +117,10 @@ static void Install(void) {
         Method m = C ? class_getInstanceMethod(C, NSSelectorFromString(@"import:")) : NULL;
         if (!m) { XL(@"FFXMLImporter import: not found"); return; }
         gOrigImport = method_setImplementation(m, (IMP)h_import);
-        // remember which timeline was open before an import starts
-        dispatch_async(dispatch_get_main_queue(), ^{ [NSTimer scheduledTimerWithTimeInterval:1.0 repeats:YES block:^(NSTimer *t) { if (!gImporting && !gWatch) gSeqBeforeImport = ActiveSeq(); }]; });
-        XL(@"xml clips ready");
+        Method mc = class_getInstanceMethod(C, NSSelectorFromString(@"createSequenceProject:name:error:"));
+        if (mc && [objc_getClass("FFAnchoredSequence") instancesRespondToSelector:NSSelectorFromString(@"targetTimelineProject")])
+            gOrigCreate = method_setImplementation(mc, (IMP)h_create);
+        XL(gOrigCreate ? @"xml clips ready" : @"xml clips ready (can't match timelines to imports on this version: any timeline opened right after an import)");
     });
 }
 __attribute__((visibility("default"))) void SpliceKitPlugin_init(void *ctx) { Install(); }

@@ -1,5 +1,5 @@
 // RAW Gyro: one-click gyro stabilisation presets in the RAW tab, under "Gyroflow Stabilisation".
-// "Gyro Preset:  Off / Smooth / Medium / Locked" — sets BRAW Toolbox's Gyroflow controls for all
+// "Gyro Preset:  Off / Smooth / Medium / Strong / Extra Strong / Locked / Ultra / Tripod" — sets BRAW Toolbox's Gyroflow controls for all
 // selected clips at once (like DaVinci Resolve's Stabilizer → Gyro mode). Styled like the panel's menus.
 #import <AppKit/AppKit.h>
 #import <objc/runtime.h>
@@ -49,10 +49,13 @@ static void GApply(NSDictionary *values, NSString *what) {
     if (!ctrl) { NSBeep(); return; }
     @try {
         ((void(*)(id,SEL,id))objc_msgSend)(hud, NSSelectorFromString(@"settingsChangeBegin:"), nil);
-        NSMutableArray *keys = [[values allKeys] mutableCopy]; [keys removeObject:@"name"];
-        if ([keys containsObject:@"stabilisationEnabled"]) { [keys removeObject:@"stabilisationEnabled"]; [keys insertObject:@"stabilisationEnabled" atIndex:0]; }
-        for (NSString *k in keys) ((BOOL(*)(id,SEL,id,id))objc_msgSend)(ctrl, @selector(setValue:forKey:), values[k], k);
-        ((void(*)(id,SEL,id))objc_msgSend)(hud, NSSelectorFromString(@"settingsChangeEnd:"), nil);
+        @try {
+            NSMutableArray *keys = [[values allKeys] mutableCopy]; [keys removeObject:@"name"];
+            if ([keys containsObject:@"stabilisationEnabled"]) { [keys removeObject:@"stabilisationEnabled"]; [keys insertObject:@"stabilisationEnabled" atIndex:0]; }
+            for (NSString *k in keys) ((void(*)(id,SEL,id,id))objc_msgSend)(ctrl, @selector(setValue:forKey:), values[k], k);
+        } @finally {   // always close the change, or the RAW panel is left mid-edit
+            ((void(*)(id,SEL,id))objc_msgSend)(hud, NSSelectorFromString(@"settingsChangeEnd:"), nil);
+        }
         ((void(*)(id,SEL))objc_msgSend)(hud, NSSelectorFromString(@"refreshOrRebuildUI"));
         GLog([NSString stringWithFormat:@"applied %@ via %@", what, [ctrl class]]);
     } @catch (id e) { GLog([NSString stringWithFormat:@"apply threw %@", e]); }
@@ -67,6 +70,7 @@ static NSDictionary *GStrengthValues(double s) {
              @"stabilisationHorizonLock": @(round(MAX(0, (s - 50) * 2))),
              @"stabilisationLensCorrection": @1, @"stabilisationFOV": @1};
 }
+static __weak NSSlider *gDragging;   // the Gyro Strength slider while the mouse is down on it
 @interface SKGyroPresetTarget : NSObject
 - (void)choose:(NSPopUpButton *)sender;
 - (void)strength:(NSSlider *)sender;
@@ -83,6 +87,7 @@ static NSDictionary *GStrengthValues(double s) {
     val.stringValue = [NSString stringWithFormat:@"%.0f", sender.doubleValue];
     NSEvent *e = NSApp.currentEvent;
     BOOL done = !(e.type == NSEventTypeLeftMouseDragged);   // apply when you let go, not on every pixel
+    gDragging = done ? nil : sender;
     if (done) GApply(GStrengthValues(sender.doubleValue), [NSString stringWithFormat:@"strength %.0f", sender.doubleValue]);
 }
 @end
@@ -105,6 +110,8 @@ static void GSync(NSPopUpButton *pop) {
 
 static NSString *const kSliderRowID = @"SKGyroStrengthRow";
 static void GSyncSlider(NSSlider *sl) {
+    // a panel refresh while you drag must not snap the knob back to the last applied value
+    if (sl == gDragging && ([NSEvent pressedMouseButtons] & 1)) return;
     NSDictionary *cur = GCurrent();
     double v = [cur[@"stabilisationEnabled"] boolValue] ? [cur[@"stabilisationSmoothness"] doubleValue] : 0;
     sl.doubleValue = v;
@@ -127,38 +134,42 @@ static void GInstall(id hud) {
         }
     }
     if (!grid || enabledRow < 0 || lutRow < 0) return;
-    // already there?
-    BOOL havePreset = NO;
+    // already there? (each row is added on its own, so a pass that couldn't add the slider row yet - no slider
+    // in the panel to copy - still gets it on a later refresh)
+    NSPopUpButton *pop = nil; BOOL haveSlider = NO;
     for (NSInteger r = 0; r < grid.numberOfRows; r++) {
         NSView *cv = [grid cellAtColumnIndex:0 rowIndex:r].contentView;
-        if ([cv.identifier isEqual:kRowID]) havePreset = YES;
-        if ([cv.identifier isEqual:kRowID]) { GSync((NSPopUpButton *)[grid cellAtColumnIndex:1 rowIndex:r].contentView); }
-        if ([cv.identifier isEqual:kSliderRowID]) { GSyncSlider((NSSlider *)[grid cellAtColumnIndex:1 rowIndex:r].contentView); return; }
+        if ([cv.identifier isEqual:kRowID]) { pop = (NSPopUpButton *)[grid cellAtColumnIndex:1 rowIndex:r].contentView; GSync(pop); }
+        if ([cv.identifier isEqual:kSliderRowID]) { GSyncSlider((NSSlider *)[grid cellAtColumnIndex:1 rowIndex:r].contentView); haveSlider = YES; }
     }
-    if (havePreset) return;
-    // copy the look of the "LUT Source:" row
-    NSTextField *refLabel = (NSTextField *)[grid cellAtColumnIndex:0 rowIndex:lutRow].contentView;
-    NSPopUpButton *refPop = (NSPopUpButton *)[grid cellAtColumnIndex:1 rowIndex:lutRow].contentView;
-    if (![refLabel isKindOfClass:[NSTextField class]] || ![refPop isKindOfClass:[NSPopUpButton class]]) return;
-    NSTextField *label = [NSTextField labelWithString:@"Gyro Preset:"];
-    label.font = refLabel.font; label.textColor = refLabel.textColor; label.alignment = refLabel.alignment;
-    label.identifier = kRowID;
-    NSPopUpButton *pop = [[NSPopUpButton alloc] initWithFrame:refPop.frame pullsDown:NO];
-    pop.font = refPop.font; pop.controlSize = refPop.controlSize; pop.bezelStyle = refPop.bezelStyle;
-    for (NSDictionary *p in GPresets()) [pop addItemWithTitle:p[@"name"]];
-    [pop addItemWithTitle:@"Custom"]; [pop itemWithTitle:@"Custom"].hidden = YES;
-    if (!gTarget) gTarget = [SKGyroPresetTarget new];
-    pop.target = gTarget; pop.action = @selector(choose:);
-    pop.toolTip = @"One-click gyro stabilisation from the gyro data in the clip";
-    NSView *spacer = [[NSView alloc] initWithFrame:NSZeroRect];
-    NSInteger at = enabledRow + 1;
-    [grid insertRowAtIndex:at withViews:@[label, pop, [NSGridCell emptyContentView], spacer]];
-    @try { [grid mergeCellsInHorizontalRange:NSMakeRange(1, 2) verticalRange:NSMakeRange(at, 1)]; } @catch (id e) {}
-    NSGridCell *refCell = [grid cellForView:refPop], *newCell = [grid cellForView:pop];
-    newCell.xPlacement = refCell.xPlacement; newCell.yPlacement = refCell.yPlacement; newCell.rowAlignment = refCell.rowAlignment;
-    NSGridCell *lc = [grid cellForView:label], *rlc = [grid cellForView:refLabel];
-    lc.xPlacement = rlc.xPlacement; lc.yPlacement = rlc.yPlacement;
-    GSync(pop);
+    if (pop && haveSlider) return;
+    if (!pop) {
+        // copy the look of the "LUT Source:" row
+        NSTextField *refLabel = (NSTextField *)[grid cellAtColumnIndex:0 rowIndex:lutRow].contentView;
+        NSPopUpButton *refPop = (NSPopUpButton *)[grid cellAtColumnIndex:1 rowIndex:lutRow].contentView;
+        if (![refLabel isKindOfClass:[NSTextField class]] || ![refPop isKindOfClass:[NSPopUpButton class]]) return;
+        NSTextField *label = [NSTextField labelWithString:@"Gyro Preset:"];
+        label.font = refLabel.font; label.textColor = refLabel.textColor; label.alignment = refLabel.alignment;
+        label.identifier = kRowID;
+        pop = [[NSPopUpButton alloc] initWithFrame:refPop.frame pullsDown:NO];
+        pop.font = refPop.font; pop.controlSize = refPop.controlSize; pop.bezelStyle = refPop.bezelStyle;
+        for (NSDictionary *p in GPresets()) [pop addItemWithTitle:p[@"name"]];
+        [pop addItemWithTitle:@"Custom"]; [pop itemWithTitle:@"Custom"].hidden = YES;
+        if (!gTarget) gTarget = [SKGyroPresetTarget new];
+        pop.target = gTarget; pop.action = @selector(choose:);
+        pop.toolTip = @"One-click gyro stabilisation from the gyro data in the clip";
+        NSView *spacer = [[NSView alloc] initWithFrame:NSZeroRect];
+        NSInteger at = enabledRow + 1;
+        [grid insertRowAtIndex:at withViews:@[label, pop, [NSGridCell emptyContentView], spacer]];
+        @try { [grid mergeCellsInHorizontalRange:NSMakeRange(1, 2) verticalRange:NSMakeRange(at, 1)]; } @catch (id e) {}
+        NSGridCell *refCell = [grid cellForView:refPop], *newCell = [grid cellForView:pop];
+        newCell.xPlacement = refCell.xPlacement; newCell.yPlacement = refCell.yPlacement; newCell.rowAlignment = refCell.rowAlignment;
+        NSGridCell *lc = [grid cellForView:label], *rlc = [grid cellForView:refLabel];
+        lc.xPlacement = rlc.xPlacement; lc.yPlacement = rlc.yPlacement;
+        GSync(pop);
+        GLog(@"preset row added");
+    }
+    if (haveSlider) return;
     // slider row: copy the look of the first slider row in the panel (e.g. Exposure)
     NSInteger sliderRef = -1;
     for (NSInteger r = 0; r < grid.numberOfRows; r++) if ([[grid cellAtColumnIndex:1 rowIndex:r].contentView isKindOfClass:[NSSlider class]]) { sliderRef = r; break; }
@@ -173,6 +184,7 @@ static void GInstall(id hud) {
         sl.controlSize = rs.controlSize; sl.minValue = 0; sl.maxValue = 100; sl.continuous = YES;
         sl.numberOfTickMarks = rs.numberOfTickMarks; sl.tickMarkPosition = rs.tickMarkPosition;
         sl.allowsTickMarkValuesOnly = NO;
+        if (!gTarget) gTarget = [SKGyroPresetTarget new];
         sl.target = gTarget; sl.action = @selector(strength:);
         sl.toolTip = @"Gyro stabilisation strength — 0 is off, 100 is strongest";
         NSTextField *val = [NSTextField labelWithString:@"0"];
@@ -189,8 +201,8 @@ static void GInstall(id hud) {
         NSGridCell *c0 = [grid cellForView:l2], *r0 = [grid cellForView:rl];
         c0.xPlacement = r0.xPlacement; c0.yPlacement = r0.yPlacement;
         GSyncSlider(sl);
+        GLog(@"strength row added");
     }
-    GLog(@"preset + strength rows added");
 }
 
 static IMP o_refreshUI, o_rebuildUI, o_refreshUI0, o_updateUI;

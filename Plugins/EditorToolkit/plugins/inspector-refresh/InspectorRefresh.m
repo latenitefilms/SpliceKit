@@ -46,18 +46,30 @@ static BOOL HasVideo(id item) {
 static void EnsureTransform(NSString *why) {
     @try {
         id tm = O(O([NSApp delegate], @"activeEditorContainer"), @"timelineModule");
-        NSArray *sel = O(tm, @"selectedItems");
+        // the clips that are really selected (the dropped ones). Plain -selectedItems also returns Final Cut's
+        // implicit pick under the playhead when nothing is selected, which the user never chose.
+        SEL explicitSel = NSSelectorFromString(@"selectedItems:includeItemBeforePlayheadIfLast:");
+        if (![tm respondsToSelector:explicitSel]) return;
+        NSArray *sel = ((id(*)(id, SEL, BOOL, BOOL))objc_msgSend)(tm, explicitSel, NO, NO);
         if (![sel isKindOfClass:[NSArray class]]) return;
         NSUInteger added = 0;
         SEL add = NSSelectorFromString(@"addIntrinsicEffectForEffectID:"), xf = NSSelectorFromString(@"xform3DEffect");
         SEL ab = NSSelectorFromString(@"actionBegin:animationHint:deferUpdates:"), ae = NSSelectorFromString(@"actionEnd:save:error:");
-        for (id item in sel) {
-            if (!HasVideo(item)) continue;
-            id stack = [item isKindOfClass:objc_getClass("FFAnchoredCollection")] ? O(item, @"videoEffects") : O(item, @"effectStack");
-            if (!stack || ![stack respondsToSelector:add] || ![stack respondsToSelector:xf] || O(stack, @"xform3DEffect")) continue;
-            ((void(*)(id, SEL, id, id, BOOL))objc_msgSend)(stack, ab, @"Transform", nil, YES);
-            @try { ((id(*)(id, SEL, id))objc_msgSend)(stack, add, @"HEXForm3D"); added++; }
-            @finally { ((BOOL(*)(id, SEL, id, BOOL, id *))objc_msgSend)(stack, ae, @"Transform", YES, NULL); }
+        // one sequence action around every clip's change, so a multi-clip drop is one Undo step, not one per clip
+        id seq = O(tm, @"sequence");
+        BOOL wrap = [seq respondsToSelector:ab] && [seq respondsToSelector:ae], began = NO;
+        @try {
+            for (id item in sel) {
+                if (!HasVideo(item)) continue;
+                id stack = [item isKindOfClass:objc_getClass("FFAnchoredCollection")] ? O(item, @"videoEffects") : O(item, @"effectStack");
+                if (!stack || ![stack respondsToSelector:add] || ![stack respondsToSelector:xf] || O(stack, @"xform3DEffect")) continue;
+                if (wrap && !began) { ((void(*)(id, SEL, id, id, BOOL))objc_msgSend)(seq, ab, @"Transform", nil, NO); began = YES; }
+                ((void(*)(id, SEL, id, id, BOOL))objc_msgSend)(stack, ab, @"Transform", nil, YES);
+                @try { ((id(*)(id, SEL, id))objc_msgSend)(stack, add, @"HEXForm3D"); added++; }
+                @finally { ((BOOL(*)(id, SEL, id, BOOL, id *))objc_msgSend)(stack, ae, @"Transform", YES, NULL); }
+            }
+        } @finally {
+            if (began) ((BOOL(*)(id, SEL, id, BOOL, id *))objc_msgSend)(seq, ae, @"Transform", YES, NULL);
         }
         if (added) RLog([NSString stringWithFormat:@"%@: gave %lu dropped clip(s) their own Transform", why, (unsigned long)added]);
     } @catch (NSException *e) { RLog([NSString stringWithFormat:@"transform threw %@", e.reason]); }

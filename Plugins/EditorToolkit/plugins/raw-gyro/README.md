@@ -1,6 +1,6 @@
 # RAW Gyro Presets
 
-One-click gyro stabilisation for clips with gyro metadata: a **Gyro Preset** menu (Off / Smooth / Medium / Locked / Extra Strong) and a single **Gyro Strength** dial, added under *Gyroflow Stabilisation* in the RAW panel.
+One-click gyro stabilisation for clips with gyro metadata: a **Gyro Preset** menu (Off, Smooth, Medium, Strong, Extra Strong, Locked, Ultra, Tripod) and a single **Gyro Strength** dial, added under *Gyroflow Stabilisation* in the RAW panel.
 
 ## Why
 

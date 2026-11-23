@@ -49,12 +49,14 @@ let fileURL = URL(fileURLWithPath: filePath)
 guard FileManager.default.fileExists(atPath: filePath) else { fail("File not found: \(filePath)") }
 
 let asset = AVURLAsset(url: fileURL)
-let totalDuration = CMTimeGetSeconds(asset.duration)
-guard totalDuration > 0 else { fail("Could not determine audio duration") }
+guard let totalDuration = try? await asset.load(.duration).seconds, totalDuration > 0 else {
+    fail("Could not determine audio duration")
+}
 guard let reader = try? AVAssetReader(asset: asset) else { fail("Cannot create asset reader") }
 
-let audioTracks = asset.tracks(withMediaType: .audio)
-guard !audioTracks.isEmpty else { fail("No audio tracks in file") }
+guard let audioTrack = try? await asset.loadTracks(withMediaType: .audio).first else {
+    fail("No audio tracks in file")
+}
 
 let sampleRate: Double = 44100.0
 let outputSettings: [String: Any] = [
@@ -67,7 +69,7 @@ let outputSettings: [String: Any] = [
     AVNumberOfChannelsKey: 1
 ]
 
-let output = AVAssetReaderTrackOutput(track: audioTracks[0], outputSettings: outputSettings)
+let output = AVAssetReaderTrackOutput(track: audioTrack, outputSettings: outputSettings)
 reader.add(output)
 reader.startReading()
 
@@ -248,23 +250,22 @@ func spectralCentroid(startSample: Int, endSample: Int) -> Float {
         windowed[i] = samples[fftStart + i] * hannWindow[i]
     }
 
-    // Pack into split complex
-    var realp = [Float](repeating: 0, count: fftSize / 2)
-    var imagp = [Float](repeating: 0, count: fftSize / 2)
-    windowed.withUnsafeBufferPointer { buf in
-        buf.baseAddress!.withMemoryRebound(to: DSPComplex.self, capacity: fftSize / 2) { cPtr in
-            var split = DSPSplitComplex(realp: &realp, imagp: &imagp)
-            vDSP_ctoz(cPtr, 2, &split, 1, vDSP_Length(fftSize / 2))
+    let binCount = fftSize / 2
+    var real = [Float](repeating: 0, count: binCount)
+    var imaginary = [Float](repeating: 0, count: binCount)
+    var magnitudes = [Float](repeating: 0, count: binCount)
+    real.withUnsafeMutableBufferPointer { realBuffer in
+        imaginary.withUnsafeMutableBufferPointer { imaginaryBuffer in
+            var split = DSPSplitComplex(realp: realBuffer.baseAddress!, imagp: imaginaryBuffer.baseAddress!)
+            windowed.withUnsafeBufferPointer { samples in
+                samples.baseAddress!.withMemoryRebound(to: DSPComplex.self, capacity: binCount) { interleaved in
+                    vDSP_ctoz(interleaved, 2, &split, 1, vDSP_Length(binCount))
+                }
+            }
+            vDSP_fft_zrip(fftSetup, &split, 1, log2n, FFTDirection(kFFTDirection_Forward))
+            vDSP_zvmags(&split, 1, &magnitudes, 1, vDSP_Length(binCount))
         }
     }
-
-    // Forward FFT
-    var split = DSPSplitComplex(realp: &realp, imagp: &imagp)
-    vDSP_fft_zrip(fftSetup, &split, 1, log2n, FFTDirection(kFFTDirection_Forward))
-
-    // Magnitude spectrum
-    var magnitudes = [Float](repeating: 0, count: fftSize / 2)
-    vDSP_zvmags(&split, 1, &magnitudes, 1, vDSP_Length(fftSize / 2))
 
     // Spectral centroid: weighted average of frequencies
     var weightedSum: Float = 0
@@ -490,7 +491,6 @@ for i in 0..<sections.count {
     let isFirst = (i == 0)
     let isLast = (i == sections.count - 1)
     let barCount = s.endBar - s.startBar
-    let duration = s.endTime - s.startTime
 
     // Intro: first section, relatively low energy or short
     if isFirst && (s.meanEnergy < overallMeanEnergy || barCount <= 4) {

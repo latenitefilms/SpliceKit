@@ -2,7 +2,7 @@
 
 > **Status**: WIP (pipeline working end-to-end in logs, visual paste verification pending)
 > **Added**: April 2026, FCP 12.0, macOS Sequoia 15.4
-> **Improvements**: Screen freeze (#3), caching (#6), consolidated function (#7),
+> **Improvements**: Editor snapshot (#3), caching (#6), consolidated function (#7),
 > paste: support (#8), playhead restore (#10) — all implemented
 
 ---
@@ -43,7 +43,7 @@ User calls paste_fcpxml() or timeline_action("pasteAsConnected") / ("paste")
           → HIT: write cached native data to pasteboard, return YES
           → MISS: continue with import pipeline
         → Save playhead position
-        → Freeze screen (NSDisableScreenUpdates + 8s safety timeout)
+        → Display a snapshot over the editor
         → Inject unique project name (_SKPaste_XXXXX)
         → Import via FFXMLTranslationTask
         → Poll _deepLoadedSequences for new project (by name)
@@ -52,7 +52,7 @@ User calls paste_fcpxml() or timeline_action("pasteAsConnected") / ("paste")
         → Cache the native data for future pastes
         → Switch back to user project, restore playhead
         → Clean up temp project
-        → Unfreeze screen
+        → Remove the editor snapshot
       → Call original paste (now finds native data)
 ```
 
@@ -71,11 +71,12 @@ swizzled through a shared handler `SpliceKit_handleFCPXMLPaste()`. Both go
 through the same `_addItemsWithPasteboard:` internal path with different
 `pasteMode` values.
 
-**Screen freeze** (Improvement #3)
+**Editor snapshot** (Improvement #3)
 
-`NSDisableScreenUpdates()` hides the brief project switch flicker. A
-`dispatch_after` safety timeout of 8 seconds ensures the screen unfreezes
-even if the pipeline hangs.
+A snapshot of the editor, including the video frame, covers the temporary project
+switch and passes clicks through. Paste continues if the snapshot is unavailable.
+The paste removes it on success or failure, and an eight-second timer removes it
+during a slow import.
 
 **Caching** (Improvement #6)
 

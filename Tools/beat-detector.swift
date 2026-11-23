@@ -37,8 +37,7 @@ guard FileManager.default.fileExists(atPath: filePath) else {
 }
 
 let asset = AVURLAsset(url: fileURL)
-let totalDuration = CMTimeGetSeconds(asset.duration)
-guard totalDuration > 0 else {
+guard let totalDuration = try? await asset.load(.duration).seconds, totalDuration > 0 else {
     outputJSON(["error": "Could not determine audio duration"])
     exit(1)
 }
@@ -48,8 +47,7 @@ guard let reader = try? AVAssetReader(asset: asset) else {
     exit(1)
 }
 
-let audioTracks = asset.tracks(withMediaType: .audio)
-guard !audioTracks.isEmpty else {
+guard let audioTrack = try? await asset.loadTracks(withMediaType: .audio).first else {
     outputJSON(["error": "No audio tracks in file"])
     exit(1)
 }
@@ -65,7 +63,7 @@ let outputSettings: [String: Any] = [
     AVNumberOfChannelsKey: 1
 ]
 
-let output = AVAssetReaderTrackOutput(track: audioTracks[0], outputSettings: outputSettings)
+let output = AVAssetReaderTrackOutput(track: audioTrack, outputSettings: outputSettings)
 reader.add(output)
 reader.startReading()
 

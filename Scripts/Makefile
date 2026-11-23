@@ -11,7 +11,7 @@ CC = clang
 ARCHS = -arch arm64 -arch x86_64
 MACOSX_DEPLOYMENT_TARGET = 14.0
 MIN_VERSION = -mmacosx-version-min=$(MACOSX_DEPLOYMENT_TARGET)
-FRAMEWORKS = -framework Foundation -framework AppKit -framework AVFoundation -framework Speech -framework CoreServices -framework CoreImage -framework Metal -framework MetalKit -framework QuartzCore -framework Vision
+FRAMEWORKS = -framework Foundation -framework AppKit -framework AVFoundation -framework Speech -framework CoreServices -framework CoreImage -framework Metal -framework MetalKit -framework QuartzCore -framework Vision -framework ScreenCaptureKit
 MODULE_CACHE_DIR = $(BUILD_DIR)/ModuleCache
 OBJC_FLAGS = -fobjc-arc -fmodules -fmodules-cache-path="$(abspath $(MODULE_CACHE_DIR))"
 OBJCXX_FLAGS = $(OBJC_FLAGS) -std=c++17
@@ -129,7 +129,7 @@ uninstall-audio-bus-probe:
 # ---------------------------------------------------------------------------
 MCP_OUTPUT = $(BUILD_DIR)/mcp
 MCP_BINARY = $(MCP_OUTPUT)/splicekit-mcp
-MCP_BUILD = swift build --package-path MCP --configuration release --arch arm64 --arch x86_64 --only-use-versions-from-resolved-file
+MCP_BUILD = swift build --package-path MCP --product splicekit-mcp --configuration release --arch arm64 --arch x86_64 --only-use-versions-from-resolved-file
 MCP_CATALOG = MCP/Sources/SpliceKitMCP/Catalog.json
 
 .PHONY: mcp-server
@@ -203,7 +203,7 @@ $(MIXER_APP): SWIFT_FLAGS = -parse-as-library
 $(SWIFT_TOOLS): Scripts/Makefile | $(BUILD_DIR)
 	@set -eu; tmp=$$(mktemp -d "$@.XXXXXX"); trap 'rm -rf "$$tmp"' EXIT; \
 		for arch in $(filter-out -arch,$(ARCHS)); do \
-			swiftc -O -suppress-warnings $(SWIFT_FLAGS) -target "$$arch-apple-macosx$(MACOSX_DEPLOYMENT_TARGET)" \
+			swiftc -O $(SWIFT_FLAGS) -target "$$arch-apple-macosx$(MACOSX_DEPLOYMENT_TARGET)" \
 				$(filter %.swift,$^) -o "$$tmp/$$arch"; \
 		done; \
 		lipo -create "$$tmp"/* -output "$@"
@@ -230,6 +230,7 @@ $(LUA_LIB): $(LUA_DIR)/lua.h
 	@echo "Built: $(LUA_LIB)"
 
 $(BUILD_DIR)/obj/SpliceKitLua.o: $(LUA_DIR)/lua.h
+$(BUILD_DIR)/obj/SpliceKitServer.o $(BUILD_DIR)/obj/SpliceKitWindowCapture.o: Sources/SpliceKitWindowCapture.h
 
 $(BUILD_DIR)/obj/%.o: Sources/%.m Sources/SpliceKit.h $(VERSION_CONFIG) | $(BUILD_DIR)/obj
 	$(CC) $(ARCHS) $(MIN_VERSION) $(OBJC_FLAGS) $(DEBUG_FLAGS) $(VERSION_DEFINE) \

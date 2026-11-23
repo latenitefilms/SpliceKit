@@ -69,7 +69,6 @@ func highPassCoefficients(cutoff: Double, sampleRate: Double) -> [Double] {
 /// Apply high-pass filter in-place using a manual biquad (Direct Form I).
 func applyHighPass(samples: UnsafeMutablePointer<Float>, count: Int, cutoff: Double, sampleRate: Double) {
     let c = highPassCoefficients(cutoff: cutoff, sampleRate: sampleRate)
-    var coeffs: [Double] = c
     // Direct Form I: y[n] = b0*x[n] + b1*x[n-1] + b2*x[n-2] - a1*y[n-1] - a2*y[n-2]
     var x1: Float = 0, x2: Float = 0, y1: Float = 0, y2: Float = 0
     let b0 = Float(c[0]), b1 = Float(c[1]), b2 = Float(c[2])
@@ -92,24 +91,19 @@ func readRMSValues(
     startTime: Double?,
     endTime: Double?,
     chunkSize: Int = 4096
-) -> (rmsValues: [(time: Double, rms: Float)], totalDuration: Double)? {
+) async -> (rmsValues: [(time: Double, rms: Float)], totalDuration: Double)? {
     let url = URL(fileURLWithPath: filePath)
     let asset = AVURLAsset(url: url)
 
-    let semaphore = DispatchSemaphore(value: 0)
-    var audioTrack: AVAssetTrack?
-    asset.loadTracks(withMediaType: .audio) { tracks, error in
-        audioTrack = tracks?.first
-        semaphore.signal()
-    }
-    semaphore.wait()
-
-    guard let track = audioTrack else {
+    guard let track = try? await asset.loadTracks(withMediaType: .audio).first else {
         fputs("Error: No audio track found in \(filePath)\n", stderr)
         return nil
     }
 
-    let totalDuration = CMTimeGetSeconds(asset.duration)
+    guard let totalDuration = try? await asset.load(.duration).seconds else {
+        fputs("Error: Could not determine audio duration\n", stderr)
+        return nil
+    }
 
     let reader: AVAssetReader
     do {
@@ -321,8 +315,8 @@ func analyzeAudio(
     padding: Double,
     startTime: Double?,
     endTime: Double?
-) -> AnalysisResult? {
-    guard let (rmsValues, totalDuration) = readRMSValues(
+) async -> AnalysisResult? {
+    guard let (rmsValues, totalDuration) = await readRMSValues(
         filePath: filePath, startTime: startTime, endTime: endTime
     ) else { return nil }
 
@@ -486,7 +480,7 @@ guard FileManager.default.fileExists(atPath: path) else {
     exit(1)
 }
 
-guard let result = analyzeAudio(
+guard let result = await analyzeAudio(
     filePath: path,
     thresholdDB: thresholdDB,
     minSilenceDuration: minSilenceDuration,

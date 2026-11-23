@@ -2904,19 +2904,8 @@ static NSURL *SpliceKitURLImportMaybeRewriteLocalFileURL(NSURL *fileURL,
 static NSArray<NSURL *> *SpliceKitURLImportFileURLsFromPasteboard(NSPasteboard *pasteboard) {
     if (![pasteboard isKindOfClass:[NSPasteboard class]]) return @[];
 
-    NSArray<NSURL *> *urls = [pasteboard readObjectsForClasses:@[[NSURL class]]
-                                                       options:@{ NSPasteboardURLReadingFileURLsOnlyKey : @YES }];
-    if (urls.count > 0) return urls;
-
-    NSArray *filenamePaths = [pasteboard propertyListForType:NSFilenamesPboardType];
-    if (![filenamePaths isKindOfClass:[NSArray class]] || filenamePaths.count == 0) return @[];
-
-    NSMutableArray<NSURL *> *fileURLs = [NSMutableArray arrayWithCapacity:filenamePaths.count];
-    for (id item in filenamePaths) {
-        if (![item isKindOfClass:[NSString class]]) continue;
-        [fileURLs addObject:[NSURL fileURLWithPath:[(NSString *)item stringByStandardizingPath]]];
-    }
-    return [fileURLs copy];
+    return [pasteboard readObjectsForClasses:@[NSURL.class]
+                                     options:@{ NSPasteboardURLReadingFileURLsOnlyKey: @YES }] ?: @[];
 }
 
 static BOOL SpliceKitURLImportRewriteFileURLsOnPasteboard(NSPasteboard *pasteboard) {

@@ -279,7 +279,7 @@ Task {
                 language: nil,
                 temperature: 0.0,
                 wordTimestamps: true,
-                chunkingStrategy: .none
+                chunkingStrategy: ChunkingStrategy.none
             )
 
             do {

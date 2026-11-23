@@ -7,7 +7,6 @@ set -e
 
 VERSION="$1"
 NOTES="$2"
-REPO_ROOT="$(pwd)"
 if [ -z "$VERSION" ]; then
     echo "Usage: ./release.sh <version> [\"release notes\"]"
     echo "Example: ./release.sh 3.0.0 \"Wizard UI, DMG distribution\""
@@ -19,19 +18,19 @@ fi
 
 SIGN_ID="${SIGN_ID:-Developer ID Application: LateNite Films Pty Ltd (A5HDJTY9X5)}"
 KEYCHAIN_PROFILE="${KEYCHAIN_PROFILE:-SpliceKit}"
-XCODE_PROJECT="patcher/SpliceKit.xcodeproj"
-VERSION_FILE="patcher/SpliceKit/Configuration/Version.xcconfig"
-BUILD_DIR="patcher/build"
+XCODE_PROJECT="Patcher/SpliceKit.xcodeproj"
+VERSION_FILE="Patcher/SpliceKit/Configuration/Version.xcconfig"
+BUILD_DIR="Patcher/build"
 BUILT_APP="${BUILD_DIR}/Build/Products/Release/SpliceKit.app"
 PATCHER_DSYM="${BUILD_DIR}/Build/Products/Release/SpliceKit.app.dSYM"
 RUNTIME_DSYM="build/SpliceKit.dSYM"
 DMG_NAME="SpliceKit-v${VERSION}.dmg"
-DMG_PATH="patcher/${DMG_NAME}"
+DMG_PATH="Patcher/${DMG_NAME}"
 SPARKLE_SIGN="/tmp/bin/sign_update"
 SPARKLE_GENERATE_KEYS="/tmp/bin/generate_keys"
-PATCHER_INFO_PLIST="patcher/SpliceKit/Resources/Info.plist"
+PATCHER_INFO_PLIST="Patcher/SpliceKit/Resources/Info.plist"
 RELEASE_NOTES_URL="${RELEASE_NOTES_URL:-https://latenitefilms.github.io/SpliceKit/releasenotes.html}"
-RELEASE_NOTES_FILE="${RELEASE_NOTES_FILE:-docs/releasenotes.html}"
+RELEASE_NOTES_FILE="${RELEASE_NOTES_FILE:-Documentation/releasenotes.html}"
 
 CURRENT_BRANCH="$(git branch --show-current)"
 PUSH_REMOTE="$(git config --get branch.${CURRENT_BRANCH}.remote || echo origin)"
@@ -205,33 +204,10 @@ make
 make tools
 make symbols
 
-echo "[3/15] Building parakeet-transcriber..."
-PARAKEET_PKG_DIR="tools/parakeet-transcriber"
-PARAKEET_BIN="${PARAKEET_PKG_DIR}/.build/release/parakeet-transcriber"
-if [ -d "${PARAKEET_PKG_DIR}" ]; then
-    cd "${PARAKEET_PKG_DIR}" && swift build -c release 2>&1 | tail -3 && cd "${REPO_ROOT}"
-    if [ -f "$PARAKEET_BIN" ]; then
-        echo "  Built: $(du -h "$PARAKEET_BIN" | cut -f1)"
-    else
-        echo "  WARNING: parakeet-transcriber build failed — release will not include it"
-    fi
-else
-    echo "  Skipped: parakeet-transcriber package not found (pre-built binary will be used if available)"
-fi
-
-echo "[3b/15] Building whisper-transcriber..."
-WHISPER_PKG_DIR="tools/whisper-transcriber"
-WHISPER_BIN="${WHISPER_PKG_DIR}/.build/release/whisper-transcriber"
-if [ -d "${WHISPER_PKG_DIR}" ]; then
-    cd "${WHISPER_PKG_DIR}" && swift build -c release 2>&1 | tail -3 && cd "${REPO_ROOT}"
-    if [ -f "$WHISPER_BIN" ]; then
-        echo "  Built: $(du -h "$WHISPER_BIN" | cut -f1)"
-    else
-        echo "  WARNING: whisper-transcriber build failed — release will not include it"
-    fi
-else
-    echo "  Skipped: whisper-transcriber package not found (pre-built binary will be used if available)"
-fi
+echo "[3/15] Building transcription helpers..."
+for tool in parakeet-transcriber whisper-transcriber; do
+    swift build -c release --arch arm64 --arch x86_64 --package-path "Tools/$tool"
+done
 
 echo "[4/15] Building SpliceKit app via Xcode..."
 xcodebuild -project "${XCODE_PROJECT}" \
@@ -264,29 +240,12 @@ if [ ! -x "${INSERT_DYLIB_BIN}" ]; then
 fi
 echo "  Built: $(lipo -info "${INSERT_DYLIB_BIN}")"
 
-echo "[5/15] Syncing bundled resources into app..."
+echo "[5/15] Adding the release helper to the app..."
 APP_RES="${BUILT_APP}/Contents/Resources"
-mkdir -p "${APP_RES}/mcp"
-mkdir -p "${APP_RES}/tools"
-cp build/SpliceKit "${APP_RES}/SpliceKit"
-cp build/silence-detector "${APP_RES}/tools/silence-detector"
-cp mcp/server.py "${APP_RES}/mcp/server.py"
-# Bundle Lua scripts
-if [ -d "Scripts/lua" ]; then
-    mkdir -p "${APP_RES}/Scripts/lua"
-    rsync -a --delete Scripts/lua/ "${APP_RES}/Scripts/lua/"
-    echo "  Bundled Scripts/lua/"
-fi
-# Bundle pre-built parakeet binary (no source build needed on user's machine)
-if [ -f "$PARAKEET_BIN" ]; then
-    cp "$PARAKEET_BIN" "${APP_RES}/tools/parakeet-transcriber"
-    echo "  Bundled parakeet-transcriber binary"
-fi
-# Bundle pre-built whisper binary (no source build needed on user's machine)
-if [ -f "$WHISPER_BIN" ]; then
-    cp "$WHISPER_BIN" "${APP_RES}/tools/whisper-transcriber"
-    echo "  Bundled whisper-transcriber binary"
-fi
+for tool in parakeet-transcriber whisper-transcriber; do
+    lipo "${APP_RES}/tools/$tool" -verify_arch arm64
+    lipo "${APP_RES}/tools/$tool" -verify_arch x86_64
+done
 cp "${INSERT_DYLIB_BIN}" "${APP_RES}/tools/insert_dylib"
 chmod +x "${APP_RES}/tools/insert_dylib"
 echo "  Bundled insert_dylib helper"

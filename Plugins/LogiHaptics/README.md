@@ -62,9 +62,8 @@ The build target writes a `.link` file pointing at
 then `open loupedeck:plugin/FCPHaptics/reload`s the running service so the
 plugin shows up live without restarting Logi Options+.
 
-The matching SpliceKit changes ship in the main `make deploy` build (the
-swizzle module is `Sources/SpliceKitHapticBridge.m`, registered through
-`SOURCES.txt` and installed from `appDidLaunch` in `SpliceKit.m`).
+The main `make deploy` build includes `Sources/SpliceKitHapticBridge.m`.
+`appDidLaunch` in `Sources/SpliceKit.m` installs the haptics bridge.
 
 ## Testing
 

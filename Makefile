@@ -1,33 +1,34 @@
 CC = clang
 ARCHS = -arch arm64 -arch x86_64
-MIN_VERSION = -mmacosx-version-min=14.0
+MACOSX_DEPLOYMENT_TARGET = 14.0
+MIN_VERSION = -mmacosx-version-min=$(MACOSX_DEPLOYMENT_TARGET)
 FRAMEWORKS = -framework Foundation -framework AppKit -framework AVFoundation -framework Speech -framework CoreServices -framework CoreImage -framework Metal -framework MetalKit -framework QuartzCore -framework Vision
 MODULE_CACHE_DIR = $(BUILD_DIR)/ModuleCache
-OBJC_FLAGS = -fobjc-arc -fmodules -fmodules-cache-path=$(abspath $(MODULE_CACHE_DIR))
+OBJC_FLAGS = -fobjc-arc -fmodules -fmodules-cache-path="$(abspath $(MODULE_CACHE_DIR))"
 OBJCXX_FLAGS = $(OBJC_FLAGS) -std=c++17
 DEBUG_FLAGS = -g
 LINKER_FLAGS = -undefined dynamic_lookup -dynamiclib
 CPP_LIBS = -lc++
 INSTALL_NAME = -install_name @rpath/SpliceKit.framework/Versions/A/SpliceKit
-SPLICEKIT_VERSION = $(shell awk -F= '/SPLICEKIT_VERSION/ { gsub(/[ ;]/, "", $$2); print $$2; exit }' patcher/SpliceKit/Configuration/Version.xcconfig)
+VERSION_CONFIG = Patcher/SpliceKit/Configuration/Version.xcconfig
+SPLICEKIT_VERSION = $(shell awk -F= '/SPLICEKIT_VERSION/ { gsub(/[ ;]/, "", $$2); print $$2; exit }' $(VERSION_CONFIG))
 VERSION_DEFINE = -DSPLICEKIT_VERSION=\"$(SPLICEKIT_VERSION)\"
 DSYM = $(OUTPUT).dSYM
 
-# Read canonical source list from Sources/SOURCES.txt
-SOURCES = $(addprefix Sources/, $(shell grep -v '^\#' Sources/SOURCES.txt | grep -v '^$$'))
-OBJC_SOURCES = $(filter %.m,$(SOURCES))
-OBJCXX_SOURCES = $(filter %.mm,$(SOURCES))
+OBJC_SOURCES = $(wildcard Sources/*.m)
+OBJCXX_SOURCES = $(wildcard Sources/*.mm)
 OBJS = $(patsubst Sources/%.m,$(BUILD_DIR)/obj/%.o,$(OBJC_SOURCES)) \
 	$(patsubst Sources/%.mm,$(BUILD_DIR)/obj/%.o,$(OBJCXX_SOURCES))
 
 BUILD_DIR = build
 OUTPUT = $(BUILD_DIR)/SpliceKit
 
-# Lua 5.4.7 (vendored, compiled as static lib)
-LUA_DIR = vendor/lua-5.4.7/src
-LUA_SRCS = $(filter-out $(LUA_DIR)/lua.c $(LUA_DIR)/luac.c, $(wildcard $(LUA_DIR)/*.c))
-LUA_OBJS = $(patsubst $(LUA_DIR)/%.c, $(BUILD_DIR)/lua/%.o, $(LUA_SRCS))
-LUA_LIB = $(BUILD_DIR)/liblua.a
+# Upstream Lua release and its published SHA-256 (https://www.lua.org/ftp/).
+LUA_VERSION = 5.4.9
+LUA_SHA256 = 2335b6c582a52654f94612bf10d2f4672805d05329aa6568b1d8cd9e5c6fb8e6
+LUA_URL ?= https://www.lua.org/ftp/lua-$(LUA_VERSION).tar.gz
+LUA_DIR = $(BUILD_DIR)/lua-$(LUA_VERSION)/src
+LUA_LIB = $(LUA_DIR)/liblua.a
 
 # Modded app paths — auto-detect standard or Creator Studio edition
 MODDED_APP_STANDARD = $(HOME)/Applications/SpliceKit/Final Cut Pro.app
@@ -42,19 +43,14 @@ SILENCE_DETECTOR = $(BUILD_DIR)/silence-detector
 STRUCTURE_ANALYZER = $(BUILD_DIR)/structure-analyzer
 BEAT_DETECTOR = $(BUILD_DIR)/beat-detector
 MIXER_APP = $(BUILD_DIR)/SpliceKitMixer
-AUDIO_BUS_PROBE_DIR = tools/audio-bus-probe-au
+SWIFT_TOOLS = $(SILENCE_DETECTOR) $(STRUCTURE_ANALYZER) $(BEAT_DETECTOR) $(MIXER_APP)
+AUDIO_BUS_PROBE_DIR = Tools/audio-bus-probe-au
 AUDIO_BUS_PROBE_COMPONENT = $(BUILD_DIR)/SpliceKitAudioBusProbe.component
 AUDIO_BUS_PROBE_BINARY = $(AUDIO_BUS_PROBE_COMPONENT)/Contents/MacOS/SpliceKitAudioBusProbe
 AUDIO_BUS_PROBE_INFO = $(AUDIO_BUS_PROBE_DIR)/Info.plist
 AUDIO_BUS_PROBE_SOURCE = $(AUDIO_BUS_PROBE_DIR)/SpliceKitAudioBusProbe.c
 AUDIO_BUS_PROBE_INSTALL_DIR = $(HOME)/Library/Audio/Plug-Ins/Components
 TOOLS_DIR = $(HOME)/Applications/SpliceKit/tools
-PARAKEET_PKG_DIR = tools/parakeet-transcriber
-PARAKEET_RELEASE_BIN = $(PARAKEET_PKG_DIR)/.build/release/parakeet-transcriber
-PARAKEET_DEBUG_BIN = $(PARAKEET_PKG_DIR)/.build/debug/parakeet-transcriber
-WHISPER_PKG_DIR = tools/whisper-transcriber
-WHISPER_RELEASE_BIN = $(WHISPER_PKG_DIR)/.build/release/whisper-transcriber
-WHISPER_DEBUG_BIN = $(WHISPER_PKG_DIR)/.build/debug/whisper-transcriber
 
 # --- VP9 codec bundle (Plugins/VP9 → FCP.app/Contents/PlugIns/Codecs) --------
 VP9_SOURCE_DIR = Plugins/VP9/Sources
@@ -83,7 +79,7 @@ MKV_IMPORT_SOURCES = $(MKV_SOURCE_DIR)/MKVCommon.mm \
 MKV_FRAMEWORKS = -framework Foundation -framework CoreFoundation -framework CoreMedia -framework CoreVideo -framework MediaToolbox -framework AudioToolbox
 # libwebm uses its own exceptions/assert flow; keep default C++ settings but
 # disable ObjC ARC for the .mm so we can freely mix with C++ heap types.
-MKV_CFLAGS = $(ARCHS) $(MIN_VERSION) -fno-objc-arc -fmodules -fmodules-cache-path=$(abspath $(MODULE_CACHE_DIR)) -std=c++17 $(DEBUG_FLAGS) -fvisibility=hidden -Wno-deprecated-declarations -I $(MKV_SOURCE_DIR) -I $(MKV_PRIVATE_DIR) -I $(MKV_LIBWEBM_DIR)
+MKV_CFLAGS = $(ARCHS) $(MIN_VERSION) -fno-objc-arc -fmodules -fmodules-cache-path="$(abspath $(MODULE_CACHE_DIR))" -std=c++17 $(DEBUG_FLAGS) -fvisibility=hidden -Wno-deprecated-declarations -I $(MKV_SOURCE_DIR) -I $(MKV_PRIVATE_DIR) -I $(MKV_LIBWEBM_DIR)
 MKV_LDFLAGS = -bundle $(CPP_LIBS)
 
 .PHONY: all clean deploy launch tools url-import-tools audio-bus-probe install-audio-bus-probe uninstall-audio-bus-probe symbols vp9-prototype mkv-prototype mcp-setup mcp-doctor
@@ -92,7 +88,7 @@ all: $(OUTPUT)
 
 symbols: $(DSYM)
 
-tools: $(SILENCE_DETECTOR) $(STRUCTURE_ANALYZER) $(BEAT_DETECTOR) $(MIXER_APP)
+tools: $(SWIFT_TOOLS)
 
 audio-bus-probe: $(AUDIO_BUS_PROBE_BINARY)
 	@echo "Built: $(AUDIO_BUS_PROBE_COMPONENT)"
@@ -124,7 +120,7 @@ uninstall-audio-bus-probe:
 # ---------------------------------------------------------------------------
 MCP_VENV ?= $(HOME)/.venvs/splicekit-mcp
 MCP_PYTHON = $(MCP_VENV)/bin/python
-MCP_REQUIREMENTS = mcp/requirements.txt
+MCP_REQUIREMENTS = MCP/requirements.txt
 
 mcp-setup:
 	@PY="$$(command -v python3.13 || command -v python3.12 || command -v python3.11 || command -v python3)"; \
@@ -139,7 +135,7 @@ mcp-setup:
 	@"$(MCP_PYTHON)" -m pip install --upgrade --quiet pip
 	@"$(MCP_PYTHON)" -m pip install --upgrade --quiet -r $(MCP_REQUIREMENTS)
 	@echo "[mcp-setup] Installed:"; "$(MCP_PYTHON)" -m pip show mcp | awk '/^(Name|Version|Location):/'
-	@echo "[mcp-setup] Done. Point your MCP client `command` at: $(MCP_PYTHON)"
+	@echo "[mcp-setup] Set your MCP client command to $(MCP_PYTHON)"
 
 mcp-doctor:
 	@echo "== SpliceKit MCP doctor =="
@@ -196,58 +192,64 @@ url-import-tools:
 $(BUILD_DIR):
 	@mkdir -p $(BUILD_DIR)
 
-$(BUILD_DIR)/lua: | $(BUILD_DIR)
-	@mkdir -p $(BUILD_DIR)/lua
-
 $(BUILD_DIR)/obj: | $(BUILD_DIR)
 	@mkdir -p $(BUILD_DIR)/obj
 
-$(SILENCE_DETECTOR): tools/silence-detector.swift | $(BUILD_DIR)
-	swiftc -O -suppress-warnings -o $(SILENCE_DETECTOR) tools/silence-detector.swift
-	@echo "Built: $(SILENCE_DETECTOR)"
+$(SILENCE_DETECTOR): Tools/silence-detector.swift
+$(STRUCTURE_ANALYZER): Tools/structure-analyzer.swift
+$(BEAT_DETECTOR): Tools/beat-detector.swift
+$(MIXER_APP): $(wildcard Tools/mixer-app/*.swift)
+$(MIXER_APP): SWIFT_FLAGS = -parse-as-library
 
-$(STRUCTURE_ANALYZER): tools/structure-analyzer.swift | $(BUILD_DIR)
-	swiftc -O -suppress-warnings -o $(STRUCTURE_ANALYZER) tools/structure-analyzer.swift
-	@echo "Built: $(STRUCTURE_ANALYZER)"
+$(SWIFT_TOOLS): Makefile | $(BUILD_DIR)
+	@set -eu; tmp=$$(mktemp -d "$@.XXXXXX"); trap 'rm -rf "$$tmp"' EXIT; \
+		for arch in $(filter-out -arch,$(ARCHS)); do \
+			swiftc -O -suppress-warnings $(SWIFT_FLAGS) -target "$$arch-apple-macosx$(MACOSX_DEPLOYMENT_TARGET)" \
+				$(filter %.swift,$^) -o "$$tmp/$$arch"; \
+		done; \
+		lipo -create "$$tmp"/* -output "$@"
+	@echo "Built: $@"
 
-# Used by the MCP server's detect_beats() tool (mcp/server.py looks in build/).
-$(BEAT_DETECTOR): tools/beat-detector.swift | $(BUILD_DIR)
-	swiftc -O -suppress-warnings -o $(BEAT_DETECTOR) tools/beat-detector.swift
-	@echo "Built: $(BEAT_DETECTOR)"
+# Publish the source tree only after the entire archive has been verified.
+$(LUA_DIR)/lua.h: | $(BUILD_DIR)
+	@set -eu; tmp=$$(mktemp -d "$(BUILD_DIR)/lua-src.XXXXXX"); \
+		trap 'rm -rf "$$tmp"' EXIT; \
+		curl -fsSL --retry 3 "$(LUA_URL)" -o "$$tmp/lua.tar.gz"; \
+		(cd "$$tmp" && printf '%s  lua.tar.gz\n' "$(LUA_SHA256)" | shasum -a 256 -c -); \
+		tar -xzf "$$tmp/lua.tar.gz" -C "$$tmp"; \
+		touch "$$tmp/lua-$(LUA_VERSION)/src/lua.h"; \
+		mv "$$tmp/lua-$(LUA_VERSION)" "$(BUILD_DIR)/" || test -f "$@"
 
-MIXER_SOURCES = $(wildcard tools/mixer-app/*.swift)
-$(MIXER_APP): $(MIXER_SOURCES) | $(BUILD_DIR)
-	swiftc -O -suppress-warnings -parse-as-library -o $(MIXER_APP) $(MIXER_SOURCES)
-	@echo "Built: $(MIXER_APP)"
-
-# Lua static library — compiled as C (no -fobjc-arc)
-$(BUILD_DIR)/lua/%.o: $(LUA_DIR)/%.c | $(BUILD_DIR)/lua
-	$(CC) $(ARCHS) $(MIN_VERSION) -DLUA_USE_MACOSX -O2 -Wall -c $< -o $@
-
-$(LUA_LIB): $(LUA_OBJS) | $(BUILD_DIR)
-	libtool -static -o $@ $^
+$(LUA_LIB): $(LUA_DIR)/lua.h
+	@set -e; cd "$(LUA_DIR)"; set --; \
+		for source in *.c; do \
+			case "$$source" in lua.c|luac.c) continue ;; esac; \
+			$(CC) $(ARCHS) $(MIN_VERSION) -DLUA_USE_MACOSX -O2 -Wall -c "$$source"; \
+			set -- "$$@" "$${source%.c}.o"; \
+		done; \
+		libtool -static -o liblua.a "$$@"
 	@echo "Built: $(LUA_LIB)"
 
-$(BUILD_DIR)/obj/%.o: Sources/%.m Sources/SpliceKit.h | $(BUILD_DIR)/obj
+$(BUILD_DIR)/obj/SpliceKitLua.o: $(LUA_DIR)/lua.h
+
+$(BUILD_DIR)/obj/%.o: Sources/%.m Sources/SpliceKit.h $(VERSION_CONFIG) | $(BUILD_DIR)/obj
 	$(CC) $(ARCHS) $(MIN_VERSION) $(OBJC_FLAGS) $(DEBUG_FLAGS) $(VERSION_DEFINE) \
 		-I Sources -I $(LUA_DIR) -c $< -o $@
 
-$(BUILD_DIR)/obj/%.o: Sources/%.mm Sources/SpliceKit.h | $(BUILD_DIR)/obj
+$(BUILD_DIR)/obj/%.o: Sources/%.mm Sources/SpliceKit.h $(VERSION_CONFIG) | $(BUILD_DIR)/obj
 	$(CC) $(ARCHS) $(MIN_VERSION) $(OBJCXX_FLAGS) $(DEBUG_FLAGS) $(VERSION_DEFINE) \
 		-I Sources -I $(LUA_DIR) -c $< -o $@
 
-$(OUTPUT): $(OBJS) $(LUA_LIB) | $(BUILD_DIR)
+$(OUTPUT): $(OBJS) $(LUA_LIB) Sources | $(BUILD_DIR)
 	$(CC) $(ARCHS) $(MIN_VERSION) $(FRAMEWORKS) $(LINKER_FLAGS) \
 		$(INSTALL_NAME) $(OBJS) $(LUA_LIB) $(CPP_LIBS) -o $(OUTPUT)
 	@# -undefined dynamic_lookup lets calls into FCP internals resolve at load time,
-	@# but it also silently permits unresolved SpliceKit_* symbols (missing .m files
-	@# not listed in SOURCES.txt). Those become NULL in the host and crash FCP with
-	@# pc=0 during init. Fail the build if any SpliceKit_ symbol is undefined.
+	@# but unresolved SpliceKit_* symbols can crash FCP during initialization.
 	@undef="$$(nm -u $(OUTPUT) | awk '/^_SpliceKit_/ {print $$NF}' | sort -u)"; \
 	if [ -n "$$undef" ]; then \
 		echo "ERROR: undefined SpliceKit_* symbols in $(OUTPUT):" >&2; \
 		echo "$$undef" | sed 's/^/  /' >&2; \
-		echo "Add the missing .m file(s) to Sources/SOURCES.txt." >&2; \
+		echo "Check the implementations in Sources/." >&2; \
 		rm -f $(OUTPUT); \
 		exit 1; \
 	fi
@@ -281,11 +283,12 @@ $(MKV_IMPORT_EXEC): $(MKV_IMPORT_SOURCES) $(MKV_IMPORT_INFO) | $(BUILD_DIR)
 mkv-prototype: $(MKV_IMPORT_EXEC)
 	@echo "Staged: $(MKV_BUILD_DIR)"
 
-deploy: $(OUTPUT) $(SILENCE_DETECTOR) $(STRUCTURE_ANALYZER) $(MIXER_APP) vp9-prototype mkv-prototype
+deploy: $(OUTPUT) tools vp9-prototype mkv-prototype
 	@echo "=== Deploying SpliceKit to modded FCP ==="
 		@rm -rf "$(FW_DIR)"
 		@mkdir -p "$(FW_DIR)/Versions/A/Resources"
 	cp $(OUTPUT) "$(FW_DIR)/Versions/A/SpliceKit"
+	@cp Documentation/Licenses/Lua.txt "$(FW_DIR)/Versions/A/Resources/Lua-LICENSE.txt"
 		@# Create framework symlinks. Use -n so repeated deploys replace the
 		@# symlink itself instead of following it into Versions/A.
 		@cd "$(FW_DIR)/Versions" && ln -sfn A Current
@@ -307,45 +310,31 @@ deploy: $(OUTPUT) $(SILENCE_DETECTOR) $(STRUCTURE_ANALYZER) $(MIXER_APP) vp9-pro
 	@# Deploy tools
 	@mkdir -p "$(TOOLS_DIR)"
 	@$(MAKE) url-import-tools
-	@cp $(SILENCE_DETECTOR) "$(TOOLS_DIR)/silence-detector" 2>/dev/null || true
-	@cp $(STRUCTURE_ANALYZER) "$(TOOLS_DIR)/structure-analyzer" 2>/dev/null || true
-	@cp $(MIXER_APP) "$(TOOLS_DIR)/SpliceKitMixer" 2>/dev/null || true
-	@if [ -f "$(PARAKEET_RELEASE_BIN)" ]; then \
-		cp "$(PARAKEET_RELEASE_BIN)" "$(TOOLS_DIR)/parakeet-transcriber"; \
-		cp "$(PARAKEET_RELEASE_BIN)" "$(FW_DIR)/Versions/A/Resources/parakeet-transcriber"; \
-	elif [ -f "$(PARAKEET_DEBUG_BIN)" ]; then \
-		cp "$(PARAKEET_DEBUG_BIN)" "$(TOOLS_DIR)/parakeet-transcriber"; \
-		cp "$(PARAKEET_DEBUG_BIN)" "$(FW_DIR)/Versions/A/Resources/parakeet-transcriber"; \
-	fi
-	@if [ -f "$(WHISPER_RELEASE_BIN)" ]; then \
-		cp "$(WHISPER_RELEASE_BIN)" "$(TOOLS_DIR)/whisper-transcriber"; \
-		cp "$(WHISPER_RELEASE_BIN)" "$(FW_DIR)/Versions/A/Resources/whisper-transcriber"; \
-	elif [ -f "$(WHISPER_DEBUG_BIN)" ]; then \
-		cp "$(WHISPER_DEBUG_BIN)" "$(TOOLS_DIR)/whisper-transcriber"; \
-		cp "$(WHISPER_DEBUG_BIN)" "$(FW_DIR)/Versions/A/Resources/whisper-transcriber"; \
-	fi
+	@cp $(SWIFT_TOOLS) "$(TOOLS_DIR)/"
+	@set -e; for tool in parakeet-transcriber whisper-transcriber; do \
+		for config in release apple/Products/Release debug; do \
+			binary="Tools/$$tool/.build/$$config/$$tool"; \
+			if [ -f "$$binary" ]; then \
+				bash Patcher/scripts/copy_transcriber.sh "$$binary" "$(TOOLS_DIR)" "$(FW_DIR)/Versions/A/Resources"; \
+				break; \
+			fi; \
+		done; \
+	done
 	@# Create plugins directory
 	@mkdir -p "$(HOME)/Library/Application Support/SpliceKit/plugins"
 	@# Copy Lua example scripts
-	@mkdir -p "$(HOME)/Library/Application Support/SpliceKit/lua/examples"
 	@mkdir -p "$(HOME)/Library/Application Support/SpliceKit/lua/auto"
-	@mkdir -p "$(HOME)/Library/Application Support/SpliceKit/lua/lib"
-	@mkdir -p "$(HOME)/Library/Application Support/SpliceKit/lua/menu"
-	@cp -n Scripts/lua/examples/*.lua "$(HOME)/Library/Application Support/SpliceKit/lua/examples/" 2>/dev/null || true
-	@cp -n Scripts/lua/menu/*.lua "$(HOME)/Library/Application Support/SpliceKit/lua/menu/" 2>/dev/null || true
-	@cp -n Scripts/lua/lib/*.lua "$(HOME)/Library/Application Support/SpliceKit/lua/lib/" 2>/dev/null || true
+	@rsync -r --ignore-existing --exclude '.*' "Lua Scripts/" "$(HOME)/Library/Application Support/SpliceKit/lua/"
 	@# SpliceKit no longer ships BRAW support (use BRAW Toolbox instead). Remove
 	@# bundles left behind by older SpliceKit versions so they don't compete with
 	@# third-party BRAW Media Extensions.
 	@rm -rf "$(MODDED_APP)/Contents/PlugIns/Codecs/SpliceKitBRAWDecoder.bundle" \
 		"$(MODDED_APP)/Contents/PlugIns/FormatReaders/SpliceKitBRAWImport.bundle" \
 		"$(MODDED_APP)/Contents/Extensions/SpliceKitBRAWRAWProcessor.appex"
-	@$(MAKE) vp9-prototype
 	@mkdir -p "$(MODDED_APP)/Contents/PlugIns/Codecs"
 	@rm -rf "$(MODDED_APP)/Contents/PlugIns/Codecs/SpliceKitVP9Decoder.bundle"
 	@cp -R "$(VP9_DECODER_BUNDLE)" "$(MODDED_APP)/Contents/PlugIns/Codecs/SpliceKitVP9Decoder.bundle"
 	@echo "VP9 decoder bundle copied into FCP.app/Contents/PlugIns"
-	@$(MAKE) mkv-prototype
 	@mkdir -p "$(MODDED_APP)/Contents/PlugIns/FormatReaders"
 	@rm -rf "$(MODDED_APP)/Contents/PlugIns/FormatReaders/SpliceKitMKVImport.bundle"
 	@cp -R "$(MKV_IMPORT_BUNDLE)" "$(MODDED_APP)/Contents/PlugIns/FormatReaders/SpliceKitMKVImport.bundle"
@@ -392,4 +381,4 @@ launch: deploy
 	DYLD_INSERT_LIBRARIES="$(FW_DIR)/Versions/A/SpliceKit" \
 		"$(MODDED_APP)/Contents/MacOS/Final Cut Pro" &
 	@echo "FCP launched. Check Console.app for [SpliceKit] messages."
-	@echo "Connect: echo '{\"jsonrpc\":\"2.0\",\"method\":\"system.version\",\"id\":1}' | nc -U /tmp/splicekit.sock"
+	@echo "Connect: python3 Examples/splicekit_client.py system.version"

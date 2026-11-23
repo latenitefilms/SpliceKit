@@ -63,8 +63,7 @@ allSeqs = call_method_with_args(seqs_handle, "allObjects", "[]", false, true)
 ### Select Before Acting
 Color correction, retiming, titles, and effects require a selected clip:
 ```
-playback_action("goToStart")              # position
-playback_action("nextFrame") x N          # navigate
+seek_to_time(3.0)                         # position in seconds
 timeline_action("selectClipAtPlayhead")   # select primary storyline clip
 timeline_action("addColorBoard")          # now apply
 ```
@@ -78,9 +77,8 @@ select_clip_in_lane(lane=0)               # same as selectClipAtPlayhead
 
 ### Playhead Positioning
 - 1 frame = ~0.042s at 24fps, ~0.033s at 30fps
-- Use `nextFrame` with repeat count for precise positioning
-- `batch_timeline_actions` is fastest for multi-step sequences
-- Always go to a known position (goToStart) before stepping
+- Use `seek_to_time(seconds)` for an exact timeline position.
+- Use `blade_at_times` and `add_markers_at_times` for multiple timed edits.
 
 ### Undo After Mistakes
 ```
@@ -192,26 +190,13 @@ timeline_action("blade")  # cut there
 
 ### Multiple cuts (batch — preferred)
 ```
-blade_at_times([3.0, 6.0, 9.0, 12.0, 15.0])   # cut at all times in one call
+blade_at_times('[3.0, 6.0, 9.0, 12.0, 15.0]')   # times as a JSON string
 ```
 
 ### Cuts at regular intervals across entire timeline
 ```
 # Compute times: every 3s across a 30s timeline
-blade_at_times([3.0, 6.0, 9.0, 12.0, 15.0, 18.0, 21.0, 24.0, 27.0])
-```
-
-### Multiple cuts (batch_timeline_actions alternative)
-```
-batch_timeline_actions('[
-  {"type":"playback","action":"goToStart"},
-  {"type":"playback","action":"nextFrame","repeat":48},
-  {"type":"timeline","action":"blade"},
-  {"type":"playback","action":"nextFrame","repeat":48},
-  {"type":"timeline","action":"blade"},
-  {"type":"playback","action":"nextFrame","repeat":48},
-  {"type":"timeline","action":"blade"}
-]')
+blade_at_times('[3.0, 6.0, 9.0, 12.0, 15.0, 18.0, 21.0, 24.0, 27.0]')
 ```
 
 ### Add color correction
@@ -230,13 +215,7 @@ timeline_action("retimeSlow50")    # 50% speed
 
 ### Add markers at intervals
 ```
-playback_action("goToStart")
-batch_timeline_actions('[
-  {"type":"playback","action":"nextFrame","repeat":120},
-  {"type":"timeline","action":"addMarker"},
-  {"type":"playback","action":"nextFrame","repeat":120},
-  {"type":"timeline","action":"addChapterMarker"}
-]')
+add_markers_at_times('[{"time":5,"name":"Review"},{"time":10,"name":"Chapter 1","kind":"chapter"}]')
 ```
 
 ### Create project via FCPXML (no restart)
@@ -450,7 +429,8 @@ Supported formats:
 - `.aaf` — Avid AAF (requires Avid-specific metadata on clips)
 - `.otioz` / `.otiod` — OTIO bundles (media files must exist on disk)
 
-Requires: `pip install opentimelineio otio-fcpx-xml-adapter otio-cmx3600-adapter`
+Install `opentimelineio` and the adapters for your interchange formats. The FCPXML
+1.14 test setup is documented in [the fixture README](Tests/fixtures/upstream_otio_fcpxml/README.md).
 
 ## Deploy & Restart FCP
 ```
@@ -862,15 +842,15 @@ Finds classes with "Notification" in their name and enumerates their methods.
 Also resolves well-known notification name constants (e.g., `FFEffectsChangedNotification`).
 
 ### IDA Pro Integration Scripts
-The `tools/` directory contains scripts for applying runtime metadata to IDA Pro:
+The `Tools/reverse-engineering/` directory contains the IDA Pro integration scripts.
 
 ```bash
 # Step 1: Export runtime metadata from live FCP
-python3 tools/reverse-engineering/fcp_runtime_export.py --binary Flexo -o ida_export
+python3 Tools/reverse-engineering/fcp_runtime_export.py --binary Flexo -o ida_export
 
 # Step 2: Run IDA headless with metadata enrichment + decompile
 RUNTIME_JSON=ida_export/Flexo.json DECOMPILE_OUTPUT_DIR=output \
-  idat -A -S"tools/reverse-engineering/ida_apply_and_decompile.py" /path/to/Flexo
+  idat -A -S"Tools/reverse-engineering/ida_apply_and_decompile.py" /path/to/Flexo
 ```
 
 **What the IDA script does:**
@@ -883,11 +863,11 @@ RUNTIME_JSON=ida_export/Flexo.json DECOMPILE_OUTPUT_DIR=output \
 7. Triggers type propagation across the entire binary
 
 **Tools:**
-- `tools/reverse-engineering/fcp_runtime_export.py` — Collection script (connects to SpliceKit, dumps JSON per binary)
-- `tools/reverse-engineering/ida_apply_and_decompile.py` — IDAPython headless script (applies metadata + decompiles)
-- `tools/reverse-engineering/ida_objc_types.py` — ObjC type encoding parser (converts `@"NSArray"` → `NSArray *`)
-- `tools/reverse-engineering/ida_import_runtime.py` — Interactive IDAPython script (for use inside IDA GUI)
-- `tools/reverse-engineering/batch_enhanced_decompile.sh` — Batch process all 53 FCP binaries
+- `Tools/reverse-engineering/fcp_runtime_export.py` — Collection script (connects to SpliceKit, dumps JSON per binary)
+- `Tools/reverse-engineering/ida_apply_and_decompile.py` — IDAPython headless script (applies metadata + decompiles)
+- `Tools/reverse-engineering/ida_objc_types.py` — ObjC type encoding parser (converts `@"NSArray"` → `NSArray *`)
+- `Tools/reverse-engineering/ida_import_runtime.py` — Interactive IDAPython script (for use inside IDA GUI)
+- `Tools/reverse-engineering/batch_enhanced_decompile.sh` — Batch process all 53 FCP binaries
 
 ## In-Process Debugging (Debugger Parity)
 
@@ -1006,11 +986,11 @@ timeline.directAction(action="duplicateCaptions", language="es", format="SRT")
 timeline.directAction(selector="actionValidateAndRepair:validateMode:error:")
 ```
 
-See `docs/DEBUG_TOOLS_GUIDE.md` for comprehensive documentation of all debug
+See `Documentation/DEBUG_TOOLS_GUIDE.md` for comprehensive documentation of all debug
 endpoints, parameters, workflows, and recipes.
 
 ## Full API Reference
-See `docs/FCP_API_REFERENCE.md` for comprehensive documentation of all key classes,
+See `Documentation/FCP_API_REFERENCE.md` for comprehensive documentation of all key classes,
 methods, properties, notifications, and patterns. This reference is sufficient to use
 SpliceKit without access to the decompiled FCP source code.
 
@@ -1081,23 +1061,23 @@ sk.eval("NSApp.delegate.className") -- ObjC runtime bridge
 - JSON-RPC: `lua.execute`, `lua.executeFile`, `lua.reset`, `lua.getState`, `lua.watch`
 - MCP tools: `lua_execute`, `lua_execute_file`, `lua_reset`, `lua_watch`, `lua_state`
 
-See `docs/LUA_SDK_REFERENCE.md` for the full SDK with 25 sections, 140+ RPC methods,
+See `Documentation/LUA_SDK_REFERENCE.md` for the full SDK with 25 sections, 140+ RPC methods,
 and complete cookbook examples.
 
 ## Additional Documentation
-- `docs/LUA_SDK_REFERENCE.md` — **Lua scripting SDK** (sk module, 120+ actions, ObjC bridge, live coding, cookbook)
-- `docs/LUA_SCRIPTING_GUIDE.md` — **Lua scripting tutorial** (data model, patterns, modules, persistence, pipelines, annotated examples)
-- `docs/TRANSCRIPT_EDITING_GUIDE.md` — Transcript-based editing (engines, silence removal, speakers)
-- `docs/COMMAND_PALETTE_GUIDE.md` — Command palette & Apple Intelligence
-- `docs/RUNTIME_INTROSPECTION_GUIDE.md` — ObjC runtime exploration & reverse engineering
-- `docs/DIALOG_AUTOMATION_GUIDE.md` — Dialog detection & interaction
-- `docs/SCENE_BEAT_DETECTION_GUIDE.md` — Scene change & beat detection
-- `docs/FXPLUG_PLUGIN_GUIDE.md` — FxPlug 4 plugin development
-- `docs/FCPXML_FORMAT_REFERENCE.md` — FCPXML interchange format
-- `docs/WORKFLOW_EXTENSIONS_GUIDE.md` — Workflow Extensions (ProExtensionHost)
-- `docs/CONTENT_EXCHANGE_GUIDE.md` — Content exchange mechanisms
-- `docs/FLEXMUSIC_AND_MONTAGE_GUIDE.md` — FlexMusic & Montage Maker
-- `docs/DEBUG_TOOLS_GUIDE.md` — In-process debugging (tracing, watching, crash handling, eval, hot-loading)
-- `tools/reverse-engineering/fcp_runtime_export.py` — Export runtime metadata for IDA Pro (usage: `--help`)
-- `tools/reverse-engineering/ida_apply_and_decompile.py` — IDAPython headless: apply metadata + decompile all functions
-- `tools/reverse-engineering/batch_enhanced_decompile.sh` — Batch decompile all 53 FCP binaries with runtime enrichment
+- `Documentation/LUA_SDK_REFERENCE.md` — **Lua scripting SDK** (sk module, 120+ actions, ObjC bridge, live coding, cookbook)
+- `Documentation/LUA_SCRIPTING_GUIDE.md` — **Lua scripting tutorial** (data model, patterns, modules, persistence, pipelines, annotated examples)
+- `Documentation/TRANSCRIPT_EDITING_GUIDE.md` — Transcript-based editing (engines, silence removal, speakers)
+- `Documentation/COMMAND_PALETTE_GUIDE.md` — Command palette & Apple Intelligence
+- `Documentation/RUNTIME_INTROSPECTION_GUIDE.md` — ObjC runtime exploration & reverse engineering
+- `Documentation/DIALOG_AUTOMATION_GUIDE.md` — Dialog detection & interaction
+- `Documentation/SCENE_BEAT_DETECTION_GUIDE.md` — Scene change & beat detection
+- `Documentation/FXPLUG_PLUGIN_GUIDE.md` — FxPlug 4 plugin development
+- `Documentation/FCPXML_FORMAT_REFERENCE.md` — FCPXML interchange format
+- `Documentation/WORKFLOW_EXTENSIONS_GUIDE.md` — Workflow Extensions (ProExtensionHost)
+- `Documentation/CONTENT_EXCHANGE_GUIDE.md` — Content exchange mechanisms
+- `Documentation/FLEXMUSIC_AND_MONTAGE_GUIDE.md` — FlexMusic & Montage Maker
+- `Documentation/DEBUG_TOOLS_GUIDE.md` — In-process debugging (tracing, watching, crash handling, eval, hot-loading)
+- `Tools/reverse-engineering/fcp_runtime_export.py` — Export runtime metadata for IDA Pro (usage: `--help`)
+- `Tools/reverse-engineering/ida_apply_and_decompile.py` — IDAPython headless: apply metadata + decompile all functions
+- `Tools/reverse-engineering/batch_enhanced_decompile.sh` — Batch decompile all 53 FCP binaries with runtime enrichment

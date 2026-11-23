@@ -24,15 +24,12 @@ xcuserdata/
 
 # Xcode build artifacts
 DerivedData/
-patcher/build/
-patcher/SpliceKit.xcodeproj/xcuserdata/
-patcher/SpliceKit.xcodeproj/project.xcworkspace/xcuserdata/
 
 # Pre-built patcher app (generate via release.sh, distribute via GitHub Releases)
-patcher/SpliceKitPatcher.app/
+Patcher/SpliceKitPatcher.app/
 # Left over from the removed Sentry integration
-patcher/Frameworks/Sentry.framework/
-patcher/Frameworks/.sentry-sdk-version
+Patcher/Frameworks/Sentry.framework/
+Patcher/Frameworks/.sentry-sdk-version
 
 # Keys and credentials
 *.pem
@@ -43,14 +40,11 @@ patcher/Frameworks/.sentry-sdk-version
 .credentials
 credentials.json
 
-# Swift packages
-Package.resolved
-
 # Release binaries (use GitHub Releases instead)
-patcher/SpliceKitPatcher-v*.zip
-patcher/SpliceKit-v*.dmg
+Patcher/SpliceKitPatcher-v*.zip
+Patcher/SpliceKit-v*.dmg
 
-# Runtime metadata export (75MB+, regenerate with tools/reverse-engineering/fcp_runtime_export.py)
+# Runtime metadata export (75MB+, regenerate with Tools/reverse-engineering/fcp_runtime_export.py)
 ida_export/
 
 # Decompilation analysis output (multi-GB, local scratch only)

@@ -2,7 +2,7 @@
   "mcpServers": {
     "splicekit": {
       "command": "${HOME}/.venvs/splicekit-mcp/bin/python",
-      "args": ["mcp/server.py"]
+      "args": ["MCP/server.py"]
     }
   }
 }

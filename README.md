@@ -130,7 +130,7 @@ Paste a YouTube, Vimeo, or Twitter link and pull it into your library as a real 
 One command, every clip on your timeline exports as its own file — all effects, color grades, and transitions baked in.
 
 ### Native VP9 and MKV/WebM Support
-Drop VP9/WebM and MKV files straight onto your timeline — no transcoding, no wrappers. SpliceKit ships a VP9 decoder and an MKV/WebM format reader that plug into FCP, so the clips show up as first-class media with thumbnails, scrubbing, and full quality decode. Handy for anything pulled down from the web.
+The source checkout includes a VP9 decoder and an MKV/WebM format reader. Running `make deploy` installs both bundles into the patched copy of Final Cut Pro.
 
 For Blackmagic RAW (`.braw`), use [BRAW Toolbox](https://brawtoolbox.io) — SpliceKit no longer includes its own BRAW support.
 
@@ -146,36 +146,36 @@ The easiest path is the GUI patcher. Download the latest release, open it, click
 [![Installation Guide](https://img.youtube.com/vi/NxbInKlXQVs/maxresdefault.jpg)](https://www.youtube.com/watch?v=NxbInKlXQVs)
 
 1. Download **SpliceKit** from the [latest release](https://github.com/latenitefilms/SpliceKit/releases/latest)
-2. Unzip and open the app
+2. Open the DMG, drag **SpliceKit** to **Applications**, and open the app
 3. Click **Patch** — it handles the rest
 
-<img src="docs/patcher-screenshot.jpg" width="500" alt="SpliceKit Patcher">
+<img src="Documentation/patcher-screenshot.jpg" width="500" alt="SpliceKit Patcher">
 
-The patcher copies Final Cut Pro to `~/Applications/SpliceKit/`, injects the SpliceKit dylib, re-signs it, and sets up the MCP server. **Your original Final Cut Pro is never touched.**
+The patcher copies Final Cut Pro to `~/Applications/SpliceKit/` and installs SpliceKit in that copy. The MCP server ships inside the patcher app.
 
 Once done, click **Launch FCP** in the patcher, or open the new copy from `~/Applications/SpliceKit/`. Press **Cmd+Shift+P** to open the Command Palette and you're off.
 
-Prefer the terminal? `./patcher/patch_fcp.sh` does the same job.
+To patch from a source checkout, run `./Patcher/patch_fcp.sh`.
 
 ---
 
 ## Connect It to Claude (or any MCP client)
 
-The GUI patcher sets up the MCP server for you. If you skipped that step — or you're running from a repo checkout — here's the manual path.
+The MCP server needs Python 3.10 or newer. Set up its virtual environment once, then point your MCP client at the server.
 
-### One-line setup
+### From a source checkout
 
 ```bash
 make mcp-setup
 ```
 
-That creates an isolated Python virtualenv at `~/.venvs/splicekit-mcp` and installs the pinned dependencies from `mcp/requirements.txt`.
+That creates an isolated Python virtualenv at `~/.venvs/splicekit-mcp` and installs the dependencies in `MCP/requirements.txt`.
 
-If you'd rather do it by hand:
+### From the installed app
 
 ```bash
 python3 -m venv ~/.venvs/splicekit-mcp
-~/.venvs/splicekit-mcp/bin/python -m pip install -r mcp/requirements.txt
+~/.venvs/splicekit-mcp/bin/python -m pip install -r "/Applications/SpliceKit.app/Contents/Resources/mcp/requirements.txt"
 ```
 
 ### Verify everything is wired up
@@ -184,7 +184,7 @@ python3 -m venv ~/.venvs/splicekit-mcp
 make mcp-doctor
 ```
 
-Checks that the venv exists, `mcp` imports cleanly, `.mcp.json` points at the venv, and the FCP bridge is listening on `127.0.0.1:9876`.
+Run this from the source checkout to check the virtual environment, the MCP client configuration and the connection to the FCP bridge on `127.0.0.1:9876`.
 
 ### Point your MCP client at the server
 
@@ -197,7 +197,7 @@ Use the virtual environment's Python as the MCP `command`. The `args` path depen
   "mcpServers": {
     "splicekit": {
       "command": "/Users/yourname/.venvs/splicekit-mcp/bin/python",
-      "args": ["/absolute/path/to/SpliceKit/mcp/server.py"]
+      "args": ["/absolute/path/to/SpliceKit/MCP/server.py"]
     }
   }
 }
@@ -220,25 +220,13 @@ The MCP server connects to the SpliceKit bridge running inside Final Cut Pro on 
 
 ---
 
-## Is This Safe? Is It Legal? Will Apple Ban Me?
+## What the patcher changes
 
-Short answers: **Yes, it's safe. Yes, it's legal. No, Apple won't ban you.**
+The patched copy and the App Store copy of Final Cut Pro can open the same libraries. Timeline commands and plugins perform real edits in the library you have open. SpliceKit uses private Final Cut Pro APIs, so a Final Cut Pro update can require a compatible SpliceKit build.
 
-- **Your FCP stays untouched.** SpliceKit makes a *copy* in `~/Applications/SpliceKit/`. Your App Store FCP is never modified. Your libraries, projects, and media files are not touched by the install.
-- **It's legal.** Reverse engineering for interoperability is explicitly protected under [DMCA §1201(f)](https://www.law.cornell.edu/uscode/text/17/1201) (US) and the EU Software Directive. SpliceKit is MIT licensed.
-- **Apple doesn't ban Apple IDs for running modded local apps.** There's no precedent, and the mechanism (dyld injection + code signing) is the same one used by BetterTouchTool, Alfred, Hammerspoon, accessibility tools, and every Xcode debugger session.
-- **The realistic risks** are that FCP updates can break compatibility (just re-patch) and that private APIs can behave unexpectedly in edge cases (Cmd+Z is your friend).
+SpliceKit writes its logs to `~/Library/Logs/SpliceKit/`. macOS keeps Final Cut Pro crash reports in `~/Library/Logs/DiagnosticReports/`. The patcher’s **Share Logs** button uploads the latest reports to filebin.net when you choose to share them. Sparkle checks GitHub for SpliceKit updates.
 
-### Built to be stable
-
-**SpliceKit is designed to be at least as stable as stock FCP — and in several places, measurably more.**
-
-- **Fully reversible, any time.** SpliceKit never changes how FCP stores your projects, libraries, or media. Quit the patched copy whenever you want, open the exact same library in your vanilla App Store FCP, and keep editing with zero loss. Nothing is locked in, nothing is migrated.
-- **Same safety level as any FXPlug 4 plugin — with more headroom.** SpliceKit plugins run at the same level of trust as Apple's own FXPlug system, and the architecture gives us more tools than FXPlug does. Expensive work runs on background threads, hot paths are explicitly designed not to contend, and state changes are guarded so plugins don't step on FCP's internals. Where an FXPlug plugin has to hope FCP recovers from a performance spike, SpliceKit is built to prevent the spike from happening in the first place.
-- **SpliceKit actively fixes native FCP bugs.** A handful of long-standing issues in FCP are already patched in the modded copy, which means the patched build is measurably more stable than stock in those areas — [here's a video example](https://youtu.be/SNUpQvBef0k).
-- **Crash details stay on your Mac unless you choose to share them.** SpliceKit never sends crash reports or logs automatically. Its own logs, including any crash it catches, are written to `~/Library/Logs/SpliceKit/`; macOS keeps Final Cut Pro's crash reports in `~/Library/Logs/DiagnosticReports/`. The patcher's **Share Logs** button uploads the latest of those and SpliceKit's logs to filebin.net only when you click it. (The patcher does check GitHub for SpliceKit updates via Sparkle.) Sharing those logs in the [Discord](https://discord.com/invite/HD3FPc4Azu) or on [GitHub Issues](https://github.com/latenitefilms/SpliceKit/issues) is still useful for extra context.
-
-The full plain-English version is in [docs/WHAT_IS_SPLICEKIT.md](docs/WHAT_IS_SPLICEKIT.md).
+The full plain-English version is in [Documentation/WHAT_IS_SPLICEKIT.md](Documentation/WHAT_IS_SPLICEKIT.md).
 
 ---
 
@@ -280,11 +268,11 @@ SpliceKit injects a dynamic library into a re-signed copy of Final Cut Pro. Once
 
 ### Ways to build
 
-- **Native plugin** (ObjC / Swift / C++) — link against `SpliceKit.framework`, drop your dylib into the plugins folder, hot-load it with `debug.loadPlugin`. Start from `examples/plugins/com.splicekit.hello-world`.
-- **Lua, inside FCP** — Ctrl+Opt+L opens a REPL with an `sk` module. Drop `.lua` files into `~/Library/Application Support/SpliceKit/lua/auto/` for live coding. Full SDK in [docs/LUA_SDK_REFERENCE.md](docs/LUA_SDK_REFERENCE.md).
-- **Python / any language with a TCP socket** — `python3 Scripts/splicekit_client.py` gives you an interactive runtime REPL. Or: `echo '{"jsonrpc":"2.0","method":"system.version","id":1}' | nc 127.0.0.1 9876`
+- **Native plugins** — see [EditorToolkit](Plugins/EditorToolkit/README.md) for Objective-C plugins and their build settings.
+- **Lua, inside FCP** — Ctrl+Opt+L opens a REPL with an `sk` module. The [Hello World plugin](Examples/plugins/com.splicekit.hello-world) shows how to register a command. The bundled examples and menu scripts live in [Lua Scripts](Lua%20Scripts). See the [Lua SDK reference](Documentation/LUA_SDK_REFERENCE.md).
+- **Python / any language with a TCP socket** — `python3 Examples/splicekit_client.py` gives you an interactive runtime REPL. Or: `echo '{"jsonrpc":"2.0","method":"system.version","id":1}' | nc 127.0.0.1 9876`
 - **MCP tools** — expose your plugin's capabilities as MCP tools and any AI client can drive them.
-- **Ask an AI to build it** — the API reference in `docs/` is written to be AI-consumable. Describe what you want, hand the spec to Claude, and it can write the plugin for you.
+- **Ask an AI to build it** — the API reference in `Documentation/` is written to be AI-consumable. Describe what you want, hand the spec to Claude, and it can write the plugin for you.
 - **Open a PR to SpliceKit itself** — if the thing you built is useful to other editors, send it upstream. The bundled "features" (Text-Based Editor, Silence Remover, LiveCam, Song Cut, etc.) all started as plugins. Fork the repo, drop your plugin in `Plugins/` or `Sources/`, and open a [pull request](https://github.com/latenitefilms/SpliceKit/pulls) — community plugins are how SpliceKit grows.
 
 ### Key FCP internals worth knowing
@@ -312,22 +300,26 @@ SpliceKit injects a dynamic library into a re-signed copy of Final Cut Pro. Once
 ```bash
 git clone https://github.com/latenitefilms/SpliceKit.git
 cd SpliceKit
-make all && make deploy
+make all tools
 ```
+
+The first build downloads Lua 5.4.9, checks its SHA-256, and links it into the universal SpliceKit dylib. Subsequent builds reuse the copy under `build/`. For an offline build, pass `LUA_URL=file:///absolute/path/to/lua-5.4.9.tar.gz` to `make`. The packaged app includes the Lua runtime.
+
+Open `Patcher/SpliceKit.xcodeproj` to build the macOS patcher. Use `make deploy` to update an existing patched copy of Final Cut Pro. Run the offline test suite from the repository root with `python3 -m unittest discover -s Tests`. The programs in `Tests/live/` exercise a running Final Cut Pro.
 
 ### Documentation map
 
-- [`docs/WHAT_IS_SPLICEKIT.md`](docs/WHAT_IS_SPLICEKIT.md) — the plain-English tour
-- [`docs/FCP_API_REFERENCE.md`](docs/FCP_API_REFERENCE.md) — full API reference for FCP internals
-- [`docs/COMMAND_PALETTE_GUIDE.md`](docs/COMMAND_PALETTE_GUIDE.md) — Command Palette & Apple Intelligence
-- [`docs/LUA_SDK_REFERENCE.md`](docs/LUA_SDK_REFERENCE.md) · [`docs/LUA_SCRIPTING_GUIDE.md`](docs/LUA_SCRIPTING_GUIDE.md) — Lua plugin scripting
-- [`docs/TRANSCRIPT_EDITING_GUIDE.md`](docs/TRANSCRIPT_EDITING_GUIDE.md) — the Text-Based Editor plugin
-- [`docs/FXPLUG_PLUGIN_GUIDE.md`](docs/FXPLUG_PLUGIN_GUIDE.md) — FxPlug 4 plugin dev
-- [`docs/WORKFLOW_EXTENSIONS_GUIDE.md`](docs/WORKFLOW_EXTENSIONS_GUIDE.md) — Workflow Extensions
-- [`docs/DEBUG_TOOLS_GUIDE.md`](docs/DEBUG_TOOLS_GUIDE.md) — in-process debugging, tracing, hot-loading
-- [`docs/RUNTIME_INTROSPECTION_GUIDE.md`](docs/RUNTIME_INTROSPECTION_GUIDE.md) — ObjC runtime exploration
-- [`docs/FCPXML_FORMAT_REFERENCE.md`](docs/FCPXML_FORMAT_REFERENCE.md) — FCPXML format
-- [`docs/SCENE_BEAT_DETECTION_GUIDE.md`](docs/SCENE_BEAT_DETECTION_GUIDE.md) · [`docs/FLEXMUSIC_AND_MONTAGE_GUIDE.md`](docs/FLEXMUSIC_AND_MONTAGE_GUIDE.md) — detection & montage plugins
+- [`Documentation/WHAT_IS_SPLICEKIT.md`](Documentation/WHAT_IS_SPLICEKIT.md) — the plain-English tour
+- [`Documentation/FCP_API_REFERENCE.md`](Documentation/FCP_API_REFERENCE.md) — full API reference for FCP internals
+- [`Documentation/COMMAND_PALETTE_GUIDE.md`](Documentation/COMMAND_PALETTE_GUIDE.md) — Command Palette & Apple Intelligence
+- [`Documentation/LUA_SDK_REFERENCE.md`](Documentation/LUA_SDK_REFERENCE.md) · [`Documentation/LUA_SCRIPTING_GUIDE.md`](Documentation/LUA_SCRIPTING_GUIDE.md) — Lua plugin scripting
+- [`Documentation/TRANSCRIPT_EDITING_GUIDE.md`](Documentation/TRANSCRIPT_EDITING_GUIDE.md) — the Text-Based Editor plugin
+- [`Documentation/FXPLUG_PLUGIN_GUIDE.md`](Documentation/FXPLUG_PLUGIN_GUIDE.md) — FxPlug 4 plugin dev
+- [`Documentation/WORKFLOW_EXTENSIONS_GUIDE.md`](Documentation/WORKFLOW_EXTENSIONS_GUIDE.md) — Workflow Extensions
+- [`Documentation/DEBUG_TOOLS_GUIDE.md`](Documentation/DEBUG_TOOLS_GUIDE.md) — in-process debugging, tracing, hot-loading
+- [`Documentation/RUNTIME_INTROSPECTION_GUIDE.md`](Documentation/RUNTIME_INTROSPECTION_GUIDE.md) — ObjC runtime exploration
+- [`Documentation/FCPXML_FORMAT_REFERENCE.md`](Documentation/FCPXML_FORMAT_REFERENCE.md) — FCPXML format
+- [`Documentation/SCENE_BEAT_DETECTION_GUIDE.md`](Documentation/SCENE_BEAT_DETECTION_GUIDE.md) · [`Documentation/FLEXMUSIC_AND_MONTAGE_GUIDE.md`](Documentation/FLEXMUSIC_AND_MONTAGE_GUIDE.md) — detection & montage plugins
 
 ---
 

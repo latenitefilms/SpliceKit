@@ -66,7 +66,7 @@ same page or via `appcast.xml`.
   transcribed, and any part of it FCP wasn't asked to transcribe is protected.
 - **Release builds include `parakeet-transcriber` and `whisper-transcriber`.**
   The build looked for their sources in a folder that is no longer in the
-  repository, so releases skipped them; it now uses `tools/`. `make tools` also
+  repository, so releases skipped them; it now uses `Tools/`. `make tools` also
   builds `beat-detector` for the MCP `detect_beats()` tool.
 - **`browser.appendClip`, `browser.insertClip` and `browser.connectClip` find
   clips by name or index again.** They enumerated events with `ownedClips`,
@@ -82,7 +82,7 @@ same page or via `appcast.xml`.
 - **Transcription is more reliable:** the patcher deploys
   `whisper-transcriber`, one undecodable clip no longer aborts a Parakeet batch,
   and `parakeet-transcriber` builds against current FluidAudio (upstream #85).
-- **`patcher/patch_fcp.sh` produces a launchable app again.** It builds through
+- **`Patcher/patch_fcp.sh` produces a launchable app again.** It builds through
   the Makefile, detects existing injection correctly, picks one signing
   identity, signs after editing `Info.plist`, no longer writes `.mcp.json` into
   the signed framework, names the destination correctly for

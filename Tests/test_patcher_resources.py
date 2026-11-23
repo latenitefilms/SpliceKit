@@ -14,8 +14,7 @@ class PatcherResourceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="SpliceKit resources ") as temp:
             checkout = Path(temp) / "checkout"
             checkout.mkdir()
-            for name in ("Lua Scripts", "Documentation"):
-                (checkout / name).symlink_to(ROOT / name, target_is_directory=True)
+            (checkout / "Lua Scripts").symlink_to(ROOT / "Lua Scripts", target_is_directory=True)
             project = checkout / "Patcher"
             project.mkdir()
             (project / "SpliceKit").symlink_to(ROOT / "Patcher/SpliceKit", target_is_directory=True)
@@ -30,10 +29,12 @@ class PatcherResourceTests(unittest.TestCase):
             prebuilt.mkdir(parents=True)
             mcp = prebuilt / "mcp"
             mcp.mkdir()
-            for name in ("splicekit-mcp", "Catalog.json", "otio_adapter.py", "server.py"):
+            for name in ("splicekit-mcp", "Catalog.json"):
                 (mcp / name).write_text(name)
             for name in ("SpliceKit", "beat-detector", "silence-detector", "structure-analyzer", "SpliceKitMixer"):
                 (prebuilt / name).write_text(name)
+            lua_license = prebuilt / "Lua-LICENSE.txt"
+            lua_license.write_text("License supplied by the Lua source archive.\n")
             for name in ("parakeet-transcriber", "whisper-transcriber"):
                 package = checkout / "Tools" / name
                 package.mkdir(parents=True)
@@ -47,14 +48,20 @@ class PatcherResourceTests(unittest.TestCase):
                     check=True, capture_output=True, text=True,
                 )
 
-            bundle()
             resources = products / "SpliceKit.app/Contents/Resources"
+            legacy_mcp = resources / "mcp"
+            (legacy_mcp / "__pycache__").mkdir(parents=True)
+            for stale in ("server.py", "otio_adapter.py", "requirements.txt", "__pycache__/server.pyc"):
+                (legacy_mcp / stale).write_text("old build")
+            bundle()
             tool = resources / "tools/whisper-transcriber"
             self.assertTrue((tool / "Package.swift").is_file())
             self.assertTrue((resources / "tools/beat-detector").is_file())
-            for name in ("splicekit-mcp", "Catalog.json", "otio_adapter.py", "server.py"):
+            self.assertEqual({item.name for item in legacy_mcp.iterdir()}, {"splicekit-mcp", "Catalog.json"})
+            for name in ("splicekit-mcp", "Catalog.json"):
                 self.assertEqual((resources / "mcp" / name).read_bytes(), (mcp / name).read_bytes())
             self.assertTrue((resources / "Scripts/lua/lib/skutil.lua").is_file())
+            self.assertEqual((resources / lua_license.name).read_bytes(), lua_license.read_bytes())
             self.assertEqual((resources / "entitlements.plist").read_bytes(),
                              (project / "SpliceKit/Resources/entitlements.plist").read_bytes())
 

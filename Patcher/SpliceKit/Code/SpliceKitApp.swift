@@ -1,5 +1,4 @@
 import SwiftUI
-import Sparkle
 import AppKit
 
 @MainActor
@@ -11,8 +10,6 @@ private final class SpliceKitSession: ObservableObject {
     }
 
     @Published private(set) var access: Access = .checking
-    @Published private(set) var canCheckForUpdates = false
-    private var updaterController: SPUStandardUpdaterController?
 
     init() {
         checkEligibility()
@@ -32,20 +29,7 @@ private final class SpliceKitSession: ObservableObject {
             }
 
             access = .ready(PatcherModel())
-            let controller = SPUStandardUpdaterController(
-                startingUpdater: true,
-                updaterDelegate: nil,
-                userDriverDelegate: nil
-            )
-            updaterController = controller
-            controller.updater.publisher(for: \.canCheckForUpdates, options: [.initial, .new])
-                .receive(on: DispatchQueue.main)
-                .assign(to: &$canCheckForUpdates)
         }
-    }
-
-    func checkForUpdates() {
-        updaterController?.updater.checkForUpdates()
     }
 }
 
@@ -54,6 +38,7 @@ private final class SpliceKitSession: ObservableObject {
 @main
 struct SpliceKitApp: App {
     private static let helpURL = URL(string: "https://splicekit.fcp.cafe/installation/")!
+    private static let releasesURL = URL(string: "https://github.com/latenitefilms/SpliceKit/releases")!
     @StateObject private var session = SpliceKitSession()
     @Environment(\.scenePhase) private var scenePhase
 
@@ -70,8 +55,9 @@ struct SpliceKitApp: App {
         }
         .commands {
             CommandGroup(after: .appInfo) {
-                Button("Check for Updates…", action: session.checkForUpdates)
-                    .disabled(!session.canCheckForUpdates)
+                Button("View Releases on GitHub") {
+                    NSWorkspace.shared.open(Self.releasesURL)
+                }
             }
 
             CommandGroup(replacing: .help) {

@@ -7,12 +7,9 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		2250E42B2F95FA0000DA3ED6 /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = 2250E42D2F95FA0000DA3ED6 /* Sparkle */; };
 		22C571CA2F95CEDE0069DAD2 /* SpliceKit.icon in Resources */ = {isa = PBXBuildFile; fileRef = 22C571C92F95CEDE0069DAD2 /* SpliceKit.icon */; };
 		22D74E1F2F81FBD900A9252B /* Credits.rtf in Resources */ = {isa = PBXBuildFile; fileRef = 22D74E1E2F81FBD900A9252B /* Credits.rtf */; };
 		BB0000000000000000000001 /* SpliceKitApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000000000000000000001 /* SpliceKitApp.swift */; };
-		BB000000000000000000000A /* LateNiteAppValidator.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA000000000000000000000E /* LateNiteAppValidator.swift */; };
-		BB000000000000000000000B /* LateNiteAccessPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA000000000000000000000F /* LateNiteAccessPanel.swift */; };
 		BB0000000000000000000002 /* PatcherModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000000000000000000002 /* PatcherModel.swift */; };
 		BB0000000000000000000003 /* WizardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000000000000000000003 /* WizardView.swift */; };
 		BB0000000000000000000004 /* WelcomePanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000000000000000000004 /* WelcomePanel.swift */; };
@@ -21,29 +18,14 @@
 		BB0000000000000000000007 /* LogPanelView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000000000000000000007 /* LogPanelView.swift */; };
 		BB0000000000000000000008 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = AA0000000000000000000008 /* Assets.xcassets */; };
 		BB0000000000000000000009 /* ShellHelpers.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA000000000000000000000C /* ShellHelpers.swift */; };
+		BB000000000000000000000A /* LateNiteAppValidator.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA000000000000000000000E /* LateNiteAppValidator.swift */; };
+		BB000000000000000000000B /* LateNiteAccessPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA000000000000000000000F /* LateNiteAccessPanel.swift */; };
 /* End PBXBuildFile section */
 
-/* Begin PBXCopyFilesBuildPhase section */
-		DD0000000000000000000004 /* Embed Frameworks */ = {
-			isa = PBXCopyFilesBuildPhase;
-			buildActionMask = 2147483647;
-			dstPath = "";
-			dstSubfolderSpec = 10;
-			files = (
-			);
-			name = "Embed Frameworks";
-			runOnlyForDeploymentPostprocessing = 0;
-		};
-/* End PBXCopyFilesBuildPhase section */
-
 /* Begin PBXFileReference section */
-		2250E4252F95F8B000DA3ED6 /* Version.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Version.xcconfig; sourceTree = "<group>"; };
 		22C571C92F95CEDE0069DAD2 /* SpliceKit.icon */ = {isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; path = SpliceKit.icon; sourceTree = "<group>"; };
 		22D74E1E2F81FBD900A9252B /* Credits.rtf */ = {isa = PBXFileReference; lastKnownFileType = text.rtf; path = Credits.rtf; sourceTree = "<group>"; };
-		22D74E232F8235FE00A9252B /* Configuration.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Configuration.xcconfig; sourceTree = "<group>"; };
 		AA0000000000000000000001 /* SpliceKitApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpliceKitApp.swift; sourceTree = "<group>"; };
-		AA000000000000000000000E /* LateNiteAppValidator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LateNiteAppValidator.swift; sourceTree = "<group>"; };
-		AA000000000000000000000F /* LateNiteAccessPanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LateNiteAccessPanel.swift; sourceTree = "<group>"; };
 		AA0000000000000000000002 /* PatcherModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PatcherModel.swift; sourceTree = "<group>"; };
 		AA0000000000000000000003 /* WizardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WizardView.swift; sourceTree = "<group>"; };
 		AA0000000000000000000004 /* WelcomePanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WelcomePanel.swift; sourceTree = "<group>"; };
@@ -52,8 +34,10 @@
 		AA0000000000000000000007 /* LogPanelView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LogPanelView.swift; sourceTree = "<group>"; };
 		AA0000000000000000000008 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		AA0000000000000000000009 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
-		AA000000000000000000000D /* entitlements.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = entitlements.plist; sourceTree = "<group>"; };
 		AA000000000000000000000C /* ShellHelpers.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShellHelpers.swift; sourceTree = "<group>"; };
+		AA000000000000000000000D /* entitlements.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = entitlements.plist; sourceTree = "<group>"; };
+		AA000000000000000000000E /* LateNiteAppValidator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LateNiteAppValidator.swift; sourceTree = "<group>"; };
+		AA000000000000000000000F /* LateNiteAccessPanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LateNiteAccessPanel.swift; sourceTree = "<group>"; };
 		FF0000000000000000000001 /* SpliceKit.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = SpliceKit.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
@@ -62,7 +46,6 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				2250E42B2F95FA0000DA3ED6 /* Sparkle in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -90,15 +73,6 @@
 			path = Code;
 			sourceTree = "<group>";
 		};
-		22D74E242F8235FE00A9252B /* Configuration */ = {
-			isa = PBXGroup;
-			children = (
-				2250E4252F95F8B000DA3ED6 /* Version.xcconfig */,
-				22D74E232F8235FE00A9252B /* Configuration.xcconfig */,
-			);
-			path = Configuration;
-			sourceTree = "<group>";
-		};
 		CC0000000000000000000001 = {
 			isa = PBXGroup;
 			children = (
@@ -110,7 +84,6 @@
 		CC0000000000000000000002 /* SpliceKit */ = {
 			isa = PBXGroup;
 			children = (
-				22D74E242F8235FE00A9252B /* Configuration */,
 				22D74E222F81FDCB00A9252B /* Code */,
 				CC0000000000000000000003 /* Models */,
 				CC0000000000000000000004 /* Views */,
@@ -160,7 +133,6 @@
 				DD0000000000000000000001 /* Sources */,
 				DD0000000000000000000002 /* Frameworks */,
 				DD0000000000000000000003 /* Resources */,
-				DD0000000000000000000004 /* Embed Frameworks */,
 				DD0000000000000000000006 /* Bundle SpliceKit Resources */,
 			);
 			buildRules = (
@@ -168,9 +140,6 @@
 			dependencies = (
 			);
 			name = SpliceKit;
-			packageProductDependencies = (
-				2250E42D2F95FA0000DA3ED6 /* Sparkle */,
-			);
 			productName = SpliceKit;
 			productReference = FF0000000000000000000001 /* SpliceKit.app */;
 			productType = "com.apple.product-type.application";
@@ -194,9 +163,6 @@
 				Base,
 			);
 			mainGroup = CC0000000000000000000001;
-			packageReferences = (
-				2250E42C2F95FA0000DA3ED6 /* XCRemoteSwiftPackageReference "Sparkle" */,
-			);
 			productRefGroup = CC0000000000000000000006 /* Products */;
 			projectDirPath = "";
 			projectRoot = "";
@@ -233,7 +199,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/bash;
-			shellScript = "set -eu\nrepo=\"$PROJECT_DIR/..\"\nprebuilt=\"$BUILT_PRODUCTS_DIR/SpliceKit_prebuilt\"\n\nmake -C \"$repo\" -f Scripts/Makefile all tools mcp-server\nif [[ \"$CONFIGURATION\" == Release ]]; then\n    for tool in parakeet-transcriber whisper-transcriber; do\n        swift build --package-path \"$repo/Tools/$tool\" --product \"$tool\" --configuration release --arch arm64 --arch x86_64 --only-use-versions-from-resolved-file\n    done\nfi\n\nmkdir -p \"$prebuilt/mcp\"\nfor file in splicekit-mcp Catalog.json otio_adapter.py server.py; do\n    cp \"$repo/build/mcp/$file\" \"$prebuilt/mcp/$file\"\ndone\nfor binary in SpliceKit silence-detector structure-analyzer beat-detector SpliceKitMixer; do\n    cp \"$repo/build/$binary\" \"$prebuilt/$binary\"\ndone\n\n# Discard the obsolete BRAW staging directory on incremental builds.\nrm -rf \"$prebuilt/BRAWPlugins\"\n";
+			shellScript = "set -eu\nrepo=\"$PROJECT_DIR/..\"\nprebuilt=\"$BUILT_PRODUCTS_DIR/SpliceKit_prebuilt\"\n\nmake -C \"$repo\" -f Scripts/Makefile MARKETING_VERSION=\"$MARKETING_VERSION\" all tools mcp-server\nif [[ \"$CONFIGURATION\" == Release ]]; then\n    for tool in parakeet-transcriber whisper-transcriber; do\n        swift build --package-path \"$repo/Tools/$tool\" --product \"$tool\" --configuration release --arch arm64 --arch x86_64 --only-use-versions-from-resolved-file\n    done\nfi\n\nmkdir -p \"$prebuilt/mcp\"\nrm -f \"$prebuilt/mcp/otio_adapter.py\" \"$prebuilt/mcp/server.py\"\nfor file in splicekit-mcp Catalog.json; do\n    cp \"$repo/build/mcp/$file\" \"$prebuilt/mcp/$file\"\ndone\nfor file in SpliceKit Lua-LICENSE.txt silence-detector structure-analyzer beat-detector SpliceKitMixer; do\n    cp \"$repo/build/$file\" \"$prebuilt/$file\"\ndone\n\n# Discard the obsolete BRAW staging directory on incremental builds.\nrm -rf \"$prebuilt/BRAWPlugins\"\n";
 		};
 		DD0000000000000000000006 /* Bundle SpliceKit Resources */ = {
 			isa = PBXShellScriptBuildPhase;
@@ -251,7 +217,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/bash;
-			shellScript = "set -eu\n\nREPO_DIR=\"${PROJECT_DIR}/..\"\nAPP_RESOURCES=\"${BUILT_PRODUCTS_DIR}/${PRODUCT_NAME}.app/Contents/Resources\"\nPREBUILT=\"${BUILT_PRODUCTS_DIR}/SpliceKit_prebuilt\"\n\nmkdir -p \"$APP_RESOURCES/mcp\" \"$APP_RESOURCES/tools\" \"$APP_RESOURCES/Scripts/lua\"\ncp \"$PREBUILT/SpliceKit\" \"$APP_RESOURCES/SpliceKit\"\ncp \"$PROJECT_DIR/SpliceKit/Resources/entitlements.plist\" \"$APP_RESOURCES/entitlements.plist\"\nfor file in splicekit-mcp Catalog.json otio_adapter.py server.py; do\n    cp \"$PREBUILT/mcp/$file\" \"$APP_RESOURCES/mcp/$file\"\ndone\nrm -f \"$APP_RESOURCES/mcp/requirements.txt\"\ncp \"$REPO_DIR/Documentation/Licenses/Lua.txt\" \"$APP_RESOURCES/Lua-LICENSE.txt\"\n\n# Sentry was removed; drop any config left from an earlier incremental build.\nrm -f \"$APP_RESOURCES/SpliceKitSentryConfig.plist\"\n\n# Copy Lua scripts\nrsync -a --delete --exclude '.*' \"$REPO_DIR/Lua Scripts/\" \"$APP_RESOURCES/Scripts/lua/\"\n\n# Copy tools\nfor tool in silence-detector structure-analyzer beat-detector SpliceKitMixer; do\n    cp \"$PREBUILT/$tool\" \"$APP_RESOURCES/tools/$tool\"\ndone\nif [ -f \"$PREBUILT/insert_dylib\" ]; then\n    cp \"$PREBUILT/insert_dylib\" \"$APP_RESOURCES/tools/insert_dylib\"\n    chmod +x \"$APP_RESOURCES/tools/insert_dylib\"\n    echo \"Bundled insert_dylib\"\nelif [ -f \"$REPO_DIR/build/insert_dylib\" ]; then\n    cp \"$REPO_DIR/build/insert_dylib\" \"$APP_RESOURCES/tools/insert_dylib\"\n    chmod +x \"$APP_RESOURCES/tools/insert_dylib\"\n    echo \"Bundled insert_dylib\"\nfi\n\n# Developer builds can contain a transcriber package when its binary is unavailable.\nfor tool in parakeet-transcriber whisper-transcriber; do\n    package=\"$REPO_DIR/Tools/$tool\"\n    destination=\"$APP_RESOURCES/tools/$tool\"\n    binary=\"\"\n    if [[ \"${CONFIGURATION:-Debug}\" == Release ]]; then\n        products=$(swift build --package-path \"$package\" --product \"$tool\" --configuration release --arch arm64 --arch x86_64 --only-use-versions-from-resolved-file --show-bin-path)\n        binary=\"$products/$tool\"\n        for architecture in arm64 x86_64; do\n            lipo \"$binary\" -verify_arch \"$architecture\"\n        done\n    else\n        for configuration in release apple/Products/Release debug; do\n            candidate=\"$package/.build/$configuration/$tool\"\n            if [ -f \"$candidate\" ]; then\n                binary=\"$candidate\"\n                break\n            fi\n        done\n    fi\n    if [ -f \"$binary\" ]; then\n        if [ -d \"$destination\" ]; then rm -rf \"$destination\"; fi\n        rsync -a --include=\"/$tool\" --include='/*.bundle/***' --exclude='*' \"${binary%/*}/\" \"$APP_RESOURCES/tools/\"\n        continue\n    fi\n    if [ -f \"$destination\" ]; then rm -f \"$destination\"; fi\n    mkdir -p \"$destination\"\n    rsync -a --delete --exclude '.*' \"$package/\" \"$destination/\"\ndone\n\n# SpliceKit no longer ships BRAW plugin bundles (BRAW Toolbox covers .braw);\n# remove any copy left in the app from an earlier incremental build.\nrm -rf \"$APP_RESOURCES/BRAWPlugins\"\n\necho \"Resource bundling complete\"\n";
+			shellScript = "set -eu\n\nREPO_DIR=\"${PROJECT_DIR}/..\"\nAPP_RESOURCES=\"${BUILT_PRODUCTS_DIR}/${PRODUCT_NAME}.app/Contents/Resources\"\nPREBUILT=\"${BUILT_PRODUCTS_DIR}/SpliceKit_prebuilt\"\n\nmkdir -p \"$APP_RESOURCES/mcp\" \"$APP_RESOURCES/tools\" \"$APP_RESOURCES/Scripts/lua\"\ncp \"$PREBUILT/SpliceKit\" \"$APP_RESOURCES/SpliceKit\"\ncp \"$PROJECT_DIR/SpliceKit/Resources/entitlements.plist\" \"$APP_RESOURCES/entitlements.plist\"\nfor file in splicekit-mcp Catalog.json; do\n    cp \"$PREBUILT/mcp/$file\" \"$APP_RESOURCES/mcp/$file\"\ndone\nrm -f \"$APP_RESOURCES/mcp/requirements.txt\" \"$APP_RESOURCES/mcp/otio_adapter.py\" \"$APP_RESOURCES/mcp/server.py\"\nrm -rf \"$APP_RESOURCES/mcp/__pycache__\"\ncp \"$PREBUILT/Lua-LICENSE.txt\" \"$APP_RESOURCES/Lua-LICENSE.txt\"\n\n# Sentry was removed; drop any config left from an earlier incremental build.\nrm -f \"$APP_RESOURCES/SpliceKitSentryConfig.plist\"\n\n# Copy Lua scripts\nrsync -a --delete --exclude '.*' \"$REPO_DIR/Lua Scripts/\" \"$APP_RESOURCES/Scripts/lua/\"\n\n# Copy tools\nfor tool in silence-detector structure-analyzer beat-detector SpliceKitMixer; do\n    cp \"$PREBUILT/$tool\" \"$APP_RESOURCES/tools/$tool\"\ndone\nif [ -f \"$PREBUILT/insert_dylib\" ]; then\n    cp \"$PREBUILT/insert_dylib\" \"$APP_RESOURCES/tools/insert_dylib\"\n    chmod +x \"$APP_RESOURCES/tools/insert_dylib\"\n    echo \"Bundled insert_dylib\"\nelif [ -f \"$REPO_DIR/build/insert_dylib\" ]; then\n    cp \"$REPO_DIR/build/insert_dylib\" \"$APP_RESOURCES/tools/insert_dylib\"\n    chmod +x \"$APP_RESOURCES/tools/insert_dylib\"\n    echo \"Bundled insert_dylib\"\nfi\n\n# Developer builds can contain a transcriber package when its binary is unavailable.\nfor tool in parakeet-transcriber whisper-transcriber; do\n    package=\"$REPO_DIR/Tools/$tool\"\n    destination=\"$APP_RESOURCES/tools/$tool\"\n    binary=\"\"\n    if [[ \"${CONFIGURATION:-Debug}\" == Release ]]; then\n        products=$(swift build --package-path \"$package\" --product \"$tool\" --configuration release --arch arm64 --arch x86_64 --only-use-versions-from-resolved-file --show-bin-path)\n        binary=\"$products/$tool\"\n        for architecture in arm64 x86_64; do\n            lipo \"$binary\" -verify_arch \"$architecture\"\n        done\n    else\n        for configuration in release apple/Products/Release debug; do\n            candidate=\"$package/.build/$configuration/$tool\"\n            if [ -f \"$candidate\" ]; then\n                binary=\"$candidate\"\n                break\n            fi\n        done\n    fi\n    if [ -f \"$binary\" ]; then\n        if [ -d \"$destination\" ]; then rm -rf \"$destination\"; fi\n        rsync -a --include=\"/$tool\" --include='/*.bundle/***' --exclude='*' \"${binary%/*}/\" \"$APP_RESOURCES/tools/\"\n        continue\n    fi\n    if [ -f \"$destination\" ]; then rm -f \"$destination\"; fi\n    mkdir -p \"$destination\"\n    rsync -a --delete --exclude '.*' \"$package/\" \"$destination/\"\ndone\n\n# SpliceKit no longer ships BRAW plugin bundles (BRAW Toolbox covers .braw);\n# remove any copy left in the app from an earlier incremental build.\nrm -rf \"$APP_RESOURCES/BRAWPlugins\"\n\necho \"Resource bundling complete\"\n";
 		};
 /* End PBXShellScriptBuildPhase section */
 
@@ -278,7 +244,6 @@
 /* Begin XCBuildConfiguration section */
 		220000000000000000000001 /* Debug */ = {
 			isa = XCBuildConfiguration;
-			baseConfigurationReference = 22D74E232F8235FE00A9252B /* Configuration.xcconfig */;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
 				CLANG_ANALYZER_NONNULL = YES;
@@ -306,7 +271,6 @@
 				COPY_PHASE_STRIP = NO;
 				DEAD_CODE_STRIPPING = YES;
 				DEBUG_INFORMATION_FORMAT = dwarf;
-				DEVELOPMENT_TEAM = "$(HARDCODED_DEVELOPMENT_TEAM)";
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_TESTABILITY = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = NO;
@@ -336,7 +300,6 @@
 		};
 		220000000000000000000002 /* Release */ = {
 			isa = XCBuildConfiguration;
-			baseConfigurationReference = 22D74E232F8235FE00A9252B /* Configuration.xcconfig */;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
 				CLANG_ANALYZER_NONNULL = YES;
@@ -364,7 +327,6 @@
 				COPY_PHASE_STRIP = NO;
 				DEAD_CODE_STRIPPING = YES;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
-				DEVELOPMENT_TEAM = "$(HARDCODED_DEVELOPMENT_TEAM)";
 				ENABLE_NS_ASSERTIONS = NO;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = NO;
@@ -392,9 +354,9 @@
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = "$(SPLICEKIT_VERSION)";
+				CURRENT_PROJECT_VERSION = 1;
 				DEAD_CODE_STRIPPING = YES;
-				DEVELOPMENT_TEAM = "$(HARDCODED_DEVELOPMENT_TEAM)";
+				DEVELOPMENT_TEAM = A5HDJTY9X5;
 				ENABLE_HARDENED_RUNTIME = YES;
 				INFOPLIST_FILE = SpliceKit/Resources/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = SpliceKit;
@@ -404,12 +366,12 @@
 					"@executable_path/../Frameworks",
 				);
 				LM_SKIP_METADATA_EXTRACTION = YES;
-				MARKETING_VERSION = "$(SPLICEKIT_VERSION)";
+				MARKETING_VERSION = 4.0.0;
 				OTHER_LDFLAGS = (
 					"$(inherited)",
 					"-ObjC",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = com.splicekit.app;
+				PRODUCT_BUNDLE_IDENTIFIER = com.latenitefilms.SpliceKit;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 6.0;
@@ -424,9 +386,9 @@
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = "$(SPLICEKIT_VERSION)";
+				CURRENT_PROJECT_VERSION = 1;
 				DEAD_CODE_STRIPPING = YES;
-				DEVELOPMENT_TEAM = "$(HARDCODED_DEVELOPMENT_TEAM)";
+				DEVELOPMENT_TEAM = A5HDJTY9X5;
 				ENABLE_HARDENED_RUNTIME = YES;
 				INFOPLIST_FILE = SpliceKit/Resources/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = SpliceKit;
@@ -436,12 +398,12 @@
 					"@executable_path/../Frameworks",
 				);
 				LM_SKIP_METADATA_EXTRACTION = YES;
-				MARKETING_VERSION = "$(SPLICEKIT_VERSION)";
+				MARKETING_VERSION = 4.0.0;
 				OTHER_LDFLAGS = (
 					"$(inherited)",
 					"-ObjC",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = com.splicekit.app;
+				PRODUCT_BUNDLE_IDENTIFIER = com.latenitefilms.SpliceKit;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 6.0;
@@ -471,24 +433,6 @@
 		};
 /* End XCConfigurationList section */
 
-/* Begin XCRemoteSwiftPackageReference section */
-		2250E42C2F95FA0000DA3ED6 /* XCRemoteSwiftPackageReference "Sparkle" */ = {
-			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/sparkle-project/Sparkle";
-			requirement = {
-				kind = upToNextMajorVersion;
-				minimumVersion = 2.9.1;
-			};
-		};
-/* End XCRemoteSwiftPackageReference section */
-
-/* Begin XCSwiftPackageProductDependency section */
-		2250E42D2F95FA0000DA3ED6 /* Sparkle */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = 2250E42C2F95FA0000DA3ED6 /* XCRemoteSwiftPackageReference "Sparkle" */;
-			productName = Sparkle;
-		};
-/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = 089C1665FE841187C02AAC07 /* Project object */;
 }

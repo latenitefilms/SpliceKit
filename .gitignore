@@ -25,7 +25,7 @@ xcuserdata/
 # Xcode build artifacts
 DerivedData/
 
-# Pre-built patcher app (generate via Scripts/release.sh, distribute via GitHub Releases)
+# Pre-built patcher app
 Patcher/SpliceKitPatcher.app/
 # Left over from the removed Sentry integration
 Patcher/Frameworks/Sentry.framework/

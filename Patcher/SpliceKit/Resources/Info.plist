@@ -18,6 +18,8 @@
 	<string>$(MARKETING_VERSION)</string>
 	<key>CFBundleVersion</key>
 	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<key>LSApplicationCategoryType</key>
+	<string>$(INFOPLIST_KEY_LSApplicationCategoryType)</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>$(MACOSX_DEPLOYMENT_TARGET)</string>
 	<key>NSHighResolutionCapable</key>
@@ -26,11 +28,5 @@
 	<string>Copyright © Brian Elliott Tate 2026. All Rights Reserved.</string>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
-	<key>SUEnableAutomaticChecks</key>
-	<true/>
-	<key>SUFeedURL</key>
-	<string>https://latenitefilms.github.io/SpliceKit/appcast.xml</string>
-	<key>SUPublicEDKey</key>
-	<string>6Mnotk0Hz2FeDtGWEkUOtlSl+O9EctXXjH0xtRMaoas=</string>
 </dict>
 </plist>

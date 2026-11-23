@@ -19,9 +19,17 @@ DEBUG_FLAGS = -g
 LINKER_FLAGS = -undefined dynamic_lookup -dynamiclib
 CPP_LIBS = -lc++
 INSTALL_NAME = -install_name @rpath/SpliceKit.framework/Versions/A/SpliceKit
-VERSION_CONFIG = Patcher/SpliceKit/Configuration/Version.xcconfig
-SPLICEKIT_VERSION = $(shell awk -F= '/SPLICEKIT_VERSION/ { gsub(/[ ;]/, "", $$2); print $$2; exit }' $(VERSION_CONFIG))
-VERSION_DEFINE = -DSPLICEKIT_VERSION=\"$(SPLICEKIT_VERSION)\"
+CONFIGURATION ?= Release
+VERSION_FILE = $(BUILD_DIR)/SpliceKit.version
+VERSION_DEFINE = "-DSPLICEKIT_VERSION=\"$$(cat "$(VERSION_FILE)")\""
+# Xcode supplies its resolved value in the build phase. A standalone make asks the same target.
+ifdef MARKETING_VERSION
+READ_MARKETING_VERSION = printf '%s\n' "$$MARKETING_VERSION"
+else
+READ_MARKETING_VERSION = xcodebuild -project Patcher/SpliceKit.xcodeproj -target SpliceKit \
+	-configuration "$(CONFIGURATION)" -showBuildSettings -json \
+	| plutil -extract 0.buildSettings.MARKETING_VERSION raw -o - -
+endif
 DSYM = $(OUTPUT).dSYM
 
 OBJC_SOURCES = $(wildcard Sources/*.m)
@@ -38,6 +46,7 @@ LUA_SHA256 = 2335b6c582a52654f94612bf10d2f4672805d05329aa6568b1d8cd9e5c6fb8e6
 LUA_URL ?= https://www.lua.org/ftp/lua-$(LUA_VERSION).tar.gz
 LUA_DIR = $(BUILD_DIR)/lua-$(LUA_VERSION)/src
 LUA_LIB = $(LUA_DIR)/liblua.a
+LUA_LICENSE = $(BUILD_DIR)/Lua-LICENSE.txt
 
 # Modded app paths — auto-detect standard or Creator Studio edition
 MODDED_APP_STANDARD = $(HOME)/Applications/SpliceKit/Final Cut Pro.app
@@ -93,7 +102,17 @@ MKV_LDFLAGS = -bundle $(CPP_LIBS)
 
 .PHONY: all clean deploy launch tools url-import-tools audio-bus-probe install-audio-bus-probe uninstall-audio-bus-probe symbols vp9-prototype mkv-prototype mcp-setup mcp-doctor
 
-all: $(OUTPUT)
+all: $(OUTPUT) $(LUA_LICENSE)
+
+.PHONY: FORCE
+
+# Only change the timestamp when the effective version changes, including Xcode build overrides.
+$(VERSION_FILE): FORCE | $(BUILD_DIR)
+	@set -eu; version=$$($(READ_MARKETING_VERSION)); \
+		test -n "$$version" || { echo "Missing Xcode MARKETING_VERSION" >&2; exit 1; }; \
+		tmp=$$(mktemp "$@.XXXXXX"); trap 'rm -f "$$tmp"' EXIT; \
+		printf '%s\n' "$$version" > "$$tmp"; \
+		if ! cmp -s "$$tmp" "$@"; then mv "$$tmp" "$@"; fi
 
 symbols: $(DSYM)
 
@@ -125,7 +144,7 @@ uninstall-audio-bus-probe:
 	@echo "Uninstalled: $(AUDIO_BUS_PROBE_INSTALL_DIR)/SpliceKitAudioBusProbe.component"
 
 # ---------------------------------------------------------------------------
-# Native stdio MCP server and its optional interchange adapter
+# Native stdio MCP server
 # ---------------------------------------------------------------------------
 MCP_OUTPUT = $(BUILD_DIR)/mcp
 MCP_BINARY = $(MCP_OUTPUT)/splicekit-mcp
@@ -133,7 +152,8 @@ MCP_BUILD = swift build --package-path MCP --product splicekit-mcp --configurati
 MCP_CATALOG = MCP/Sources/SpliceKitMCP/Catalog.json
 
 .PHONY: mcp-server
-mcp-server: $(MCP_BINARY) $(MCP_OUTPUT)/Catalog.json $(MCP_OUTPUT)/otio_adapter.py $(MCP_OUTPUT)/server.py
+mcp-server: $(MCP_BINARY) $(MCP_OUTPUT)/Catalog.json
+	@rm -f "$(MCP_OUTPUT)/otio_adapter.py" "$(MCP_OUTPUT)/server.py"
 
 $(MCP_OUTPUT): | $(BUILD_DIR)
 	@mkdir -p "$@"
@@ -143,12 +163,6 @@ $(MCP_BINARY): MCP/Package.swift MCP/Package.resolved $(wildcard MCP/Sources/Spl
 	@cp "$$($(MCP_BUILD) --show-bin-path)/splicekit-mcp" "$@"
 
 $(MCP_OUTPUT)/Catalog.json: $(MCP_CATALOG) | $(MCP_OUTPUT)
-	@cp "$<" "$@"
-
-$(MCP_OUTPUT)/otio_adapter.py: MCP/otio_adapter.py | $(MCP_OUTPUT)
-	@cp "$<" "$@"
-
-$(MCP_OUTPUT)/server.py: MCP/Compatibility/server.py | $(MCP_OUTPUT)
 	@cp "$<" "$@"
 
 mcp-setup: mcp-server
@@ -229,14 +243,23 @@ $(LUA_LIB): $(LUA_DIR)/lua.h
 		libtool -static -o liblua.a "$$@"
 	@echo "Built: $(LUA_LIB)"
 
+# Lua publishes its license as a comment in the verified release header.
+$(LUA_LICENSE): $(LUA_DIR)/lua.h
+	@set -eu; tmp=$$(mktemp "$@.XXXXXX"); trap 'rm -f "$$tmp"' EXIT; \
+		awk '/^\* Copyright \(C\).*Lua\.org/ { notice = 1 } \
+		     notice && /^\*\*+\// { exit } \
+		     notice { sub(/^\* ?/, ""); print } \
+		     END { if (!notice) exit 1 }' "$<" > "$$tmp"; \
+		mv "$$tmp" "$@"
+
 $(BUILD_DIR)/obj/SpliceKitLua.o: $(LUA_DIR)/lua.h
 $(BUILD_DIR)/obj/SpliceKitServer.o $(BUILD_DIR)/obj/SpliceKitWindowCapture.o: Sources/SpliceKitWindowCapture.h
 
-$(BUILD_DIR)/obj/%.o: Sources/%.m Sources/SpliceKit.h $(VERSION_CONFIG) | $(BUILD_DIR)/obj
+$(BUILD_DIR)/obj/%.o: Sources/%.m Sources/SpliceKit.h $(VERSION_FILE) | $(BUILD_DIR)/obj
 	$(CC) $(ARCHS) $(MIN_VERSION) $(OBJC_FLAGS) $(DEBUG_FLAGS) $(VERSION_DEFINE) \
 		-I Sources -I $(LUA_DIR) -c $< -o $@
 
-$(BUILD_DIR)/obj/%.o: Sources/%.mm Sources/SpliceKit.h $(VERSION_CONFIG) | $(BUILD_DIR)/obj
+$(BUILD_DIR)/obj/%.o: Sources/%.mm Sources/SpliceKit.h $(VERSION_FILE) | $(BUILD_DIR)/obj
 	$(CC) $(ARCHS) $(MIN_VERSION) $(OBJCXX_FLAGS) $(DEBUG_FLAGS) $(VERSION_DEFINE) \
 		-I Sources -I $(LUA_DIR) -c $< -o $@
 
@@ -283,12 +306,12 @@ $(MKV_IMPORT_EXEC): $(MKV_IMPORT_SOURCES) $(MKV_IMPORT_INFO) | $(BUILD_DIR)
 mkv-prototype: $(MKV_IMPORT_EXEC)
 	@echo "Staged: $(MKV_BUILD_DIR)"
 
-deploy: $(OUTPUT) tools vp9-prototype mkv-prototype
+deploy: $(OUTPUT) $(LUA_LICENSE) tools vp9-prototype mkv-prototype
 	@echo "=== Deploying SpliceKit to modded FCP ==="
 		@rm -rf "$(FW_DIR)"
 		@mkdir -p "$(FW_DIR)/Versions/A/Resources"
 	cp $(OUTPUT) "$(FW_DIR)/Versions/A/SpliceKit"
-	@cp Documentation/Licenses/Lua.txt "$(FW_DIR)/Versions/A/Resources/Lua-LICENSE.txt"
+	@cp "$(LUA_LICENSE)" "$(FW_DIR)/Versions/A/Resources/"
 		@# Create framework symlinks. Use -n so repeated deploys replace the
 		@# symlink itself instead of following it into Versions/A.
 		@cd "$(FW_DIR)/Versions" && ln -sfn A Current
@@ -296,7 +319,8 @@ deploy: $(OUTPUT) tools vp9-prototype mkv-prototype
 		@cd "$(FW_DIR)" && ln -sfn Versions/Current/Resources Resources
 	@# Create Info.plist if missing
 	@test -f "$(FW_DIR)/Versions/A/Resources/Info.plist" || \
-		printf '<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "https://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict><key>CFBundleIdentifier</key><string>com.splicekit.SpliceKit</string><key>CFBundleName</key><string>SpliceKit</string><key>CFBundleVersion</key><string>1.0.0</string><key>CFBundlePackageType</key><string>FMWK</string><key>CFBundleExecutable</key><string>SpliceKit</string></dict></plist>' \
+		printf '<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "https://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict><key>CFBundleIdentifier</key><string>com.splicekit.SpliceKit</string><key>CFBundleName</key><string>SpliceKit</string><key>CFBundleShortVersionString</key><string>%s</string><key>CFBundleVersion</key><string>%s</string><key>CFBundlePackageType</key><string>FMWK</string><key>CFBundleExecutable</key><string>SpliceKit</string></dict></plist>' \
+		"$$(cat "$(VERSION_FILE)")" "$$(cat "$(VERSION_FILE)")" \
 		> "$(FW_DIR)/Versions/A/Resources/Info.plist"
 	@# Add privacy usage descriptions for transcript, LiveCam, and palette voice dictation.
 	@/usr/libexec/PlistBuddy -c "Set :NSSpeechRecognitionUsageDescription 'SpliceKit uses speech recognition for transcript editing and command palette voice dictation inside Final Cut Pro.'" "$(MODDED_APP)/Contents/Info.plist" 2>/dev/null || /usr/libexec/PlistBuddy -c "Add :NSSpeechRecognitionUsageDescription string 'SpliceKit uses speech recognition for transcript editing and command palette voice dictation inside Final Cut Pro.'" "$(MODDED_APP)/Contents/Info.plist" 2>/dev/null || true

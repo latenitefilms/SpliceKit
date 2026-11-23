@@ -73,7 +73,7 @@ SpliceKit isn't a feature list — it's a platform. Once the SpliceKit dylib is 
 
 #### And you can ask an AI to build one
 
-Describe what you want. Hand the spec to Claude. It writes the plugin against the SpliceKit framework — the project ships full API reference docs designed for AI consumption.
+Describe the editing workflow you want and give your coding assistant the project’s [contributor guide](AGENTS.md) and [Editor Toolkit examples](Plugins/EditorToolkit/README.md).
 
 ---
 
@@ -118,7 +118,7 @@ Paste a YouTube, Vimeo, or Twitter link and pull it into your library as a real 
 One command, every clip on your timeline exports as its own file — all effects, color grades, and transitions baked in.
 
 ### Native VP9 and MKV/WebM Support
-The source checkout includes a VP9 decoder and an MKV/WebM format reader. Running `make -f Scripts/Makefile deploy` installs both bundles into the patched copy of Final Cut Pro.
+The source checkout includes a VP9 decoder and an MKV/WebM format reader for development. Developers can install these prototypes into an existing patched copy with `make -f Scripts/Makefile deploy`.
 
 For Blackmagic RAW (`.braw`), use [BRAW Toolbox](https://brawtoolbox.io) — SpliceKit no longer includes its own BRAW support.
 
@@ -137,19 +137,19 @@ The SpliceKit patcher requires a paid LateNite app, such as BRAW Toolbox or Mark
 2. Open the DMG, drag **SpliceKit** to **Applications**, and open the app
 3. Select your Final Cut Pro installation and click **Continue**
 
-<img src="Documentation/patcher-screenshot.jpg" width="500" alt="SpliceKit Patcher">
-
 The patcher copies Final Cut Pro to `~/Applications/SpliceKit/` and installs SpliceKit in that copy. The MCP server ships inside the patcher app.
 
 Once done, click **Launch FCP** in the patcher, or open the new copy from `~/Applications/SpliceKit/`. Press **Cmd+Shift+P** to open the Command Palette and you're off.
 
-To patch from a source checkout, run `./Patcher/patch_fcp.sh`.
+From a source checkout, open `Patcher/SpliceKit.xcodeproj` and run the **SpliceKit** scheme. The same Swift app handles installation, updates, rebuilds, and removal.
+
+**Updating SpliceKit.** Choose **SpliceKit → View Releases on GitHub** to find new versions. Download the new DMG, quit the patcher and replace `SpliceKit.app` in Applications. Open the new patcher and choose **Update SpliceKit** if it offers to update your Final Cut Pro copy. [GitHub Releases](https://github.com/latenitefilms/SpliceKit/releases)
 
 ---
 
 ## Connect It to Claude (or any MCP client)
 
-Point your MCP client at the Swift executable inside the installed patcher. It communicates over standard input and output. Tool discovery works with Final Cut Pro closed. Open the patched copy of Final Cut Pro to use editing tools.
+In the patcher, choose **Set Up MCP for a Project…** to create a `.mcp.json` pointing to the bundled Swift server. You can also configure your client directly. The server communicates over standard input and output. Tool discovery works with Final Cut Pro closed. Open the patched copy of Final Cut Pro to use editing tools.
 
 ```json
 {
@@ -163,7 +163,9 @@ Point your MCP client at the Swift executable inside the installed patcher. It c
 
 **Building in Xcode.** Build the `SpliceKit` scheme in `Patcher/SpliceKit.xcodeproj`. The build also writes `build/mcp/splicekit-mcp` in the checkout. The included `.mcp.json` uses that executable. For clients started elsewhere, set `command` to its absolute path. From Terminal, `make -f Scripts/Makefile mcp-setup` builds the same server and `make -f Scripts/Makefile mcp-doctor` checks the executable, client configuration, and bridge.
 
-**Optional OpenTimelineIO adapters.** Direct FCPXML import and export use Final Cut Pro. For interchange formats such as EDL or AAF, install OpenTimelineIO and the adapters for those formats in a Python environment. Set `SPLICEKIT_OTIO_PYTHON` in the MCP client’s `env` to that environment’s Python executable. The server also looks in `~/.venvs/splicekit-otio` and the earlier `~/.venvs/splicekit-mcp` environment. The Swift server itself runs without Python. The optional Gemma engine inside Final Cut Pro uses Python and `mlx-lm`.
+**Optional OpenTimelineIO adapters.** FCPXML import and export and single-timeline OTIO JSON import run natively. Other interchange operations, including OTIO export, EDL, and AAF, use an external adapter. The checkout includes `MCP/otio-adapter`. Install OpenTimelineIO and the format adapters in `~/.venvs/splicekit-otio`, or set `SPLICEKIT_OTIO_PYTHON` to the interpreter for an existing environment. To use it from the installed app and Final Cut Pro’s menus, link the checkout executable at `~/.local/bin/splicekit-otio-adapter`. An MCP client can also set `SPLICEKIT_OTIO_ADAPTER` to the executable’s absolute path. Older MCP client configurations that point to `server.py` inside the app should use `splicekit-mcp` as shown above.
+
+**Optional Gemma engine.** Start a compatible local Gemma model server at `http://localhost:8080` before selecting Gemma in the command palette. SpliceKit connects over HTTP.
 
 **Developer tools.** The checkout retains the 220-tool Python MCP entry point, including 31 additional developer commands. To use it, install `MCP/requirements.txt` in a virtual environment, launch that interpreter as the MCP command, and pass the absolute path to `MCP/server.py` as its argument. The Swift editing tools accept the same arguments. Some return their results as JSON instead of formatted text.
 
@@ -173,9 +175,9 @@ Point your MCP client at the Swift executable inside the installed patcher. It c
 
 The patched copy and the App Store copy of Final Cut Pro can open the same libraries. Timeline commands and plugins perform real edits in the library you have open. SpliceKit uses private Final Cut Pro APIs, so a Final Cut Pro update can require a compatible SpliceKit build.
 
-SpliceKit writes its logs to `~/Library/Logs/SpliceKit/`. macOS keeps Final Cut Pro crash reports in `~/Library/Logs/DiagnosticReports/`. The patcher’s **Share Logs** button uploads the latest reports to filebin.net when you choose to share them. Sparkle checks GitHub for SpliceKit updates.
+SpliceKit writes its logs to `~/Library/Logs/SpliceKit/`. macOS keeps Final Cut Pro crash reports in `~/Library/Logs/DiagnosticReports/`. The patcher’s **Share Logs** button uploads the latest reports to filebin.net when you choose to share them.
 
-The full plain-English version is in [Documentation/WHAT_IS_SPLICEKIT.md](Documentation/WHAT_IS_SPLICEKIT.md).
+For a walkthrough with screenshots, see the [SpliceKit installation guide](https://splicekit.fcp.cafe/installation/).
 
 ---
 
@@ -218,10 +220,9 @@ SpliceKit injects a dynamic library into a re-signed copy of Final Cut Pro. Once
 ### Ways to build
 
 - **Native plugins** — see [EditorToolkit](Plugins/EditorToolkit/README.md) for Objective-C plugins and their build settings.
-- **Lua, inside FCP** — Ctrl+Opt+L opens a REPL with the `sk` module. Browse the [bundled scripts](Lua%20Scripts) and [Lua SDK reference](Documentation/LUA_SDK_REFERENCE.md).
+- **Lua, inside FCP** — Ctrl+Opt+L opens a REPL with the `sk` module. Browse the [bundled Lua examples](Lua%20Scripts/examples).
 - **Direct JSON-RPC** — any language with a TCP socket can use the bridge. To read its version, run `echo '{"jsonrpc":"2.0","method":"system.version","id":1}' | nc 127.0.0.1 9876`.
 - **MCP tools** — expose your plugin's capabilities as MCP tools and any AI client can drive them.
-- **Ask an AI to build it** — the API reference in `Documentation/` is written to be AI-consumable. Describe what you want, hand the spec to Claude, and it can write the plugin for you.
 - **Open a PR to SpliceKit itself** — if the thing you built is useful to other editors, send it upstream. The bundled "features" (Text-Based Editor, Silence Remover, LiveCam, Song Cut, etc.) all started as plugins. Fork the repo, drop your plugin in `Plugins/` or `Sources/`, and open a [pull request](https://github.com/latenitefilms/SpliceKit/pulls) — community plugins are how SpliceKit grows.
 
 ### Key FCP internals worth knowing
@@ -254,23 +255,11 @@ open Patcher/SpliceKit.xcodeproj
 
 The first build resolves the Swift packages and downloads Lua 5.4.9. It verifies the Lua archive’s SHA-256 and links Lua into the universal SpliceKit dylib. Subsequent builds reuse the copy under `build/`. To build offline, cache the resolved Swift packages and supply a local Lua archive with the Xcode build setting `LUA_URL=file:///absolute/path/to/lua-5.4.9.tar.gz`.
 
-Build the **SpliceKit** scheme in Xcode. Its Release configuration builds the MCP server and the transcription helpers for Apple silicon and Intel. The project invokes `Scripts/Makefile` for the bridge and companion executables. Use `make -f Scripts/Makefile deploy` to update an existing patched copy of Final Cut Pro. Run the native server tests with `swift test --package-path MCP` and the development suite with `python3 -m unittest discover -s Tests`. The programs in `Tests/live/` exercise a running Final Cut Pro.
+Build the **SpliceKit** scheme in Xcode. Both Debug and Release build without Python. Release builds the MCP server and the transcription helpers for Apple silicon and Intel. Xcode invokes `Scripts/Makefile` for the bridge and companion executables. Run the native server tests with `swift test --package-path MCP` and the optional development suite with `python3 -m unittest discover -s Tests`. The programs in `Tests/live/` exercise a running Final Cut Pro.
 
-For a public release, `./Scripts/release.sh <version> "<release notes>"` signs and notarizes the DMG and publishes it to GitHub Releases. It updates `Website/appcast.xml` and `Documentation/releasenotes.html`. The Pages workflow serves both files at the site root.
+Set **Version** and **Build** under the SpliceKit target’s **General → Identity** settings in Xcode. The app and native bridge use Version. Increase Build for each release.
 
-### Documentation map
-
-- [`Documentation/WHAT_IS_SPLICEKIT.md`](Documentation/WHAT_IS_SPLICEKIT.md) — the plain-English tour
-- [`Documentation/FCP_API_REFERENCE.md`](Documentation/FCP_API_REFERENCE.md) — full API reference for FCP internals
-- [`Documentation/COMMAND_PALETTE_GUIDE.md`](Documentation/COMMAND_PALETTE_GUIDE.md) — Command Palette & Apple Intelligence
-- [`Documentation/LUA_SDK_REFERENCE.md`](Documentation/LUA_SDK_REFERENCE.md) · [`Documentation/LUA_SCRIPTING_GUIDE.md`](Documentation/LUA_SCRIPTING_GUIDE.md) — Lua plugin scripting
-- [`Documentation/TRANSCRIPT_EDITING_GUIDE.md`](Documentation/TRANSCRIPT_EDITING_GUIDE.md) — the Text-Based Editor plugin
-- [`Documentation/FXPLUG_PLUGIN_GUIDE.md`](Documentation/FXPLUG_PLUGIN_GUIDE.md) — FxPlug 4 plugin dev
-- [`Documentation/WORKFLOW_EXTENSIONS_GUIDE.md`](Documentation/WORKFLOW_EXTENSIONS_GUIDE.md) — Workflow Extensions
-- [`Documentation/DEBUG_TOOLS_GUIDE.md`](Documentation/DEBUG_TOOLS_GUIDE.md) — in-process debugging, tracing, hot-loading
-- [`Documentation/RUNTIME_INTROSPECTION_GUIDE.md`](Documentation/RUNTIME_INTROSPECTION_GUIDE.md) — ObjC runtime exploration
-- [`Documentation/FCPXML_FORMAT_REFERENCE.md`](Documentation/FCPXML_FORMAT_REFERENCE.md) — FCPXML format
-- [`Documentation/SCENE_BEAT_DETECTION_GUIDE.md`](Documentation/SCENE_BEAT_DETECTION_GUIDE.md) · [`Documentation/FLEXMUSIC_AND_MONTAGE_GUIDE.md`](Documentation/FLEXMUSIC_AND_MONTAGE_GUIDE.md) — detection & montage plugins
+For a public release, choose **Product → Archive** in Xcode and export the app through Organizer. Publish the signed, notarized DMG on GitHub Releases with the version’s notes from the [changelog](CHANGELOG.md).
 
 ---
 

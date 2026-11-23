@@ -3238,7 +3238,7 @@ def ai_command_gemma(query: str, model: str = "unsloth/gemma-4-E4B-it-UD-MLX-4bi
     """Use Gemma 4 (via MLX on Apple Silicon) for agentic natural language editing.
     Unlike ai_command which uses a fixed action schema, this runs a multi-turn
     tool-calling loop and can access all bridge methods.
-    Requires mlx-lm server: python -m mlx_lm.server --model unsloth/gemma-4-E4B-it-UD-MLX-4bit
+    Requires a running local Gemma model server with a compatible chat API at http://localhost:8080.
 
     Args:
         query: Natural language editing instruction
@@ -6020,7 +6020,6 @@ def debug_observe_notification(action: str = "list", name: str = "",
     - FFAssetMediaChangedNotification: media asset changes
     - FFBeatGridSettingsChangedNotification: beat grid toggled
     - FFQTMovieExporterFinishedNotification: export completes
-    See Documentation/research/fcp_symbols/notifications.txt for all 337 notification names.
     """
     params = {"action": action}
     if name:

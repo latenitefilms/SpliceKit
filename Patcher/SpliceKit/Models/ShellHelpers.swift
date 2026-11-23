@@ -1,5 +1,6 @@
 import Foundation
 import CoreFoundation
+import Security
 
 /// Run a shell command synchronously, returning output and exit status.
 func shellResult(_ command: String) -> (output: String, status: Int32) {
@@ -26,16 +27,49 @@ func shellQuote(_ value: String) -> String {
     "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
 }
 
-/// Read Photos access from signed entitlement XML, requiring a Boolean true value.
-func photosLibraryEntitlementEnabled(in xml: String) -> Bool {
-    guard let data = xml.data(using: .utf8),
-          let plist = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil),
-          let entitlements = plist as? [String: Any],
-          let value = entitlements["com.apple.security.personal-information.photos-library"] as? NSNumber,
-          CFGetTypeID(value) == CFBooleanGetTypeID() else {
-        return false
+struct PatcherEntitlements {
+    let values: [String: Any]
+    static let requiredKeys = [
+        "com.apple.security.cs.disable-library-validation",
+        "com.apple.security.personal-information.photos-library"
+    ]
+
+    static func read(from url: URL) -> Self? {
+        var code: SecStaticCode?
+        var information: CFDictionary?
+        guard SecStaticCodeCreateWithPath(url as CFURL, [], &code) == errSecSuccess, let code,
+              SecCodeCopySigningInformation(code, SecCSFlags(rawValue: kSecCSSigningInformation), &information) == errSecSuccess,
+              let fields = information as? [String: Any],
+              let values = fields[kSecCodeInfoEntitlementsDict as String] as? [String: Any] else { return nil }
+        return Self(values: values)
     }
-    return value.boolValue
+
+    func isEnabled(_ key: String) -> Bool {
+        guard let value = values[key] as? NSNumber, CFGetTypeID(value) == CFBooleanGetTypeID() else { return false }
+        return value.boolValue
+    }
+
+    var missingRequiredKey: String? {
+        Self.requiredKeys.first { !isEnabled($0) }
+    }
+
+    var diagnosticLines: [String] {
+        let keys = ["com.apple.security.app-sandbox", "com.apple.security.cs.allow-dyld-environment-variables",
+                    "com.apple.security.get-task-allow"] + Self.requiredKeys
+        return keys.map { key in
+            let present = Self.requiredKeys.contains(key) ? isEnabled(key) : values[key] != nil
+            let label = key.components(separatedBy: ".").last ?? key
+            return "Entitlement \(label): \(present ? "present" : "MISSING")"
+        }
+    }
+}
+
+/// Create a project-local MCP configuration without replacing another client's settings.
+func writeMCPConfiguration(in directory: URL, server: URL) throws {
+    let configuration = ["mcpServers": ["splicekit": ["command": server.path]]]
+    var data = try JSONSerialization.data(withJSONObject: configuration, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
+    data.append(0x0A)
+    try data.write(to: directory.appendingPathComponent(".mcp.json"), options: .withoutOverwriting)
 }
 
 private func normalizeExecutablePath(_ path: String) -> String {

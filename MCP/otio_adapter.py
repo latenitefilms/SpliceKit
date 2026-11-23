@@ -236,7 +236,7 @@ def convert(request):
     import opentimelineio as otio
 
     path = request.get("path", "")
-    rate = request.get("rate", 0)
+    rate = request.get("rate") or 0
     extension = Path(path).suffix.lower()
     if request["operation"] == "export":
         timeline = _otio_first_timeline(_otio_read_fcpx_string(Path(request["source"]).read_text(encoding="utf-8")))
@@ -257,7 +257,7 @@ def convert(request):
         try:
             _otio_prepare_for_fcp(timeline)
             xml = _otio_fcpxml_clean_for_paste(_otio_write_fcpx_string(timeline))
-            documents.append({"xml": xml, "summary": _otio_timeline_summary(timeline)})
+            documents.append({"xml": xml, "summary": {**_otio_timeline_summary(timeline), "converter": "python_adapter"}})
         except Exception as exc:
             documents.append({"error": str(exc), "summary": {"name": getattr(timeline, "name", "unknown")}})
     if not documents:
@@ -267,7 +267,16 @@ def convert(request):
 
 if __name__ == "__main__":
     try:
-        json.dump(convert(json.load(sys.stdin)), sys.stdout)
+        if len(sys.argv) == 1:
+            json.dump(convert(json.load(sys.stdin)), sys.stdout)
+        elif len(sys.argv) == 4 and sys.argv[1] == "export":
+            convert({"operation": "export", "source": sys.argv[2], "path": sys.argv[3]})
+        elif len(sys.argv) == 4 and sys.argv[1] == "import":
+            import opentimelineio as otio
+            timeline = _otio_first_timeline(otio.adapters.read_from_file(sys.argv[2]))
+            Path(sys.argv[3]).write_text(_otio_write_fcpx_string(timeline), encoding="utf-8")
+        else:
+            raise ValueError("Expected JSON on stdin or import/export <source> <destination>")
     except Exception as exc:
         print(str(exc), file=sys.stderr)
         sys.exit(1)

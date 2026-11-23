@@ -47,6 +47,13 @@ struct StatusPanel: View {
                     Image(systemName: "network")
                 }
                 .font(.subheadline)
+
+                Button("Set Up MCP for a Project…", action: model.setUpMCPProject)
+                if let message = model.mcpSetupMessage {
+                    Text(message)
+                        .font(.caption)
+                        .textSelection(.enabled)
+                }
             }
 
             // Error display
@@ -187,7 +194,7 @@ struct StatusPanel: View {
     private var headerSubtitle: String {
         switch model.status {
         case .updateAvailable:
-            return "A newer version of SpliceKit is ready to install."
+            return "Install this patcher’s version of SpliceKit in your Final Cut Pro copy."
         case .fcpUpdateAvailable:
             return "Final Cut Pro has been updated. Rebuild the modded copy to use the latest version."
         default:

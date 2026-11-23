@@ -98,6 +98,7 @@ class PatcherModel: ObservableObject {
     @Published var currentPanel: WizardPanel = .welcome
     @Published var isSharingCrashLog = false
     @Published var crashShareMessage: String?
+    @Published var mcpSetupMessage: String?
     @Published private(set) var isLaunchInProgress = false
     @Published private(set) var isModdedFCPRunning = false
 
@@ -149,6 +150,30 @@ class PatcherModel: ObservableObject {
         sourceApp = path
         fcpVersion = ""
         checkStatus()
+    }
+
+    func setUpMCPProject() {
+        let panel = NSOpenPanel()
+        panel.title = "Set Up MCP for a Project"
+        panel.message = "Choose the project folder for the .mcp.json configuration."
+        panel.prompt = "Choose Folder"
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        guard panel.runModal() == .OK, let folder = panel.url else { return }
+        let server = URL(fileURLWithPath: repoDir).appendingPathComponent("mcp/splicekit-mcp")
+        guard FileManager.default.isExecutableFile(atPath: server.path) else {
+            mcpSetupMessage = "The bundled MCP server is missing."
+            return
+        }
+        do {
+            try writeMCPConfiguration(in: folder, server: server)
+            mcpSetupMessage = "Created .mcp.json in \(folder.path)."
+        } catch let error as CocoaError where error.code == .fileWriteFileExists {
+            mcpSetupMessage = "This folder already has a .mcp.json. To add SpliceKit, use \(server.path) as its command."
+        } catch {
+            mcpSetupMessage = error.localizedDescription
+        }
     }
 
     /// Open a file browser so the user can locate Final Cut Pro manually.
@@ -873,6 +898,11 @@ class PatcherModel: ObservableObject {
         // Step 2: Copy FCP bundle, preserve MAS receipt, strip quarantine xattrs
         await setStepAsync(.copyApp)
         if !FileManager.default.fileExists(atPath: moddedApp) {
+            let home = FileManager.default.homeDirectoryForCurrentUser
+            if let bytes = try? home.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]).volumeAvailableCapacityForImportantUsage,
+               bytes < 8 * 1024 * 1024 * 1024 {
+                await logAsync("Less than 8 GB is available for the Final Cut Pro copy.")
+            }
             await logAsync("Copying FCP (~6GB, please wait)...")
             let r = shell("mkdir -p '\(destDir)' && cp -R '\(sourceApp)' '\(moddedApp)' 2>&1")
             if !FileManager.default.fileExists(atPath: moddedApp) {
@@ -1033,6 +1063,7 @@ class PatcherModel: ObservableObject {
         } else {
             await logAsync("Signature note: \(verify)")
         }
+        try await verifySignedEntitlements(of: moddedApp)
         await completeStepAsync(.signApp)
 
         // Step 7: Skip FCP's first-launch cloud content download dialog
@@ -1080,16 +1111,6 @@ class PatcherModel: ObservableObject {
         let fwVerify = shell("codesign -dvv '\(moddedApp)/Contents/Frameworks/SpliceKit.framework' 2>&1")
         for line in fwVerify.components(separatedBy: "\n") where line.contains("Authority=") || line.contains("TeamIdentifier=") || line.contains("Signature=") {
             await logAsync("Framework signing: \(line.trimmingCharacters(in: .whitespaces))")
-        }
-
-        // Verify app entitlements
-        let entOut = shell("codesign -d --entitlements - --xml \(shellQuote(moddedApp)) 2>/dev/null")
-        let entKeys = ["app-sandbox", "disable-library-validation", "allow-dyld-environment-variables", "get-task-allow", "photos-library"]
-        for key in entKeys {
-            let found = key == "photos-library"
-                ? photosLibraryEntitlementEnabled(in: entOut)
-                : entOut.contains(key)
-            await logAsync("Entitlement \(key): \(found ? "present" : "MISSING")")
         }
 
         await logAsync("Log saved to: ~/Library/Logs/SpliceKit/patcher.log")
@@ -1228,6 +1249,7 @@ class PatcherModel: ObservableObject {
         } else {
             await logAsync("Signature note: \(verify)")
         }
+        try await verifySignedEntitlements(of: moddedApp)
         await completeStepAsync(.signApp)
 
         await setStepAsync(.configureDefaults)
@@ -1261,15 +1283,6 @@ class PatcherModel: ObservableObject {
             await logAsync("WARNING: Framework binary NOT found")
         }
 
-        let entOut = shell("codesign -d --entitlements - --xml \(shellQuote(moddedApp)) 2>/dev/null")
-        let entKeys = ["app-sandbox", "disable-library-validation", "allow-dyld-environment-variables", "get-task-allow", "photos-library"]
-        for key in entKeys {
-            let found = key == "photos-library"
-                ? photosLibraryEntitlementEnabled(in: entOut)
-                : entOut.contains(key)
-            await logAsync("Entitlement \(key): \(found ? "present" : "MISSING")")
-        }
-
         await logAsync("Log saved to: ~/Library/Logs/SpliceKit/patcher.log")
         await logAsync("--- End Diagnostics ---")
 
@@ -1278,6 +1291,16 @@ class PatcherModel: ObservableObject {
     }
 
     // MARK: - Helpers
+
+    private nonisolated func verifySignedEntitlements(of appPath: String) async throws {
+        guard let entitlements = PatcherEntitlements.read(from: URL(fileURLWithPath: appPath)) else {
+            throw PatchError.msg("Unable to read the signed application entitlements.")
+        }
+        for line in entitlements.diagnosticLines { await logAsync(line) }
+        if let key = entitlements.missingRequiredKey {
+            throw PatchError.msg("Required entitlement missing or disabled: \(key)")
+        }
+    }
 
     // Shell helpers, bundle reading, and signing identity are in ShellHelpers.swift
 

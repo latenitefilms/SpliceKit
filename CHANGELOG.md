@@ -1,89 +1,50 @@
 # Changelog
 
 Download signed, notarized SpliceKit DMGs from [GitHub Releases](https://github.com/latenitefilms/SpliceKit/releases).
-Sparkle checks for new versions using the [public appcast](https://latenitefilms.github.io/SpliceKit/appcast.xml).
 
-## [Unreleased]
+## [4.0.0] — Unreleased
 
-### Added
-- **Final Cut Pro 13.0 and Final Cut Pro 13.0 Creator Studio are supported.**
-  SpliceKit loads, starts its control server and installs its CloudContent
-  guards on FCP 13.0 (build 460023). Clip pasteboard writes fall back to FCP
-  13's `writeAnchoredObjects:userInfo:options:`, and FCP 13's new MotionVFX
-  content catalog is left untouched.
-- **Final Cut Pro Creator Studio 13 no longer crashes at launch.** Its new
-  MotionVFX remote-content service reached CloudKit (unavailable to a re-signed
-  app) and then requested a nil URL; SpliceKit now returns an empty remote
-  context and skips URL-less MotionVFX requests. Bundled MotionVFX content is
-  unaffected; online MotionVFX downloads are unavailable in the patched app.
+This is the first LateNite Films edition of SpliceKit. The changes below are relative to [Elliott Tate’s v3.3.9 release](https://github.com/elliotttate/SpliceKit/releases/tag/v3.3.9).
 
-### Changed
-- **Patcher updates now come from this repository.** GitHub Pages publishes
-  `Website/appcast.xml` alongside the release notes.
-- **FCP 13 no longer asks before ripple-trimming for a transition**, so
-  SpliceKit's "Use Freeze Frames" dialog button can no longer appear there. FCP
-  13 inserts the transition and then shows "Clips were trimmed to create the
-  transition." `apply_transition()` now keeps the transition, answers that alert
-  for you, and reports `rippleTrimmed` (previously the API call silently removed
-  the transition on FCP 13).
-- **Photos imports work in the patched app again.** The Photos-library
-  entitlement is now preserved when FCP is re-signed (upstream #98).
-- **The media-extension crash guard is now purely a crash guard.** It still
-  stops an incomplete third-party Media Extension from aborting FCP, but no
-  longer overrides which decoder FCP picks.
+### Upgrading from v3.3.9
 
-### Removed
-- **Sentry crash reporting has been removed.** Neither the patcher nor the
-  injected runtime sends crash reports or logs automatically; crashes are
-  written to `~/Library/Logs/SpliceKit/splicekit.log`, and the patcher's
-  **Share Logs** button uploads logs only when you click it. This also drops the Sentry SDK
-  from the patcher and halves the size of the SpliceKit framework.
-- **Built-in Blackmagic RAW support has been removed. Use
-  [BRAW Toolbox](https://brawtoolbox.io) for `.braw` media.** This removes the
-  BRAW decoder, format reader, RAW processor, RAW settings HUD and inspector
-  tile, the `braw.*` RPCs and `braw_probe` MCP tool, and the BRAW-only
-  Immersive Preview (FCP 360 Viewer) with its `immersivePreview.*` RPCs. The
-  Vision Pro preview panel remains. Patching or updating removes SpliceKit
-  BRAW bundles left in the patched app by older versions.
+- **Install and update the LateNite edition manually.** Download the fork’s DMG and replace `SpliceKit.app` in Applications. Automatic update checks have been removed. Choose **SpliceKit → View Releases on GitHub** to find future versions. Open the new patcher and choose **Update SpliceKit** if offered for your Final Cut Pro copy. [LateNite releases](https://github.com/latenitefilms/SpliceKit/releases)
+- **The patcher requires one eligible paid LateNite app installed from the Mac App Store.** BRAW Toolbox and Marker Toolbox are two of the 15 qualifying apps. The unlock screen lists them all, checks locally, and checks again when you return from the store.
+- **The Swift patcher handles installation, updates, rebuilds and removal.** It checks the installed copy’s signed entitlements and reports low disk space before the initial copy. The standalone `patch_fcp.sh` installer and its command-line flags have been retired.
+- **Blackmagic RAW support has moved out of SpliceKit.** For `.braw` media, use BRAW Toolbox. Updating removes SpliceKit’s old BRAW decoder, format reader and RAW processor. The built-in RAW inspector and HUD, BRAW-only Immersive Preview, and their automation commands have been retired. The separate Vision Pro preview panel is available. [BRAW Toolbox](https://brawtoolbox.io)
+- **Crash reporting is local by default.** The patcher and Final Cut Pro component no longer send reports to Sentry. SpliceKit writes logs to `~/Library/Logs/SpliceKit/`. Choose **Share Logs** to upload the latest reports to filebin.net for support.
 
-### Fixed
-- **The FCP Native transcription engine works again.** It called
-  `modalTranscriptsForClips:locale:`, which Final Cut Pro replaced with
-  `modalTranscriptsForClips:locale:progressTitle:` (12.3 and 13 only have the
-  new form), so every FCP Native transcription failed.
-- **"Delete silences" no longer removes clips that couldn't be transcribed.**
-  When one clip in a Parakeet batch fails (a still, graphic or clip with no
-  decodable audio), the rest of the batch still transcribes, but that clip's
-  range used to read as one long pause. Untranscribed clips (Parakeet, Apple
-  Speech and FCP Native) are now excluded from silence detection, stay excluded
-  after later edits move them, and the panel reports how many there were. A gap
-  split by such a clip now shows every remaining pause marker. With FCP Native,
-  a second clip cut from the same file gets its words when its range was
-  transcribed, and any part of it FCP wasn't asked to transcribe is protected.
-- **Release builds include `parakeet-transcriber` and `whisper-transcriber`.**
-  The build looked for their sources in a folder that is no longer in the
-  repository, so releases skipped them; it now uses `Tools/`. `make -f Scripts/Makefile tools` also
-  builds `beat-detector` for the MCP `detect_beats()` tool.
-- **`browser.appendClip`, `browser.insertClip` and `browser.connectClip` find
-  clips by name or index again.** They enumerated events with `ownedClips`,
-  which FCP's event records don't implement, so only handles worked.
-- **RPC calls that open a modal panel (such as `project.createLibrary`) return a
-  clear "did not finish in time" error** instead of an internal nil-insert error.
-- **`+[CloudContentFeatureFlag isEnabled]` no longer writes a log line every
-  second**; each blocked call is logged once.
-- **The inspector no longer goes blank after switching away from FCP and back**
-  (upstream #94).
-- **Skimming with snapping on no longer crashes FCP on Intel Macs** (upstream
-  #92).
-- **Transcription is more reliable:** the patcher deploys
-  `whisper-transcriber`, one undecodable clip no longer aborts a Parakeet batch,
-  and `parakeet-transcriber` builds against current FluidAudio (upstream #85).
-- **`Patcher/patch_fcp.sh` produces a launchable app again.** It builds through
-  the Makefile, detects existing injection correctly, picks one signing
-  identity, signs after editing `Info.plist`, no longer writes `.mcp.json` into
-  the signed framework, names the destination correctly for
-  `--source "…Creator Studio.app"`, and writes Creator Studio's CloudContent
-  defaults to `com.apple.FinalCutApp` (upstream #87 plus follow-up fixes).
+### Editing in Final Cut Pro
+
+- **Final Cut Pro 13.0 and Final Cut Pro Creator Studio 13.0 are supported.** Clip copy and paste use the updated Final Cut Pro pasteboard API. Creator Studio can launch with its bundled MotionVFX content. Online MotionVFX downloads are unavailable in the patched copy.
+- **Transitions respect Final Cut Pro 13’s ripple trim.** When a transition needs more media, version 13 trims the clips first. SpliceKit’s default transition command keeps the transition and the bridge reports `rippleTrimmed`. On Final Cut Pro 12.x, **Use Freeze Frames** is available in the insufficient-media dialog.
+- **Delete Silences protects untranscribed footage.** Stills, graphics, failed audio and untranscribed portions of a source clip stay on the timeline. The transcript panel reports skipped clips, shows pauses on either side, and keeps the protected ranges aligned after transcript edits.
+- **Transcription recovers from partial failures.** Parakeet finishes a batch even if one clip has no decodable audio. FCP Native transcription works on Final Cut Pro 12.3 and 13, including clips cut from different ranges of the same source. Release builds include Parakeet and Whisper and install their resource bundles with the helpers.
+- **Photos imports, the inspector and Intel skimming have been repaired.** The patched app preserves Photos-library access. Switching back to Final Cut Pro keeps the inspector populated. Skimming with snapping enabled no longer triggers the haptics crash on Intel Macs.
+- **Window capture and media handling use current macOS APIs.** Viewer, timeline and inspector screenshots use ScreenCaptureKit. FCPXML paste can cover its temporary project switch with an editor snapshot. URL Import reads file URLs from the pasteboard, and the audio analysis helpers load media tracks and duration asynchronously.
+- **Final Cut Pro selects the media decoder.** SpliceKit guards against incomplete third-party Media Extensions and leaves decoder selection to Final Cut Pro. VP9 and MKV/WebM prototypes are available separately in the developer checkout.
+
+### Optional Editor Toolkit
+
+Shubham Pratap’s 14 native plug-ins can be built separately from source on Apple silicon, individually or in presets. [Editor Toolkit installation, credits and compatibility](Plugins/EditorToolkit/README.md)
+
+- **RAW Tab 2.0**, **RAW Multi** and **RAW Gyro Presets** bring Media Extension RAW, ProRes RAW and RED controls into the inspector, support multi-clip adjustments, and expose gyro presets for compatible media. **Shortcuts** adds Command Editor actions for RAW properties, stabilization, zoom and inspector tabs.
+- **Grade Lock**, **Grade Lock Skim** and **Paste Below Lock** protect named adjustment layers and let editors inspect, skim and paste beneath them. **Topmost Clip Editing** optionally applies Blade and Copy to the visible clip under the playhead. It starts disabled.
+- **Batch Sync Audio** waveform-matches clips to external recordings and distinguishes recordings that share a filename. **XML Clips** adds sources from the imported project to the browser, including distinct assets with the same name. **Flip** adds horizontal and vertical controls. **Inspector Refresh** makes Scale and Position work on newly dropped video clips.
+- **Playback Frame Rate** shows delivered frames per second and dropped frames in the viewer, accounting for playback speed changes. **Workspace Collapse** gives the timeline the full height of a vertical workspace.
+
+### MCP and timeline exchange
+
+- **The app ships a Swift MCP server** with 189 built-in editing tools, 10 resources and seven prompts. The catalog is available with Final Cut Pro closed. The server discovers tools from installed plug-ins and avoids replaying an edit after a lost reply.
+- **Set Up MCP for a Project…** creates a project-local `.mcp.json` and preserves existing client settings. Clients configured with the old bundled `server.py` should point to `Contents/Resources/mcp/splicekit-mcp` inside the patcher. The Swift editing tools accept the same arguments. Some replies now contain JSON. The checkout includes the optional 220-tool Python developer server with 31 additional developer commands.
+- **FCPXML runs natively, including generation, import and export.** Single-timeline OTIO JSON also imports natively. For OTIO export, EDL, AAF, bundles and collections, set `SPLICEKIT_OTIO_ADAPTER` to an external adapter such as the checkout’s `MCP/otio-adapter`. The optional Gemma command-palette engine connects to a separately started local server on port 8080.
+- **Browser edits can identify clips by name or index again** for append, insert and connect. Requests waiting on a modal panel now report a timeout. Repeated CloudContent checks write one diagnostic per blocked call.
+
+### Building and maintaining the fork
+
+- Open the **SpliceKit** scheme in `Patcher/SpliceKit.xcodeproj` to build or archive. The app and Xcode build are Python-free. The native bridge reads the target’s **Version** and the app reads **Version** and **Build**. Source builds use Xcode build phases and `Scripts/Makefile`. The standalone release script has been retired.
+- Release builds produce Apple silicon and Intel binaries for the app, bridge, Swift MCP server and companion tools, including the beat detector and both transcribers. Swift packages have checked-in resolutions. The build fetches and verifies Lua 5.4.9 and bundles the license from that same archive.
+- The public website is maintained separately. Release notes live in this changelog. Lua scripts, tests and developer tools have dedicated directories. Obsolete examples, duplicate scripts, the source-file list and the vendored Lua tree were removed. Contributor guidance lives in `AGENTS.md` and the project license in `LICENSE.md`.
 
 ## [3.3.9] — 2026-08-29
 

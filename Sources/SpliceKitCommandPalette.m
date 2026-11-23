@@ -21,9 +21,6 @@
 #import <Speech/Speech.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
-#import <sys/socket.h>
-#import <netinet/in.h>
-#import <arpa/inet.h>
 
 // These are defined in SpliceKitServer.m — we call them directly to avoid
 // going through the TCP socket when executing commands from within the process.
@@ -6070,7 +6067,7 @@ static NSString *FCPFavoriteKey(NSString *type, NSString *action) {
 #pragma mark - Gemma 4 (MLX) AI Engine
 //
 // Multi-turn agentic loop using Gemma 4 via Apple's MLX framework.
-// The mlx-lm server exposes an OpenAI-compatible HTTP API at localhost:8080.
+// Connect to the user's local OpenAI-compatible model server at localhost:8080.
 // Each turn: send messages + tool schema -> parse tool_calls -> execute via
 // SpliceKit_handleRequest -> append results -> repeat until text response.
 //
@@ -6093,313 +6090,6 @@ static NSString *FCPFavoriteKey(NSString *type, NSString *action) {
     [task resume];
     dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 4 * NSEC_PER_SEC));
     return available;
-}
-
-// Find a working python3 path (checks brew, pyenv, conda, system, common locations)
-- (NSString *)findPython3Path {
-    NSFileManager *fm = [NSFileManager defaultManager];
-    NSString *home = NSHomeDirectory();
-
-    // Check well-known locations first (fast, no subprocess)
-    NSArray *candidates = @[
-        @"/opt/homebrew/bin/python3",                                              // Apple Silicon brew
-        @"/usr/local/bin/python3",                                                 // Intel brew
-        [home stringByAppendingPathComponent:@".pyenv/shims/python3"],             // pyenv
-        [home stringByAppendingPathComponent:@"miniforge3/bin/python3"],           // miniforge / conda
-        [home stringByAppendingPathComponent:@"miniconda3/bin/python3"],           // miniconda
-        [home stringByAppendingPathComponent:@"anaconda3/bin/python3"],            // anaconda
-        @"/usr/bin/python3",                                                       // Xcode CLT / system
-    ];
-    for (NSString *path in candidates) {
-        if ([fm isExecutableFileAtPath:path]) return path;
-    }
-
-    // Fallback: shell out to find python3 on the user's PATH
-    // Use login shell so .zprofile / .bash_profile PATH additions are picked up
-    NSString *shell = [NSProcessInfo processInfo].environment[@"SHELL"] ?: @"/bin/zsh";
-    NSTask *which = [[NSTask alloc] init];
-    which.executableURL = [NSURL fileURLWithPath:shell];
-    which.arguments = @[@"-l", @"-c", @"which python3"];
-    NSPipe *pipe = [NSPipe pipe];
-    which.standardOutput = pipe;
-    which.standardError = [NSPipe pipe];
-    @try {
-        [which launch];
-        [which waitUntilExit];
-        if (which.terminationStatus == 0) {
-            NSData *data = [pipe.fileHandleForReading readDataToEndOfFile];
-            NSString *path = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
-            path = [path stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-            if (path.length > 0 && [fm isExecutableFileAtPath:path]) return path;
-        }
-    } @catch (NSException *e) {
-        SpliceKit_log(@"[Gemma] Shell which python3 failed: %@", e.reason);
-    }
-    return nil;
-}
-
-// Check if mlx_lm is installed for the given python
-- (BOOL)isMLXLMInstalledForPython:(NSString *)pythonPath {
-    NSTask *task = [[NSTask alloc] init];
-    task.executableURL = [NSURL fileURLWithPath:pythonPath];
-    task.arguments = @[@"-c", @"import mlx_lm"];
-    task.standardOutput = [NSPipe pipe];
-    task.standardError = [NSPipe pipe];
-    @try {
-        [task launch];
-        [task waitUntilExit];
-        return task.terminationStatus == 0;
-    } @catch (NSException *e) {
-        return NO;
-    }
-}
-
-// Install mlx-lm via pip. Tries normal install first, then --user, then --break-system-packages.
-- (BOOL)installMLXLMForPython:(NSString *)pythonPath {
-    SpliceKit_log(@"[Gemma] Installing mlx-lm package via %@", pythonPath);
-
-    // Try install strategies in order of preference
-    NSArray *argSets = @[
-        @[@"-m", @"pip", @"install", @"mlx-lm"],                                         // normal
-        @[@"-m", @"pip", @"install", @"--user", @"mlx-lm"],                              // no write to site-packages
-        @[@"-m", @"pip", @"install", @"--break-system-packages", @"mlx-lm"],             // PEP 668 (macOS 14+)
-    ];
-
-    for (NSArray *args in argSets) {
-        NSTask *task = [[NSTask alloc] init];
-        task.executableURL = [NSURL fileURLWithPath:pythonPath];
-        task.arguments = args;
-        NSPipe *outPipe = [NSPipe pipe];
-        NSPipe *errPipe = [NSPipe pipe];
-        task.standardOutput = outPipe;
-        task.standardError = errPipe;
-        @try {
-            SpliceKit_log(@"[Gemma] Trying: %@ %@", pythonPath, [args componentsJoinedByString:@" "]);
-            [task launch];
-            [task waitUntilExit];
-            if (task.terminationStatus == 0) {
-                SpliceKit_log(@"[Gemma] pip install succeeded with: %@", [args componentsJoinedByString:@" "]);
-                return YES;
-            }
-            NSData *errData = [errPipe.fileHandleForReading readDataToEndOfFile];
-            NSString *errStr = [[NSString alloc] initWithData:errData encoding:NSUTF8StringEncoding];
-            SpliceKit_log(@"[Gemma] pip install failed (status %d): %@", task.terminationStatus, errStr);
-
-            // If error is "externally managed" (PEP 668), continue to next strategy
-            // If error is something else, try next strategy anyway
-        } @catch (NSException *e) {
-            SpliceKit_log(@"[Gemma] pip install exception: %@", e.reason);
-        }
-    }
-
-    return NO;
-}
-
-// Check if port 8080 is already in use (by another MLX server or something else)
-- (BOOL)isPortInUse:(int)port {
-    int sock = socket(AF_INET, SOCK_STREAM, 0);
-    if (sock < 0) return NO;
-
-    struct sockaddr_in addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(port);
-    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-
-    int result = connect(sock, (struct sockaddr *)&addr, sizeof(addr));
-    close(sock);
-    return result == 0;
-}
-
-// Kill any existing mlx_lm.server process that we didn't start
-- (void)killOrphanedMLXServer {
-    NSTask *task = [[NSTask alloc] init];
-    task.executableURL = [NSURL fileURLWithPath:@"/usr/bin/pkill"];
-    task.arguments = @[@"-f", @"mlx_lm.server"];
-    task.standardOutput = [NSPipe pipe];
-    task.standardError = [NSPipe pipe];
-    @try {
-        [task launch];
-        [task waitUntilExit];
-    } @catch (NSException *e) {}
-    // Give it a moment to release the port
-    [NSThread sleepForTimeInterval:1.0];
-}
-
-// Tail the last N bytes of a log file for user-facing error messages
-static NSString *SpliceKit_tailLogFile(NSString *path, NSUInteger maxBytes) {
-    NSString *log = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil];
-    if (!log.length) return @"(empty log)";
-    if (log.length <= maxBytes) return log;
-    // Find a newline boundary near the cut point so we don't show a partial line
-    NSRange search = [log rangeOfString:@"\n" options:0
-                                  range:NSMakeRange(log.length - maxBytes, maxBytes)];
-    NSUInteger start = (search.location != NSNotFound) ? search.location + 1 : log.length - maxBytes;
-    return [log substringFromIndex:start];
-}
-
-// Auto-start MLX server, installing mlx-lm first if needed.
-// Returns nil on success, or an error string on failure.
-// Model is auto-downloaded by Hugging Face Hub on first server start.
-- (NSString *)autoStartMLXServer {
-    NSString *model = self.gemmaModel ?: @"unsloth/gemma-4-E4B-it-UD-MLX-4bit";
-
-    // If we already started a server and it's still running, just wait for it
-    if (self.mlxServerTask && self.mlxServerTask.isRunning) {
-        SpliceKit_log(@"[Gemma] MLX server already launched (PID %d), waiting for it to become ready...", self.mlxServerTask.processIdentifier);
-        for (int i = 0; i < 60; i++) {
-            if ([self isMLXServerAvailable]) return nil;
-            if (!self.mlxServerTask.isRunning) break;
-            [NSThread sleepForTimeInterval:1.0];
-            [self updateGemmaStatus:[NSString stringWithFormat:@"Waiting for server... (%ds)", i]];
-        }
-        // Fall through to full restart below
-        SpliceKit_log(@"[Gemma] Previously launched server didn't become ready, restarting...");
-    }
-
-    // Find Python
-    [self updateGemmaStatus:@"Finding Python..."];
-    NSString *python = [self findPython3Path];
-    if (!python) {
-        return @"Python 3 not found. Install via: brew install python3";
-    }
-    SpliceKit_log(@"[Gemma] Using Python: %@", python);
-
-    // Verify it's a real Python (not a stub that prompts Xcode CLT install)
-    {
-        NSTask *verify = [[NSTask alloc] init];
-        verify.executableURL = [NSURL fileURLWithPath:python];
-        verify.arguments = @[@"--version"];
-        NSPipe *outPipe = [NSPipe pipe];
-        verify.standardOutput = outPipe;
-        verify.standardError = [NSPipe pipe];
-        @try {
-            [verify launch];
-            [verify waitUntilExit];
-            if (verify.terminationStatus != 0) {
-                return @"Python 3 found but not functional. Install via: brew install python3";
-            }
-            NSData *data = [outPipe.fileHandleForReading readDataToEndOfFile];
-            NSString *version = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
-            SpliceKit_log(@"[Gemma] Python version: %@", [version stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]]);
-        } @catch (NSException *e) {
-            return [NSString stringWithFormat:@"Python 3 failed to run: %@", e.reason];
-        }
-    }
-
-    // Check / install mlx-lm
-    [self updateGemmaStatus:@"Checking mlx-lm..."];
-    if (![self isMLXLMInstalledForPython:python]) {
-        [self updateGemmaStatus:@"Installing mlx-lm (first-time setup)..."];
-        SpliceKit_log(@"[Gemma] mlx-lm not installed, installing...");
-        if (![self installMLXLMForPython:python]) {
-            return @"Failed to install mlx-lm. Try manually: pip3 install mlx-lm";
-        }
-        SpliceKit_log(@"[Gemma] mlx-lm installed successfully");
-
-        // Verify the install actually worked (pip can exit 0 but fail silently)
-        if (![self isMLXLMInstalledForPython:python]) {
-            SpliceKit_log(@"[Gemma] mlx-lm still not importable after pip install");
-            return @"mlx-lm installed but import failed. Try: pip3 install --force-reinstall mlx-lm";
-        }
-    }
-
-    // Check for port conflict before starting
-    if ([self isPortInUse:8080]) {
-        SpliceKit_log(@"[Gemma] Port 8080 is in use but server not responding to /v1/models");
-        // Something else is on 8080, or a stale mlx server is half-alive. Kill orphans.
-        [self updateGemmaStatus:@"Clearing stale server on port 8080..."];
-        [self killOrphanedMLXServer];
-
-        // Check again — if still occupied by a non-mlx process, fail clearly
-        if ([self isPortInUse:8080] && ![self isMLXServerAvailable]) {
-            return @"Port 8080 is in use by another process. Stop it or set a custom port.";
-        }
-        // If it's now responding, great — we're done
-        if ([self isMLXServerAvailable]) return nil;
-    }
-
-    // Start server in background
-    [self updateGemmaStatus:@"Starting MLX server (downloading model if first run)..."];
-    SpliceKit_log(@"[Gemma] Starting MLX server with model: %@", model);
-
-    NSString *logPath = @"/tmp/mlx_server.log";
-
-    NSTask *server = [[NSTask alloc] init];
-    server.executableURL = [NSURL fileURLWithPath:python];
-    server.arguments = @[@"-m", @"mlx_lm.server", @"--model", model];
-
-    // Redirect output to log file for diagnostics (truncate previous log)
-    [[NSFileManager defaultManager] createFileAtPath:logPath contents:nil attributes:nil];
-    NSFileHandle *logHandle = [NSFileHandle fileHandleForWritingAtPath:logPath];
-    if (logHandle) {
-        [logHandle truncateFileAtOffset:0];
-        server.standardOutput = logHandle;
-        server.standardError = logHandle;
-    }
-
-    @try {
-        [server launch];
-    } @catch (NSException *e) {
-        SpliceKit_log(@"[Gemma] Failed to launch MLX server: %@", e.reason);
-        return [NSString stringWithFormat:@"Failed to start MLX server: %@", e.reason];
-    }
-
-    // Store reference for lifecycle management
-    self.mlxServerTask = server;
-    SpliceKit_log(@"[Gemma] MLX server process launched (PID %d), waiting for it to be ready...", server.processIdentifier);
-
-    // Poll until server is ready
-    // First run with model download: could be several minutes (model is ~2-3 GB)
-    // Subsequent runs with cached model: typically 5-30 seconds
-    int maxAttempts = 300; // 5 minutes total (300 x 1s) — generous for first-run download
-    for (int i = 0; i < maxAttempts; i++) {
-        if (self.gemmaCancelled) {
-            [server terminate];
-            self.mlxServerTask = nil;
-            return @"Cancelled by user";
-        }
-        if (!server.isRunning) {
-            NSString *tail = SpliceKit_tailLogFile(logPath, 800);
-            SpliceKit_log(@"[Gemma] MLX server exited (status %d). Log tail:\n%@", server.terminationStatus, tail);
-
-            // Provide actionable error based on common failure patterns
-            if ([tail containsString:@"No module named"]) {
-                return @"MLX server failed: missing Python module. Try: pip3 install mlx-lm";
-            } else if ([tail containsString:@"Address already in use"]) {
-                return @"Port 8080 already in use. Kill the existing process: pkill -f mlx_lm.server";
-            } else if ([tail containsString:@"out of memory"] || [tail containsString:@"MemoryError"]) {
-                return @"Not enough memory to load model. Close other apps and try again.";
-            } else if ([tail containsString:@"FileNotFoundError"] || [tail containsString:@"does not appear to have"]) {
-                return [NSString stringWithFormat:@"Model '%@' not found. Check the model ID.", model];
-            }
-            return [NSString stringWithFormat:@"MLX server exited unexpectedly. Log:\n%@", tail];
-        }
-        if ([self isMLXServerAvailable]) {
-            SpliceKit_log(@"[Gemma] MLX server ready after %d seconds", i);
-            [logHandle closeFile];
-            return nil; // success
-        }
-
-        // Show progress with download context for first ~60s
-        if (i <= 5) {
-            [self updateGemmaStatus:@"Starting MLX server..."];
-        } else if (i <= 30) {
-            [self updateGemmaStatus:[NSString stringWithFormat:@"Loading model... (%ds)", i]];
-        } else {
-            // After 30s it's likely downloading — read log for progress hints
-            NSString *tail = SpliceKit_tailLogFile(logPath, 200);
-            if ([tail containsString:@"Fetching"] || [tail containsString:@"Downloading"] || [tail containsString:@"%"]) {
-                [self updateGemmaStatus:[NSString stringWithFormat:@"Downloading model... (%ds)", i]];
-            } else {
-                [self updateGemmaStatus:[NSString stringWithFormat:@"Loading model... (%ds)", i]];
-            }
-        }
-        [NSThread sleepForTimeInterval:1.0];
-    }
-
-    [logHandle closeFile];
-    return @"MLX server started but didn't respond within 5 minutes. Check /tmp/mlx_server.log";
 }
 
 - (NSDictionary *)gemmaCallMLXOnce:(NSArray *)messages tools:(NSArray *)tools {
@@ -6464,32 +6154,19 @@ static NSString *SpliceKit_tailLogFile(NSString *path, NSUInteger maxBytes) {
                       elapsed, usage[@"prompt_tokens"], usage[@"completion_tokens"], usage[@"total_tokens"]);
     }
 
-    // Retry on connection error (mlx-lm tool parser crash drops the connection)
+    // Allow a transient local server disconnect to recover.
     if (result[@"_connection_error"]) {
-        SpliceKit_log(@"[Gemma] Connection lost (likely mlx-lm tool parser crash) — waiting 2s for recovery...");
         [NSThread sleepForTimeInterval:2.0];
-
-        // Check if server recovered on its own
         if (![self isMLXServerAvailable]) {
-            // Server died — try auto-restart
-            SpliceKit_log(@"[Gemma] MLX server did not recover, attempting auto-restart...");
-            [self updateGemmaStatus:@"MLX server crashed, restarting..."];
-            self.mlxServerTask = nil; // clear stale reference
-            NSString *startErr = [self autoStartMLXServer];
-            if (startErr) {
-                SpliceKit_log(@"[Gemma] Auto-restart failed: %@", startErr);
-                return @{@"error": [NSString stringWithFormat:@"MLX server crashed and restart failed: %@", startErr]};
-            }
-            SpliceKit_log(@"[Gemma] MLX server restarted successfully");
+            return @{@"error": @"The local Gemma server disconnected. Restart it on localhost:8080 and try again."};
         }
-
         callStart = [NSDate date];
         result = [self gemmaCallMLXOnce:messages tools:tools];
         elapsed = -[callStart timeIntervalSinceNow];
 
         if (result[@"_connection_error"]) {
             SpliceKit_log(@"[Gemma] Retry also failed with connection error");
-            return @{@"error": @"MLX server keeps crashing. Check /tmp/mlx_server.log for errors."};
+            return @{@"error": @"The local Gemma server did not respond. Check its log and try again."};
         }
 
         usage = result[@"usage"];
@@ -7047,19 +6724,14 @@ static NSString * const kGemmaSystemPrompt =
         NSDate *totalStart = [NSDate date];
         SpliceKit_log(@"[Gemma] ═══ Starting query: \"%@\" ═══", query);
 
-        // 1. Check MLX server availability — auto-start if not running
+        // 1. Connect to the user's local model server.
         [self updateGemmaStatus:@"Connecting to MLX server..."];
         NSDate *phaseStart = [NSDate date];
         if (![self isMLXServerAvailable]) {
-            SpliceKit_log(@"[Gemma] MLX server not available, attempting auto-start...");
-            NSString *startErr = [self autoStartMLXServer];
-            if (startErr) {
-                SpliceKit_log(@"[Gemma] Auto-start failed (%.1fs): %@", -[phaseStart timeIntervalSinceNow], startErr);
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    completion(nil, startErr);
-                });
-                return;
-            }
+            dispatch_async(dispatch_get_main_queue(), ^{
+                completion(nil, @"Start a local Gemma server with a compatible chat API at http://localhost:8080, then try again.");
+            });
+            return;
         }
         SpliceKit_log(@"[Gemma] MLX server available (%.1fs)", -[phaseStart timeIntervalSinceNow]);
 

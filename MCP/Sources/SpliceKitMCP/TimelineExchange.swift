@@ -6,29 +6,22 @@ struct TimelineExchange {
 
     private func convert(_ input: [String: Value]) async throws -> Value {
         let files = FileManager.default
-        let home = files.homeDirectoryForCurrentUser
-        let env = ProcessInfo.processInfo.environment
-        let python: URL?
-        if let override = env["SPLICEKIT_OTIO_PYTHON"], !override.isEmpty {
-            python = URL(fileURLWithPath: override)
+        let candidates: [URL]
+        if let override = ProcessInfo.processInfo.environment["SPLICEKIT_OTIO_ADAPTER"], !override.isEmpty {
+            guard (override as NSString).isAbsolutePath else {
+                throw ToolFailure("SPLICEKIT_OTIO_ADAPTER must be an absolute executable path.")
+            }
+            candidates = [URL(fileURLWithPath: override)]
         } else {
-            python = [home.appendingPathComponent(".venvs/splicekit-otio/bin/python"),
-                      home.appendingPathComponent(".venvs/splicekit-mcp/bin/python"),
-                      URL(fileURLWithPath: "/usr/bin/python3")].first { files.isExecutableFile(atPath: $0.path) }
+            candidates = [CompanionTools.checkout?.appendingPathComponent("MCP/otio-adapter"),
+                          files.homeDirectoryForCurrentUser.appendingPathComponent(".local/bin/splicekit-otio-adapter")]
+                .compactMap { $0 }
         }
-        let adapter = [ToolCatalog.executableDirectory.appendingPathComponent("otio_adapter.py"),
-                       CompanionTools.checkout?.appendingPathComponent("MCP/otio_adapter.py")]
-            .compactMap { $0 }.first { files.fileExists(atPath: $0.path) }
-        guard let python, files.isExecutableFile(atPath: python.path) else {
-            throw ToolFailure("OpenTimelineIO needs an adapter environment. Set SPLICEKIT_OTIO_PYTHON to its Python executable.")
+        guard let adapter = candidates.first(where: { files.isExecutableFile(atPath: $0.path) }) else {
+            throw ToolFailure("This format needs an external OpenTimelineIO adapter. Set SPLICEKIT_OTIO_ADAPTER to the absolute path of MCP/otio-adapter in your checkout.")
         }
-        guard let adapter else { throw ToolFailure("SpliceKit's optional otio_adapter.py file is missing.") }
-        do {
-            let data = try await CompanionTools.run(python, arguments: [adapter.path], input: JSONEncoder().encode(input), timeout: 300)
-            return try JSONDecoder().decode(Value.self, from: data)
-        } catch {
-            throw ToolFailure("OpenTimelineIO: \(error.localizedDescription). Check the adapters installed in \(python.path).")
-        }
+        let data = try await CompanionTools.run(adapter, arguments: [], input: JSONEncoder().encode(input), timeout: 300)
+        return try JSONDecoder().decode(Value.self, from: data)
     }
 
     func run(_ name: String, _ a: Arguments) async throws -> String {
@@ -84,7 +77,7 @@ struct TimelineExchange {
         for doc in documents.list {
             var summary = doc["summary"].fields
             if let xml = doc["xml"].stringValue {
-                summary["converter"] = "python_adapter"
+                summary["converter"] = summary["converter"] ?? "external_adapter"
                 do {
                     _ = try await insert(xml)
                     imported += 1

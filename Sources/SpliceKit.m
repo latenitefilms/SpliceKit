@@ -1685,10 +1685,44 @@ NSString *SpliceKit_otioToFCPXML(NSString *otioPath) {
 
 #pragma mark - OpenTimelineIO Import / Export
 
+// The optional adapter takes file paths as separate arguments and reports failures on stderr.
+static NSString *SpliceKit_convertTimelineFile(NSString *operation, NSString *source, NSString *destination) {
+    NSString *adapter = NSProcessInfo.processInfo.environment[@"SPLICEKIT_OTIO_ADAPTER"];
+    if (!adapter.length) adapter = [NSHomeDirectory() stringByAppendingPathComponent:@".local/bin/splicekit-otio-adapter"];
+    if (!adapter.isAbsolutePath || ![NSFileManager.defaultManager isExecutableFileAtPath:adapter]) {
+        return @"This format needs an external OpenTimelineIO adapter. Install the checkout’s MCP/otio-adapter at ~/.local/bin/splicekit-otio-adapter or set SPLICEKIT_OTIO_ADAPTER to its absolute path.";
+    }
+    NSTask *task = [NSTask new];
+    task.executableURL = [NSURL fileURLWithPath:adapter];
+    task.arguments = @[operation, source, destination];
+    task.standardInput = NSFileHandle.fileHandleWithNullDevice;
+    task.standardOutput = NSFileHandle.fileHandleWithNullDevice;
+    NSPipe *errors = [NSPipe pipe];
+    task.standardError = errors;
+    NSError *error = nil;
+    if (![task launchAndReturnError:&error]) return error.localizedDescription ?: @"Could not start the external OpenTimelineIO adapter.";
+    NSData *details = [errors.fileHandleForReading readDataToEndOfFile];
+    [task waitUntilExit];
+    if (task.terminationStatus == 0) return nil;
+    NSString *message = [[NSString alloc] initWithData:details encoding:NSUTF8StringEncoding];
+    return message.length ? message : @"The external OpenTimelineIO adapter failed.";
+}
+
+static void SpliceKit_showTimelineConversionError(NSString *title, NSString *message) {
+    SpliceKit_log(@"[OTIO] %@: %@", title, message);
+    dispatch_async(dispatch_get_main_queue(), ^{
+        NSAlert *alert = [NSAlert new];
+        alert.messageText = title;
+        alert.informativeText = message;
+        alert.alertStyle = NSAlertStyleWarning;
+        [alert runModal];
+    });
+}
+
 - (void)exportOTIO:(id)sender {
     // Step 1: Export FCPXML from FCP to a temp file
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-        NSString *tmpFcpxml = [NSTemporaryDirectory() stringByAppendingPathComponent:@"splicekit_otio_menu_export.fcpxml"];
+        NSString *tmpFcpxml = [NSTemporaryDirectory() stringByAppendingPathComponent:[NSUUID.UUID.UUIDString stringByAppendingPathExtension:@"fcpxml"]];
         NSDictionary *exportResult = SpliceKit_handleFCPXMLExport(@{@"path": tmpFcpxml});
         if (exportResult[@"error"]) {
             dispatch_async(dispatch_get_main_queue(), ^{
@@ -1761,73 +1795,10 @@ NSString *SpliceKit_otioToFCPXML(NSString *otioPath) {
                     return;
                 }
 
-                // Step 3: Convert FCPXML → target format using Python/OTIO
-                NSString *pyScript =
-                    @"import sys\n"
-                    @"import opentimelineio as otio\n"
-                    @"\n"
-                    @"def pick_fcpx_adapter():\n"
-                    @"    preferred = ('fcpxml', 'fcpx_xml')\n"
-                    @"    try:\n"
-                    @"        available = set(otio.adapters.available_adapter_names())\n"
-                    @"    except Exception:\n"
-                    @"        available = set()\n"
-                    @"    for name in preferred:\n"
-                    @"        if name in available:\n"
-                    @"            return name\n"
-                    @"    return preferred[0]\n"
-                    @"\n"
-                    @"src_path, dst_path = sys.argv[1:3]\n"
-                    @"with open(src_path, 'r', encoding='utf-8') as fh:\n"
-                    @"    result = otio.adapters.read_from_string(fh.read(), pick_fcpx_adapter())\n"
-                    @"timeline = result\n"
-                    @"if hasattr(result, '__iter__') and not isinstance(result, otio.schema.Timeline):\n"
-                    @"    for item in result:\n"
-                    @"        if isinstance(item, otio.schema.Timeline):\n"
-                    @"            timeline = item\n"
-                    @"            break\n"
-                    @"otio.adapters.write_to_file(timeline, dst_path)\n"
-                    @"print('OK')\n";
-
-                NSTask *task = [[NSTask alloc] init];
-                task.executableURL = [NSURL fileURLWithPath:@"/usr/bin/env"];
-                task.arguments = @[@"python3", @"-c", pyScript, tmpFcpxml, outPath];
-                NSPipe *outPipe = [NSPipe pipe];
-                NSPipe *errPipe = [NSPipe pipe];
-                task.standardOutput = outPipe;
-                task.standardError = errPipe;
-
-                NSError *err = nil;
-                [task launchAndReturnError:&err];
-                if (err) {
-                    SpliceKit_log(@"[OTIO] Export launch error: %@", err);
-                    [[NSFileManager defaultManager] removeItemAtPath:tmpFcpxml error:nil];
-                    dispatch_async(dispatch_get_main_queue(), ^{
-                        NSAlert *alert = [[NSAlert alloc] init];
-                        alert.messageText = @"Export Failed";
-                        alert.informativeText = [NSString stringWithFormat:@"Could not launch Python: %@", err.localizedDescription];
-                        [alert addButtonWithTitle:@"OK"];
-                        [alert runModal];
-                    });
-                    return;
-                }
-                [task waitUntilExit];
-
-                NSString *stdoutStr = [[NSString alloc] initWithData:[outPipe.fileHandleForReading readDataToEndOfFile] encoding:NSUTF8StringEncoding];
-                NSString *stderrStr = [[NSString alloc] initWithData:[errPipe.fileHandleForReading readDataToEndOfFile] encoding:NSUTF8StringEncoding];
-
-                [[NSFileManager defaultManager] removeItemAtPath:tmpFcpxml error:nil];
-
-                if (task.terminationStatus != 0 || ![stdoutStr containsString:@"OK"]) {
-                    SpliceKit_log(@"[OTIO] Export error: %@", stderrStr);
-                    dispatch_async(dispatch_get_main_queue(), ^{
-                        NSAlert *alert = [[NSAlert alloc] init];
-                        alert.messageText = @"Export Failed";
-                        alert.informativeText = stderrStr.length > 0 ? stderrStr : @"Unknown error during OTIO conversion";
-                        alert.alertStyle = NSAlertStyleWarning;
-                        [alert addButtonWithTitle:@"OK"];
-                        [alert runModal];
-                    });
+                NSString *error = SpliceKit_convertTimelineFile(@"export", tmpFcpxml, outPath);
+                [fm removeItemAtPath:tmpFcpxml error:nil];
+                if (error) {
+                    SpliceKit_showTimelineConversionError(@"Export Failed", error);
                 } else {
                     SpliceKit_log(@"[OTIO] Exported to %@ (%@)", outPath, ext.uppercaseString);
                 }
@@ -1915,79 +1886,17 @@ NSString *SpliceKit_otioToFCPXML(NSString *otioPath) {
         return;
     }
 
-    // Other OTIO formats (.otioz/.otiod/.edl/.aaf) → Python/OTIO conversion to FCPXML, then import
+    // Convert other interchange formats with the user's optional adapter.
     if ([ext isEqualToString:@"otioz"] ||
         [ext isEqualToString:@"otiod"] ||
         [ext isEqualToString:@"edl"] ||
         [ext isEqualToString:@"aaf"]) {
         dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-            NSString *tmpPath = [NSTemporaryDirectory() stringByAppendingPathComponent:@"splicekit_otio_import.fcpxml"];
-            NSString *pyScript =
-                @"import sys\n"
-                @"import opentimelineio as otio\n"
-                @"\n"
-                @"def pick_fcpx_adapter():\n"
-                @"    preferred = ('fcpxml', 'fcpx_xml')\n"
-                @"    try:\n"
-                @"        available = set(otio.adapters.available_adapter_names())\n"
-                @"    except Exception:\n"
-                @"        available = set()\n"
-                @"    for name in preferred:\n"
-                @"        if name in available:\n"
-                @"            return name\n"
-                @"    return preferred[0]\n"
-                @"\n"
-                @"src_path, dst_path = sys.argv[1:3]\n"
-                @"result = otio.adapters.read_from_file(src_path)\n"
-                @"timeline = result\n"
-                @"if hasattr(result, '__iter__') and not isinstance(result, otio.schema.Timeline):\n"
-                @"    for item in result:\n"
-                @"        if isinstance(item, otio.schema.Timeline):\n"
-                @"            timeline = item\n"
-                @"            break\n"
-                @"xml = otio.adapters.write_to_string(timeline, pick_fcpx_adapter())\n"
-                @"with open(dst_path, 'w', encoding='utf-8') as fh:\n"
-                @"    fh.write(xml)\n"
-                @"print('OK')\n";
-
-            NSTask *task = [[NSTask alloc] init];
-            task.executableURL = [NSURL fileURLWithPath:@"/usr/bin/env"];
-            task.arguments = @[@"python3", @"-c", pyScript, inPath, tmpPath];
-            NSPipe *outPipe = [NSPipe pipe];
-            NSPipe *errPipe = [NSPipe pipe];
-            task.standardOutput = outPipe;
-            task.standardError = errPipe;
-
-            NSError *launchErr = nil;
-            [task launchAndReturnError:&launchErr];
-            if (launchErr) {
-                SpliceKit_log(@"[OTIO] Import launch error: %@", launchErr.localizedDescription);
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    NSAlert *alert = [[NSAlert alloc] init];
-                    alert.messageText = @"Import Failed";
-                    alert.informativeText = launchErr.localizedDescription ?: @"Could not launch Python for OTIO import.";
-                    alert.alertStyle = NSAlertStyleWarning;
-                    [alert addButtonWithTitle:@"OK"];
-                    [alert runModal];
-                });
-                return;
-            }
-
-            [task waitUntilExit];
-            NSString *stdoutStr = [[NSString alloc] initWithData:[outPipe.fileHandleForReading readDataToEndOfFile] encoding:NSUTF8StringEncoding];
-            NSString *stderrStr = [[NSString alloc] initWithData:[errPipe.fileHandleForReading readDataToEndOfFile] encoding:NSUTF8StringEncoding];
-
-            if (task.terminationStatus != 0 || ![stdoutStr containsString:@"OK"]) {
-                [[NSFileManager defaultManager] removeItemAtPath:tmpPath error:nil];
-                SpliceKit_log(@"[OTIO] Import conversion error: %@", stderrStr);
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    NSAlert *alert = [[NSAlert alloc] init];
-                    alert.messageText = @"Import Failed";
-                    alert.informativeText = stderrStr.length > 0 ? stderrStr : @"Unknown error during OTIO conversion";
-                    alert.alertStyle = NSAlertStyleWarning;
-                    [alert addButtonWithTitle:@"OK"];
-                    [alert runModal];
-                });
+            NSString *tmpPath = [NSTemporaryDirectory() stringByAppendingPathComponent:[NSUUID.UUID.UUIDString stringByAppendingPathExtension:@"fcpxml"]];
+            NSString *error = SpliceKit_convertTimelineFile(@"import", inPath, tmpPath);
+            if (error) {
+                [NSFileManager.defaultManager removeItemAtPath:tmpPath error:nil];
+                SpliceKit_showTimelineConversionError(@"Import Failed", error);
                 return;
             }
 

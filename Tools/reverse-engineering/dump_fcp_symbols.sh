@@ -12,7 +12,7 @@ FCP_APP="/Applications/Final Cut Pro.app"
 FCP_BIN="$FCP_APP/Contents/MacOS/Final Cut Pro"
 FCP_FW="$FCP_APP/Contents/Frameworks"
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-OUT="${1:-$REPO_ROOT/Documentation/research/fcp_symbols}"
+OUT="${1:-$REPO_ROOT/build/fcp_symbols}"
 
 mkdir -p "$OUT"
 

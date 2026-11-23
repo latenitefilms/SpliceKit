@@ -434,8 +434,12 @@ Supported formats:
 - `.aaf` — Avid AAF (requires Avid-specific metadata on clips)
 - `.otioz` / `.otiod` — OTIO bundles (media files must exist on disk)
 
-Install `opentimelineio` and the adapters for your interchange formats. The FCPXML
-1.14 test setup is documented in [the fixture README](Tests/fixtures/upstream_otio_fcpxml/README.md).
+FCPXML and single-timeline OTIO JSON import run natively. For other conversions,
+the Swift MCP server can call the checkout’s optional `MCP/otio-adapter`. Set
+`SPLICEKIT_OTIO_ADAPTER` to its absolute path in the MCP client, or link it at
+`~/.local/bin/splicekit-otio-adapter` for the installed app and Final Cut Pro’s
+menus. The checkout adapter needs `opentimelineio` and the plugins for the chosen
+formats. [FCPXML 1.14 test setup](Tests/fixtures/upstream_otio_fcpxml/README.md)
 
 ## Deploy & Restart FCP
 ```
@@ -991,14 +995,6 @@ timeline.directAction(action="duplicateCaptions", language="es", format="SRT")
 timeline.directAction(selector="actionValidateAndRepair:validateMode:error:")
 ```
 
-See `Documentation/DEBUG_TOOLS_GUIDE.md` for comprehensive documentation of all debug
-endpoints, parameters, workflows, and recipes.
-
-## Full API Reference
-See `Documentation/FCP_API_REFERENCE.md` for comprehensive documentation of all key classes,
-methods, properties, notifications, and patterns. This reference is sufficient to use
-SpliceKit without access to the decompiled FCP source code.
-
 ## Social Media Captions
 ```
 open_captions()                                    # open panel + transcribe timeline
@@ -1066,23 +1062,10 @@ sk.eval("NSApp.delegate.className") -- ObjC runtime bridge
 - JSON-RPC: `lua.execute`, `lua.executeFile`, `lua.reset`, `lua.getState`, `lua.watch`
 - MCP tools: `lua_execute`, `lua_execute_file`, `lua_reset`, `lua_watch`, `lua_state`
 
-See `Documentation/LUA_SDK_REFERENCE.md` for the full SDK with 25 sections, 140+ RPC methods,
-and complete cookbook examples.
+The bundled examples are in [Lua Scripts/examples](Lua%20Scripts/examples).
 
-## Additional Documentation
-- `Documentation/LUA_SDK_REFERENCE.md` — **Lua scripting SDK** (sk module, 120+ actions, ObjC bridge, live coding, cookbook)
-- `Documentation/LUA_SCRIPTING_GUIDE.md` — **Lua scripting tutorial** (data model, patterns, modules, persistence, pipelines, annotated examples)
-- `Documentation/TRANSCRIPT_EDITING_GUIDE.md` — Transcript-based editing (engines, silence removal, speakers)
-- `Documentation/COMMAND_PALETTE_GUIDE.md` — Command palette & Apple Intelligence
-- `Documentation/RUNTIME_INTROSPECTION_GUIDE.md` — ObjC runtime exploration & reverse engineering
-- `Documentation/DIALOG_AUTOMATION_GUIDE.md` — Dialog detection & interaction
-- `Documentation/SCENE_BEAT_DETECTION_GUIDE.md` — Scene change & beat detection
-- `Documentation/FXPLUG_PLUGIN_GUIDE.md` — FxPlug 4 plugin development
-- `Documentation/FCPXML_FORMAT_REFERENCE.md` — FCPXML interchange format
-- `Documentation/WORKFLOW_EXTENSIONS_GUIDE.md` — Workflow Extensions (ProExtensionHost)
-- `Documentation/CONTENT_EXCHANGE_GUIDE.md` — Content exchange mechanisms
-- `Documentation/FLEXMUSIC_AND_MONTAGE_GUIDE.md` — FlexMusic & Montage Maker
-- `Documentation/DEBUG_TOOLS_GUIDE.md` — In-process debugging (tracing, watching, crash handling, eval, hot-loading)
+## Developer tools
+
 - `Tools/reverse-engineering/fcp_runtime_export.py` — Export runtime metadata for IDA Pro (usage: `--help`)
 - `Tools/reverse-engineering/ida_apply_and_decompile.py` — IDAPython headless: apply metadata + decompile all functions
 - `Tools/reverse-engineering/batch_enhanced_decompile.sh` — Batch decompile all 53 FCP binaries with runtime enrichment

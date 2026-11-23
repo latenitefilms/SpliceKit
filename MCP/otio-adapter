@@ -1,0 +1,11 @@
+#!/bin/sh
+# Optional checkout adapter. The app exchanges JSON with this executable.
+set -eu
+script="$(dirname "$(realpath "$0")")/otio_adapter.py"
+if [ -n "${SPLICEKIT_OTIO_PYTHON:-}" ]; then
+    exec "$SPLICEKIT_OTIO_PYTHON" "$script" "$@"
+fi
+for interpreter in "$HOME/.venvs/splicekit-otio/bin/python" "$HOME/.venvs/splicekit-mcp/bin/python"; do
+    if [ -x "$interpreter" ]; then exec "$interpreter" "$script" "$@"; fi
+done
+exec python3 "$script" "$@"

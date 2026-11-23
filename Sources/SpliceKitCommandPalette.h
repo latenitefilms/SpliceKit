@@ -72,7 +72,6 @@ typedef NS_ENUM(NSInteger, SpliceKitCommandCategory) {
 // AI engine selection
 @property (nonatomic, assign) SpliceKitAIEngine aiEngine;
 @property (nonatomic, strong) NSString *gemmaModel;
-@property (nonatomic, strong) NSTask *mlxServerTask;
 
 // AI natural language (async, calls completion on main thread)
 - (void)executeNaturalLanguage:(NSString *)query completion:(void(^)(NSArray<NSDictionary *> *actions, NSString *error))completion;

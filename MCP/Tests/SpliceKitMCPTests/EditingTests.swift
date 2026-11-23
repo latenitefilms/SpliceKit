@@ -18,17 +18,21 @@ private func reply(_ id: Int, _ result: Value) -> Value {
 private func recordedRequests(replies: [Value], operation: (Bridge) async throws -> Void) async throws -> [Value] {
     var sockets = [Int32](repeating: -1, count: 2)
     guard socketpair(AF_UNIX, SOCK_STREAM, 0, &sockets) == 0 else { throw POSIXError(.ENOTCONN) }
-    let bridge = Bridge(connectedSocket: sockets[0])
+    let client = FileHandle(fileDescriptor: sockets[0], closeOnDealloc: true)
     let peer = FileHandle(fileDescriptor: sockets[1], closeOnDealloc: true)
+    // The bridge may close its descriptor during the lost-reply test.
+    let bridgeSocket = dup(client.fileDescriptor)
+    guard bridgeSocket >= 0 else { throw POSIXError(.EMFILE) }
+    let bridge = Bridge(connectedSocket: bridgeSocket)
     let encoder = JSONEncoder()
     for reply in replies {
         var data = try encoder.encode(reply)
         data.append(10)
         try peer.write(contentsOf: data)
     }
-    shutdown(sockets[1], SHUT_WR)
+    shutdown(peer.fileDescriptor, SHUT_WR)
     try await operation(bridge)
-    withExtendedLifetime(bridge) { _ = shutdown(sockets[0], SHUT_WR) }
+    shutdown(client.fileDescriptor, SHUT_WR)
     let recorded = try peer.readToEnd() ?? Data()
     return try recorded.split(separator: 10).map { try JSONDecoder().decode(Value.self, from: $0) }
 }
@@ -124,7 +128,6 @@ private func recordedRequests(replies: [Value], operation: (Bridge) async throws
 
 @Test(.enabled(if: ProcessInfo.processInfo.environment["SPLICEKIT_OTIO_PYTHON"] != nil))
 func optionalOTIOAdapterImportsTransitionsThroughTheEditingBridge() async throws {
-    let python = try #require(ProcessInfo.processInfo.environment["SPLICEKIT_OTIO_PYTHON"])
     let package = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
         .deletingLastPathComponent().deletingLastPathComponent()
     let fixture = package.deletingLastPathComponent()
@@ -132,7 +135,7 @@ func optionalOTIOAdapterImportsTransitionsThroughTheEditingBridge() async throws
     let output = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".otio")
     defer { try? FileManager.default.removeItem(at: output) }
     let export: Value = ["operation": "export", "source": .string(fixture.path), "path": .string(output.path)]
-    _ = try await CompanionTools.run(URL(fileURLWithPath: python), arguments: [package.appendingPathComponent("otio_adapter.py").path],
+    _ = try await CompanionTools.run(package.appendingPathComponent("otio-adapter"), arguments: [],
                                      input: JSONEncoder().encode(export))
     let replies = [reply(1, ["error": "Native converter unavailable"]), reply(2, ["status": "ok"])]
     let requests = try await recordedRequests(replies: replies) { bridge in
@@ -141,6 +144,7 @@ func optionalOTIOAdapterImportsTransitionsThroughTheEditingBridge() async throws
         let summary = try Value.string(result).decodedJSON()
         #expect(summary["timelines_imported"] == 1)
         #expect(summary["details"].list.first?["clips"] == 3)
+        #expect(summary["details"].list.first?["converter"] == "python_adapter")
     }
     #expect(requests.map { $0["method"].text } == ["otio.toFCPXML", "fcpxml.import"])
     let xml = try #require(requests.last?["params"]["xml"].stringValue)

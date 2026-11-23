@@ -52,9 +52,9 @@ static NSArray *AnchoredItems(id prim) {
         for (id x in (NSSet *)O(item, @"anchoredItems")) if (IsLayer(x)) [a addObject:x];
     return a;
 }
-static NSSet *Snapshot(void) {
+static NSSet *Snapshot(id seq) {
     NSMutableSet *s = [NSMutableSet set];
-    for (id x in AnchoredItems(O(O(ActiveModule(), @"sequence"), @"primaryObject"))) [s addObject:[NSValue valueWithNonretainedObject:x]];
+    for (id x in AnchoredItems(O(seq, @"primaryObject"))) [s addObject:[NSValue valueWithNonretainedObject:x]];
     return s;
 }
 
@@ -95,9 +95,9 @@ static NSSet *SourceLocksBelow(id n) {
     return gCopied[Key(n)] ?: [NSSet set];
 }
 
-static BOOL FixAfterPaste(NSSet *before, BOOL ownAction) {
+// `seq` is the sequence the paste went into; `before` is its connected clips just before the paste
+static BOOL FixAfterPaste(id seq, NSSet *before, BOOL ownAction) {
     @try {
-        id seq = O(ActiveModule(), @"sequence");
         id prim = O(seq, @"primaryObject");
         if (!seq || !prim) return NO;
         NSArray *all = AnchoredItems(prim);
@@ -155,29 +155,35 @@ static BOOL FixAfterPaste(NSSet *before, BOOL ownAction) {
         return YES;
     } @catch (id e) { PL([NSString stringWithFormat:@"fix threw %@", e]); return YES; }
 }
-static void Watch(NSSet *before, int tries) {
-    // the paste may finish after a settings sheet; look for the new clips for up to ~3 seconds
+static void Watch(id seq, NSSet *before, int tries) {
+    // the paste may finish after a settings sheet; look for the new clips for up to ~3 seconds - but only
+    // in the sequence that was pasted into: `before` describes that sequence, so against any other one every
+    // connected clip would look newly pasted. Stop as soon as that timeline is closed or another one opens.
+    __weak id weakSeq = seq;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        if (!FixAfterPaste(before, YES) && tries > 0) Watch(before, tries - 1);
+        id s = weakSeq;
+        if (!s || O(ActiveModule(), @"sequence") != s) { PL(@"pasted-into timeline is no longer active; stopped watching"); return; }
+        if (!FixAfterPaste(s, before, YES) && tries > 0) Watch(s, before, tries - 1);
     });
 }
 
 static IMP o_paste, o_pasteAnchored, o_actionEnd, o_copy, o_cut;
-static NSSet *gBefore; static BOOL gPasting, gHandled;
+static NSSet *gBefore; static __weak id gSeq; static BOOL gPasting, gHandled;
 // fcp's paste runs inside its own model action; we adjust the lanes just before that action closes,
 // so the move below the locks is part of the same undo step as the paste itself.
 static BOOL h_actionEnd(id self, SEL _cmd, id name, BOOL save, NSError **err) {
-    if (gPasting && !gHandled && gBefore && self == O(ActiveModule(), @"sequence")) {
-        @try { if (FixAfterPaste(gBefore, NO)) gHandled = YES; } @catch (id e) { PL([NSString stringWithFormat:@"in-action fix threw %@", e]); gHandled = YES; }
+    if (gPasting && !gHandled && gBefore && self == gSeq) {
+        @try { if (FixAfterPaste(self, gBefore, NO)) gHandled = YES; } @catch (id e) { PL([NSString stringWithFormat:@"in-action fix threw %@", e]); gHandled = YES; }
     }
     return ((BOOL(*)(id,SEL,id,BOOL,NSError **))o_actionEnd)(self, _cmd, name, save, err);
 }
 static void PasteWrapped(id self, SEL _cmd, id sender, IMP orig) {
-    NSSet *before = Snapshot();
-    gBefore = before; gPasting = YES; gHandled = NO;
+    id seq = O(self, @"sequence");   // the timeline this paste goes into
+    NSSet *before = Snapshot(seq);
+    gBefore = before; gSeq = seq; gPasting = YES; gHandled = NO;
     @try { ((void(*)(id,SEL,id))orig)(self, _cmd, sender); }
-    @finally { gPasting = NO; gBefore = nil; }
-    if (!gHandled) Watch(before, 20);   // paste finished outside that action (e.g. after a settings sheet): fix as its own step
+    @finally { gPasting = NO; gBefore = nil; gSeq = nil; }
+    if (!gHandled && seq) Watch(seq, before, 20);   // paste finished outside that action (e.g. after a settings sheet): fix as its own step
 }
 static void h_paste(id self, SEL _cmd, id sender) { PasteWrapped(self, _cmd, sender, o_paste); }
 static void h_pasteAnchored(id self, SEL _cmd, id sender) { PasteWrapped(self, _cmd, sender, o_pasteAnchored); }

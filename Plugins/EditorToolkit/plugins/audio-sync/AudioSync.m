@@ -18,6 +18,7 @@
 #import <objc/runtime.h>
 #import <objc/message.h>
 #import <dlfcn.h>
+#import <CommonCrypto/CommonDigest.h>
 
 #pragma mark - small helpers
 static void ALog(NSString *fmt, ...) {
@@ -66,7 +67,34 @@ static NSURL *ItemURL(id item) {
     if (prim && prim != item) for (id it in (NSArray *)O(prim, @"containedItems")) { NSURL *u = ItemURL(it); if (u) return u; }
     return nil;
 }
-static NSArray *gTestSources;   // test hook: recordings by browser-clip name instead of the browser selection
+// What identifies a recording: the file itself (symlinks resolved), plus a fingerprint of its contents
+// (size + SHA-256 of the first and middle 1 MB), so the same file copied into two events or libraries
+// counts once - otherwise its two copies tie and every match looks ambiguous. Name and length don't
+// identify a recording: different recorders and cards reuse file names like ZOOM0001.WAV.
+static NSArray<NSString *> *RecordingKeys(NSURL *u) {
+    NSMutableArray *keys = [NSMutableArray arrayWithObject:[@"path:" stringByAppendingString:u.URLByResolvingSymlinksInPath.path ?: u.path]];
+    NSFileHandle *h = [NSFileHandle fileHandleForReadingFromURL:u error:nil];
+    unsigned long long size = 0;
+    if (h && [h seekToEndReturningOffset:&size error:nil] && size > 0) {
+        CC_SHA256_CTX ctx; CC_SHA256_Init(&ctx);
+        const unsigned long long chunk = 1 << 20;
+        const unsigned long long offs[2] = {0, size / 2};
+        const int n = size > 2 * chunk ? 2 : 1;   // a small file is read whole by the first chunk
+        BOOL ok = YES;
+        for (int i = 0; i < n && ok; i++) {
+            NSData *d = ([h seekToOffset:offs[i] error:nil]) ? [h readDataUpToLength:chunk error:nil] : nil;
+            if (!d.length) ok = NO; else CC_SHA256_Update(&ctx, d.bytes, (CC_LONG)d.length);
+        }
+        unsigned char md[CC_SHA256_DIGEST_LENGTH]; CC_SHA256_Final(md, &ctx);
+        if (ok) {
+            NSMutableString *hex = [NSMutableString stringWithFormat:@"data:%llu:", size];
+            for (int i = 0; i < CC_SHA256_DIGEST_LENGTH; i++) [hex appendFormat:@"%02x", md[i]];
+            [keys addObject:hex];
+        }
+    }
+    [h closeAndReturnError:nil];
+    return keys;
+}
 
 #pragma mark - audio engine
 static const double kEnvRate = 200.0;     // envelope frames per second (5 ms)
@@ -244,6 +272,7 @@ static double Pearson(const float *a, size_t na, const float *b, size_t nb, long
 @interface ASAudio : NSObject
 @property (strong) id clip; @property (copy) NSString *name; @property (strong) NSURL *url;
 @property CMTimeRange media; @property (strong) NSData *env; @property (copy) NSString *problem; @property BOOL fromTimeline; @property (strong) NSMutableArray *timelineItems;
+@property (copy) NSArray<NSString *> *keys;   // RecordingKeys
 @end
 @implementation ASAudio @end
 @interface ASMatch : NSObject
@@ -365,20 +394,21 @@ static BOOL Gather(NSMutableArray<ASVideo *> *videos, NSMutableArray<ASAudio *> 
     id tm = ActiveTM(); id seq = O(tm, @"sequence"); id prim = O(seq, @"primaryObject");
     if (!prim) { *why = @"Open a project first."; return NO; }
     NSArray *sel = ((id(*)(id, SEL, BOOL, BOOL))objc_msgSend)(tm, NSSelectorFromString(@"selectedItems:includeItemBeforePlayheadIfLast:"), NO, NO);
-    NSMutableSet *seenAudio = [NSMutableSet set];
-    NSString *(^akey)(id, NSURL *) = ^NSString *(id clip, NSURL *u) { return [NSString stringWithFormat:@"%@|%.2f", u.lastPathComponent.lowercaseString, Sec(OR(clip, @"mediaRange").duration)]; };
+    NSMutableSet *seenAudio = [NSMutableSet set];   // RecordingKeys of every recording already listed
+    BOOL (^seen)(NSArray *) = ^BOOL(NSArray *keys) { for (NSString *k in keys) if ([seenAudio containsObject:k]) return YES; return NO; };
     for (id it in sel) {
         NSURL *u = ItemURL(it);
         if (!u) continue;
         if (IsAudioOnly(it)) {   // an external recording already in the timeline
             id clip = BrowserClipForURL(u);
             if (!clip) { ALog(@"no browser clip for %@", u.path); continue; }
-            if ([seenAudio containsObject:u.path] || [seenAudio containsObject:akey(clip, u)]) {
-                for (ASAudio *x in audios) if ([x.url.path isEqualToString:u.path] && x.fromTimeline) [x.timelineItems addObject:it];
+            NSArray *keys = RecordingKeys(u);
+            if (seen(keys)) {   // the same recording again: one entry, but remember every timeline copy of it
+                for (ASAudio *x in audios) if (x.fromTimeline && [x.keys firstObjectCommonWithArray:keys]) [x.timelineItems addObject:it];
                 continue;
             }
-            ASAudio *a = [ASAudio new]; a.clip = clip; a.url = u; a.name = O(clip, @"displayName") ?: u.lastPathComponent;
-            a.media = OR(clip, @"mediaRange"); a.fromTimeline = YES; a.timelineItems = [NSMutableArray arrayWithObject:it]; [audios addObject:a]; [seenAudio addObject:u.path]; [seenAudio addObject:akey(clip, u)];
+            ASAudio *a = [ASAudio new]; a.clip = clip; a.url = u; a.keys = keys; a.name = O(clip, @"displayName") ?: u.lastPathComponent;
+            a.media = OR(clip, @"mediaRange"); a.fromTimeline = YES; a.timelineItems = [NSMutableArray arrayWithObject:it]; [audios addObject:a]; [seenAudio addObjectsFromArray:keys];
             continue;
         }
         if (!OB(it, @"hasVideo")) continue;
@@ -394,13 +424,13 @@ static BOOL Gather(NSMutableArray<ASVideo *> *videos, NSMutableArray<ASAudio *> 
         CMTimeRange tr = RangeIn(it, prim); v.tlStart = tr.start; v.lane = Lane(it);
         [videos addObject:v];
     }
-    NSArray *browserSources = BrowserSelection();
-    if (gTestSources.count) { NSMutableArray *t = [NSMutableArray array]; for (id c in AllBrowserClips()) if ([gTestSources containsObject:O(c, @"displayName") ?: @""]) [t addObject:c]; browserSources = t; }
-    for (id c in browserSources) {
+    for (id c in BrowserSelection()) {
         NSURL *u = ItemURL(c);
-        if (!u || [seenAudio containsObject:u.path] || [seenAudio containsObject:akey(c, u)] || !IsAudioOnly(c)) continue;
-        ASAudio *a = [ASAudio new]; a.clip = c; a.url = u; a.name = O(c, @"displayName") ?: u.lastPathComponent;
-        a.media = OR(c, @"mediaRange"); [audios addObject:a]; [seenAudio addObject:u.path]; [seenAudio addObject:akey(c, u)];
+        if (!u || !IsAudioOnly(c)) continue;
+        NSArray *keys = RecordingKeys(u);
+        if (seen(keys)) continue;
+        ASAudio *a = [ASAudio new]; a.clip = c; a.url = u; a.keys = keys; a.name = O(c, @"displayName") ?: u.lastPathComponent;
+        a.media = OR(c, @"mediaRange"); [audios addObject:a]; [seenAudio addObjectsFromArray:keys];
     }
     if (!videos.count) { *why = @"Nothing to sync: select the video clips and their audio recordings in the timeline first (drag a box around them, or ⌘-click each one), then choose Batch Sync Audio again."; return NO; }
     if (!audios.count) { *why = @"Only video clips are selected. Also select the external audio clips (⌘-click them in the timeline, or select the recordings in the browser), then choose Batch Sync Audio again."; return NO; }

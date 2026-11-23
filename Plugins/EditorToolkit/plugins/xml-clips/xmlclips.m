@@ -18,6 +18,21 @@ static void Collect(id item, NSMutableArray *out, int depth) {
     [out addObject:item];
     for (id a in (NSSet *)XO(item, @"anchoredItems")) Collect(a, out, depth + 1);
 }
+// What a timeline item was made from: its media assets plus, for compound and multicam clips, the clips
+// it refers to. Display names don't identify a source - camera files repeat names, and clips get renamed.
+static NSString *SourceKey(id it) {
+    NSMutableArray *parts = [NSMutableArray array];
+    for (NSString *s in @[@"assetsIncludingAnchored:", @"clipRefsIncludingAnchored:"]) {
+        SEL sel = NSSelectorFromString(s);
+        if (![it respondsToSelector:sel]) continue;
+        id c = ((id(*)(id,SEL,BOOL))objc_msgSend)(it, sel, NO);   // NO: not its connected clips (they are visited themselves)
+        if (![c conformsToProtocol:@protocol(NSFastEnumeration)]) continue;
+        for (id x in c) [parts addObject:[NSString stringWithFormat:@"%p", x]];
+    }
+    if (!parts.count) return [NSString stringWithFormat:@"item:%p", it];   // unknown: let the reveal itself decide
+    [parts sortUsingSelector:@selector(compare:)];
+    return [parts componentsJoinedByString:@","];
+}
 static void AddClipsToBrowser(void) {
     @try {
         id tm = XO(XO([NSApp delegate], @"activeEditorContainer"), @"timelineModule");
@@ -35,9 +50,10 @@ static void AddClipsToBrowser(void) {
         for (id it in items) {
             NSString *cls = NSStringFromClass([it class]);
             if (![cls containsString:@"Collection"] && ![cls containsString:@"Clip"]) continue;
-            NSString *n = XO(it, @"displayName");
-            if (!n || [seen containsObject:n]) continue;
-            [seen addObject:n];
+            NSString *n = XO(it, @"displayName") ?: cls;
+            NSString *key = SourceKey(it);
+            if ([seen containsObject:key]) continue;   // another item from the same source was already revealed
+            [seen addObject:key];
             tried++;
             @try {
                 ((void(*)(id,SEL,id))objc_msgSend)(tm, sSet, @[it]);

@@ -152,7 +152,7 @@
 			attributes = {
 				BuildIndependentTargetsInParallel = 1;
 				LastSwiftUpdateCheck = 1600;
-				LastUpgradeCheck = 2640;
+				LastUpgradeCheck = 2720;
 			};
 			buildConfigurationList = 110000000000000000000001 /* Build configuration list for PBXProject "SpliceKit" */;
 			compatibilityVersion = "Xcode 14.0";
@@ -271,6 +271,7 @@
 				COPY_PHASE_STRIP = NO;
 				DEAD_CODE_STRIPPING = YES;
 				DEBUG_INFORMATION_FORMAT = dwarf;
+				DEVELOPMENT_TEAM = A5HDJTY9X5;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_TESTABILITY = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = NO;
@@ -327,6 +328,7 @@
 				COPY_PHASE_STRIP = NO;
 				DEAD_CODE_STRIPPING = YES;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				DEVELOPMENT_TEAM = A5HDJTY9X5;
 				ENABLE_NS_ASSERTIONS = NO;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = NO;
@@ -356,7 +358,6 @@
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
 				DEAD_CODE_STRIPPING = YES;
-				DEVELOPMENT_TEAM = A5HDJTY9X5;
 				ENABLE_HARDENED_RUNTIME = YES;
 				INFOPLIST_FILE = SpliceKit/Resources/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = SpliceKit;
@@ -388,7 +389,6 @@
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
 				DEAD_CODE_STRIPPING = YES;
-				DEVELOPMENT_TEAM = A5HDJTY9X5;
 				ENABLE_HARDENED_RUNTIME = YES;
 				INFOPLIST_FILE = SpliceKit/Resources/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = SpliceKit;
@@ -432,7 +432,6 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
-
 	};
 	rootObject = 089C1665FE841187C02AAC07 /* Project object */;
 }

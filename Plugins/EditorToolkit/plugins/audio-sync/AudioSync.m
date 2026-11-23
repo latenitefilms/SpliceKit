@@ -407,7 +407,7 @@ static BOOL Gather(NSMutableArray<ASVideo *> *videos, NSMutableArray<ASAudio *> 
     if (!prim) { *why = @"Open a project first."; return NO; }
     NSArray *sel = ((id(*)(id, SEL, BOOL, BOOL))objc_msgSend)(tm, NSSelectorFromString(@"selectedItems:includeItemBeforePlayheadIfLast:"), NO, NO);
     __block NSDictionary<NSString *, NSArray *> *byPath = nil;   // built on first use
-    NSArray *(^clipsFor)(NSURL *) = ^NSArray *(NSURL *u) { if (!byPath) byPath = BrowserClipsByPath(); return byPath[u.path] ?: @[]; };
+    NSArray *(^clipsFor)(NSURL *) = ^NSArray *(NSURL *u) { if (!byPath) byPath = BrowserClipsByPath(); NSString *p = u.path; return (p ? byPath[p] : nil) ?: @[]; };   // a URL can lack a path
     NSMutableSet *seenAudio = [NSMutableSet set];   // RecordingKeys of every recording already listed
     BOOL (^seen)(NSArray *) = ^BOOL(NSArray *keys) { for (NSString *k in keys) if ([seenAudio containsObject:k]) return YES; return NO; };
     for (id it in sel) {

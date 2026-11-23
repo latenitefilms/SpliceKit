@@ -10,10 +10,10 @@ When you drag a clip (often a still) from the Browser into the timeline and chan
 
 Right after a drop into the timeline it:
 
-1. Gives each selected video clip that has no Transform of its own a default one (100%, no visible change), using Final Cut's own undoable action. Only clips you actually have selected (the ones just dropped) are touched, never the clip under the playhead.
+1. Gives each video clip the drop added that has no Transform of its own a default one (100%, no visible change), using Final Cut's own undoable action. Only clips that are new from this drop and selected afterwards (Final Cut selects what you drop) are touched: never clips that were already in the timeline or selected before, and never the clip under the playhead.
 2. Asks the Inspector to rebuild so its controls point at that Transform.
 
-It doesn't change your selection, and skips clips that already have a Transform and audio-only clips. Each drop adds one invisible "Transform" step to Undo, however many clips it covers.
+It doesn't change your selection, and skips clips that already have a Transform and audio-only clips. Each drop adds one invisible "Transform" step to Undo, however many clips it covers (if a Final Cut version lacks the sequence-level edit this relies on, it falls back to one step per clip).
 
 ## Install
 

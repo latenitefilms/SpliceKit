@@ -43,13 +43,28 @@ static BOOL HasVideo(id item) {
     SEL s = NSSelectorFromString(@"hasVideo");
     return [item respondsToSelector:s] ? ((BOOL(*)(id, SEL))objc_msgSend)(item, s) : YES;
 }
-static void EnsureTransform(NSString *why) {
+static id ActiveTM(void) { return O(O([NSApp delegate], @"activeEditorContainer"), @"timelineModule"); }
+// Every clip in a timeline by identity - spine items, what's connected to them, and the clips inside connected
+// storylines. Taken just before a drop, it tells us afterwards which clips the drop added.
+static NSHashTable *TimelineClips(id seq) {
+    NSHashTable *h = [NSHashTable hashTableWithOptions:NSPointerFunctionsWeakMemory | NSPointerFunctionsObjectPointerPersonality];
+    for (id it in (NSArray *)O(O(seq, @"primaryObject"), @"containedItems")) {
+        [h addObject:it];
+        for (id a in (NSSet *)O(it, @"anchoredItems")) { [h addObject:a]; for (id inner in (NSArray *)O(a, @"containedItems")) [h addObject:inner]; }
+    }
+    return h;
+}
+// `before`: the timeline's clips just before the drop, in sequence `seq0`
+static void EnsureTransform(NSString *why, id seq0, NSHashTable *before) {
     @try {
-        id tm = O(O([NSApp delegate], @"activeEditorContainer"), @"timelineModule");
-        // the clips that are really selected (the dropped ones). Plain -selectedItems also returns Final Cut's
-        // implicit pick under the playhead when nothing is selected, which the user never chose.
+        id tm = ActiveTM();
+        if (!seq0 || !before || O(tm, @"sequence") != seq0) return;   // no timeline then, or another one is open now
+        // Only clips the drop added, and only if they're explicitly selected (Final Cut selects what you drop).
+        // Not clips that were selected or in the timeline before (a click in the moments after a drop, or an
+        // ordinary move of clips already there), and not Final Cut's implicit pick under the playhead, which
+        // plain -selectedItems also returns when nothing is selected.
         SEL explicitSel = NSSelectorFromString(@"selectedItems:includeItemBeforePlayheadIfLast:");
-        if (![tm respondsToSelector:explicitSel]) return;
+        if (![tm respondsToSelector:explicitSel]) { RLog(@"no selectedItems:includeItemBeforePlayheadIfLast: on the timeline - can't tell which clips were dropped"); return; }
         NSArray *sel = ((id(*)(id, SEL, BOOL, BOOL))objc_msgSend)(tm, explicitSel, NO, NO);
         if (![sel isKindOfClass:[NSArray class]]) return;
         NSUInteger added = 0;
@@ -60,7 +75,7 @@ static void EnsureTransform(NSString *why) {
         BOOL wrap = [seq respondsToSelector:ab] && [seq respondsToSelector:ae], began = NO;
         @try {
             for (id item in sel) {
-                if (!HasVideo(item)) continue;
+                if ([before containsObject:item] || !HasVideo(item)) continue;
                 id stack = [item isKindOfClass:objc_getClass("FFAnchoredCollection")] ? O(item, @"videoEffects") : O(item, @"effectStack");
                 if (!stack || ![stack respondsToSelector:add] || ![stack respondsToSelector:xf] || O(stack, @"xform3DEffect")) continue;
                 if (wrap && !began) { ((void(*)(id, SEL, id, id, BOOL))objc_msgSend)(seq, ab, @"Transform", nil, NO); began = YES; }
@@ -77,8 +92,12 @@ static void EnsureTransform(NSString *why) {
 
 static IMP oConclude;
 static void hConclude(id self, SEL _cmd, id info) {
+    id seq = O(ActiveTM(), @"sequence");
+    NSHashTable *before = nil;
+    @try { before = seq ? TimelineClips(seq) : nil; } @catch (NSException *e) { RLog([NSString stringWithFormat:@"snapshot threw %@", e.reason]); }
     ((void(*)(id, SEL, id))oConclude)(self, _cmd, info);
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ EnsureTransform(@"drop into timeline"); Rebuild(@"drop into timeline"); });
+    __weak id wseq = seq;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ EnsureTransform(@"drop into timeline", wseq, before); Rebuild(@"drop into timeline"); });
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ Rebuild(@"drop into timeline (late check)"); });
 }
 

@@ -11,6 +11,8 @@
 		22C571CA2F95CEDE0069DAD2 /* SpliceKit.icon in Resources */ = {isa = PBXBuildFile; fileRef = 22C571C92F95CEDE0069DAD2 /* SpliceKit.icon */; };
 		22D74E1F2F81FBD900A9252B /* Credits.rtf in Resources */ = {isa = PBXBuildFile; fileRef = 22D74E1E2F81FBD900A9252B /* Credits.rtf */; };
 		BB0000000000000000000001 /* SpliceKitApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000000000000000000001 /* SpliceKitApp.swift */; };
+		BB000000000000000000000A /* LateNiteAppValidator.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA000000000000000000000E /* LateNiteAppValidator.swift */; };
+		BB000000000000000000000B /* LateNiteAccessPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA000000000000000000000F /* LateNiteAccessPanel.swift */; };
 		BB0000000000000000000002 /* PatcherModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000000000000000000002 /* PatcherModel.swift */; };
 		BB0000000000000000000003 /* WizardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000000000000000000003 /* WizardView.swift */; };
 		BB0000000000000000000004 /* WelcomePanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000000000000000000004 /* WelcomePanel.swift */; };
@@ -40,6 +42,8 @@
 		22D74E1E2F81FBD900A9252B /* Credits.rtf */ = {isa = PBXFileReference; lastKnownFileType = text.rtf; path = Credits.rtf; sourceTree = "<group>"; };
 		22D74E232F8235FE00A9252B /* Configuration.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Configuration.xcconfig; sourceTree = "<group>"; };
 		AA0000000000000000000001 /* SpliceKitApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpliceKitApp.swift; sourceTree = "<group>"; };
+		AA000000000000000000000E /* LateNiteAppValidator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LateNiteAppValidator.swift; sourceTree = "<group>"; };
+		AA000000000000000000000F /* LateNiteAccessPanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LateNiteAccessPanel.swift; sourceTree = "<group>"; };
 		AA0000000000000000000002 /* PatcherModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PatcherModel.swift; sourceTree = "<group>"; };
 		AA0000000000000000000003 /* WizardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WizardView.swift; sourceTree = "<group>"; };
 		AA0000000000000000000004 /* WelcomePanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WelcomePanel.swift; sourceTree = "<group>"; };
@@ -81,6 +85,7 @@
 			isa = PBXGroup;
 			children = (
 				AA0000000000000000000001 /* SpliceKitApp.swift */,
+				AA000000000000000000000E /* LateNiteAppValidator.swift */,
 			);
 			path = Code;
 			sourceTree = "<group>";
@@ -127,6 +132,7 @@
 			isa = PBXGroup;
 			children = (
 				AA0000000000000000000003 /* WizardView.swift */,
+				AA000000000000000000000F /* LateNiteAccessPanel.swift */,
 				AA0000000000000000000004 /* WelcomePanel.swift */,
 				AA0000000000000000000005 /* PatchingPanel.swift */,
 				AA0000000000000000000006 /* StatusPanel.swift */,
@@ -255,6 +261,8 @@
 			buildActionMask = 2147483647;
 			files = (
 				BB0000000000000000000001 /* SpliceKitApp.swift in Sources */,
+				BB000000000000000000000A /* LateNiteAppValidator.swift in Sources */,
+				BB000000000000000000000B /* LateNiteAccessPanel.swift in Sources */,
 				BB0000000000000000000002 /* PatcherModel.swift in Sources */,
 				BB0000000000000000000003 /* WizardView.swift in Sources */,
 				BB0000000000000000000004 /* WelcomePanel.swift in Sources */,

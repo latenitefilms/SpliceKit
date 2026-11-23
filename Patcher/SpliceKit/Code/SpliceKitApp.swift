@@ -2,26 +2,50 @@ import SwiftUI
 import Sparkle
 import AppKit
 
-// MARK: - Sparkle Auto-Update
-
 @MainActor
-final class CheckForUpdatesViewModel: ObservableObject {
-    @Published var canCheckForUpdates = false
-
-    init(updater: SPUUpdater) {
-        updater.publisher(for: \.canCheckForUpdates, options: [.initial, .new])
-            .receive(on: DispatchQueue.main)
-            .assign(to: &$canCheckForUpdates)
+private final class SpliceKitSession: ObservableObject {
+    enum Access {
+        case checking
+        case requiresApp(checkingAgain: Bool)
+        case ready(PatcherModel)
     }
-}
 
-struct CheckForUpdatesView: View {
-    @ObservedObject var viewModel: CheckForUpdatesViewModel
-    let updater: SPUUpdater
+    @Published private(set) var access: Access = .checking
+    @Published private(set) var canCheckForUpdates = false
+    private var updaterController: SPUStandardUpdaterController?
 
-    var body: some View {
-        Button("Check for Updates\u{2026}", action: updater.checkForUpdates)
-            .disabled(!viewModel.canCheckForUpdates)
+    init() {
+        checkEligibility()
+    }
+
+    func checkAgain() {
+        guard case .requiresApp(checkingAgain: false) = access else { return }
+        access = .requiresApp(checkingAgain: true)
+        checkEligibility()
+    }
+
+    private func checkEligibility() {
+        Task {
+            guard await LateNiteAppValidator.hasEligibleAppInstalled() else {
+                access = .requiresApp(checkingAgain: false)
+                return
+            }
+
+            access = .ready(PatcherModel())
+            let controller = SPUStandardUpdaterController(
+                startingUpdater: true,
+                updaterDelegate: nil,
+                userDriverDelegate: nil
+            )
+            updaterController = controller
+            controller.updater.publisher(for: \.canCheckForUpdates, options: [.initial, .new])
+                .receive(on: DispatchQueue.main)
+                .assign(to: &$canCheckForUpdates)
+        }
+    }
+
+    func checkForUpdates() {
+        updaterController?.updater.checkForUpdates()
     }
 }
 
@@ -30,34 +54,24 @@ struct CheckForUpdatesView: View {
 @main
 struct SpliceKitApp: App {
     private static let helpURL = URL(string: "https://splicekit.fcp.cafe/installation/")!
-    private let updaterController: SPUStandardUpdaterController
-    @StateObject private var checkForUpdatesVM: CheckForUpdatesViewModel
-    @StateObject private var model = PatcherModel()
-
-    init() {
-        let controller = SPUStandardUpdaterController(
-            startingUpdater: true,
-            updaterDelegate: nil,
-            userDriverDelegate: nil
-        )
-        self.updaterController = controller
-        self._checkForUpdatesVM = StateObject(wrappedValue:
-            CheckForUpdatesViewModel(updater: controller.updater)
-        )
-    }
+    @StateObject private var session = SpliceKitSession()
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some Scene {
         WindowGroup {
-            WizardView(model: model)
+            WizardView {
+                withPatcher { PatcherPanels(model: $0) }
+            }
         }
         .windowStyle(.titleBar)
         .windowResizability(.contentSize)
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active { session.checkAgain() }
+        }
         .commands {
             CommandGroup(after: .appInfo) {
-                CheckForUpdatesView(
-                    viewModel: checkForUpdatesVM,
-                    updater: updaterController.updater
-                )
+                Button("Check for Updates…", action: session.checkForUpdates)
+                    .disabled(!session.canCheckForUpdates)
             }
 
             CommandGroup(replacing: .help) {
@@ -68,8 +82,21 @@ struct SpliceKitApp: App {
         }
 
         Window("Logs", id: "log-panel") {
-            LogPanelView(model: model)
+            withPatcher { LogPanelView(model: $0) }
         }
         .defaultSize(width: 600, height: 400)
+    }
+
+    @ViewBuilder
+    private func withPatcher<Content: View>(@ViewBuilder content: (PatcherModel) -> Content) -> some View {
+        switch session.access {
+        case .checking:
+            ProgressView("Checking for a LateNite app…")
+                .padding(24)
+        case .requiresApp(let checkingAgain):
+            LateNiteAccessPanel(isChecking: checkingAgain, checkAgain: session.checkAgain)
+        case .ready(let model):
+            content(model)
+        }
     }
 }

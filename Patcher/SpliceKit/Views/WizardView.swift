@@ -1,13 +1,14 @@
 import SwiftUI
 
-struct WizardView: View {
-    @ObservedObject var model: PatcherModel
+struct WizardView<Content: View>: View {
+    @ViewBuilder let content: Content
 
     var body: some View {
         HStack(spacing: 0) {
             iconColumn
             Divider()
-            rightColumn
+            content
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .frame(width: 900, height: 470)
         .preferredColorScheme(.dark)
@@ -33,20 +34,19 @@ struct WizardView: View {
         .frame(maxHeight: .infinity)
         .background(.ultraThinMaterial)
     }
+}
 
-    // MARK: - Right Column
+struct PatcherPanels: View {
+    @ObservedObject var model: PatcherModel
 
-    private var rightColumn: some View {
-        Group {
-            switch model.currentPanel {
-            case .welcome:
-                WelcomePanel(model: model)
-            case .patching:
-                PatchingPanel(model: model)
-            case .complete:
-                StatusPanel(model: model)
-            }
+    var body: some View {
+        switch model.currentPanel {
+        case .welcome:
+            WelcomePanel(model: model)
+        case .patching:
+            PatchingPanel(model: model)
+        case .complete:
+            StatusPanel(model: model)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }

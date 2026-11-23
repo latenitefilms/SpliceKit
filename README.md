@@ -129,13 +129,13 @@ For Blackmagic RAW (`.braw`), use [BRAW Toolbox](https://brawtoolbox.io) — Spl
 
 ## Install in 60 Seconds
 
-The easiest path is the GUI patcher. Download the latest release, open it, click the button.
+The SpliceKit patcher requires a paid LateNite app, such as BRAW Toolbox or Marker Toolbox, installed from the Mac App Store. If you need to install one, the patcher shows the list of eligible apps. Return to the patcher after installation or click **Check Again** to continue. [Browse LateNite apps on the Mac App Store](https://apps.apple.com/au/developer/latenite-films-pty-ltd/id1652018641).
 
 [![Installation Guide](https://img.youtube.com/vi/NxbInKlXQVs/maxresdefault.jpg)](https://www.youtube.com/watch?v=NxbInKlXQVs)
 
 1. Download **SpliceKit** from the [latest release](https://github.com/latenitefilms/SpliceKit/releases/latest)
 2. Open the DMG, drag **SpliceKit** to **Applications**, and open the app
-3. Click **Patch** — it handles the rest
+3. Select your Final Cut Pro installation and click **Continue**
 
 <img src="Documentation/patcher-screenshot.jpg" width="500" alt="SpliceKit Patcher">
 

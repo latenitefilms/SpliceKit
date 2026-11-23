@@ -1,0 +1,7 @@
+{
+  "mcpServers": {
+    "splicekit": {
+      "command": "./build/mcp/splicekit-mcp"
+    }
+  }
+}

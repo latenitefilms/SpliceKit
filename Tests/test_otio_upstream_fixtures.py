@@ -87,11 +87,11 @@ class OTIOUpstreamFixtureTests(unittest.TestCase):
         cls.package_fixture = cls.fixture_root / "Test Library.fcpxmld"
 
     def test_transition_fixture_preserves_dissolves(self):
-        result = self.module._otio_read_fcpx_string(
+        result = self.module.otio_adapter._otio_read_fcpx_string(
             self.transitions_fixture.read_text(encoding="utf-8")
         )
-        timeline = self.module._otio_first_timeline(result)
-        summary = self.module._otio_timeline_summary(timeline)
+        timeline = self.module.otio_adapter._otio_first_timeline(result)
+        summary = self.module.otio_adapter._otio_timeline_summary(timeline)
 
         transitions = [
             item
@@ -111,10 +111,10 @@ class OTIOUpstreamFixtureTests(unittest.TestCase):
             self.assertEqual(transition.out_offset, otio.opentime.RationalTime(15, 30))
 
     def test_fcpxmld_package_fixture_reads_via_info_entrypoint(self):
-        xml = self.module._otio_read_fcpx_document(str(self.package_fixture))
-        result = self.module._otio_read_fcpx_string(xml)
-        timelines = self.module._otio_all_timelines(result)
-        names = [self.module._otio_timeline_summary(timeline)["name"] for timeline in timelines]
+        xml = self.module.otio_adapter._otio_read_fcpx_document(str(self.package_fixture))
+        result = self.module.otio_adapter._otio_read_fcpx_string(xml)
+        timelines = self.module.otio_adapter._otio_all_timelines(result)
+        names = [self.module.otio_adapter._otio_timeline_summary(timeline)["name"] for timeline in timelines]
 
         self.assertIn("<fcpxml", xml)
         projects = ET.fromstring(xml).findall(".//project")

@@ -3738,7 +3738,7 @@ static NSString *FCPStripStopWords(NSString *query) {
                 dispatch_async(dispatch_get_main_queue(), ^{
                     NSAlert *a = [[NSAlert alloc] init];
                     a.messageText = @"Silence Detector Not Found";
-                    a.informativeText = @"Re-run the SpliceKit patcher to install tools, or build from source with 'make tools'.";
+                    a.informativeText = @"Re-run the SpliceKit patcher to install tools, or build from source with 'make -f Scripts/Makefile tools'.";
                     a.alertStyle = NSAlertStyleWarning;
                     [a runModal];
                 });

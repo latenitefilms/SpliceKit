@@ -47,7 +47,7 @@ Here's the non-technical version:
    - A **Command Palette** inside FCP (press Cmd+Shift+P) where you type what you want
    - A **Transcript Panel** for text-based editing
    - An **AI assistant** (like Claude) that can run editing commands for you
-   - A **Python scripting** interface if you want to write your own automation
+   - **Lua scripts** for editing inside Final Cut Pro, or a local JSON-RPC connection from your own app
 
 Think of it like this: FCP is a car with only a steering wheel and pedals. SpliceKit adds voice control and autopilot.
 
@@ -69,7 +69,7 @@ SpliceKit uses private Final Cut Pro APIs and changes the sandbox settings on th
 - **Professional editors** -- batch export, scene detection, beat sync, and caption generation save hours on real projects
 - **Content creators** -- auto-generate TikTok/Reels-style captions, quickly cut down long recordings, batch-process clips for social media
 - **People who want AI-assisted editing** -- describe edits in plain English and let an AI handle the repetitive work for you
-- **Developers and tinkerers** -- build your own plugins in Python, Lua, or with AI assistance. The plugin framework gives you access to everything inside FCP, so you can create tools that Apple's official plugin system doesn't support
+- **Developers and tinkerers** -- write Lua or native plugins, connect an MCP client to the bundled Swift server, or call the JSON-RPC bridge from Python and other languages.
 
 The built-in plugins already handle the most common pain points. But if you ever think *"I wish FCP could do X"* -- SpliceKit probably makes it possible, and AI can help you build it even if you've never written a line of code.
 

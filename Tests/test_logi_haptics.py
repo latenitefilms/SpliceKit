@@ -18,7 +18,7 @@ class LogiHapticsIntegrationTests(unittest.TestCase):
 
     def test_native_sources_are_built_and_installed(self):
         build = subprocess.check_output(
-            ["make", "-Bn", "all"], cwd=ROOT, text=True
+            ["make", "-f", "Scripts/Makefile", "-Bn", "all"], cwd=ROOT, text=True
         )
         initializer = self.read("Sources/SpliceKit.m")
         for filename in ("SpliceKitHapticBridge.m", "SpliceKitHapticSnapEmitters.m"):

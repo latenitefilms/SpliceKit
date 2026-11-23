@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - 'Documentation/**'
+      - 'Website/**'
       - '.github/workflows/documentation.yml'
   workflow_dispatch:
 
@@ -24,9 +25,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/configure-pages@v5
+      - name: Assemble Pages source
+        run: |
+          mkdir -p _pages
+          cp -R Documentation/. _pages/
+          cp -R Website/. _pages/
       - uses: actions/jekyll-build-pages@v1
         with:
-          source: ./Documentation
+          source: ./_pages
           destination: ./_site
       - uses: actions/upload-pages-artifact@v3
 

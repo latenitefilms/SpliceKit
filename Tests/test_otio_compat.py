@@ -152,7 +152,7 @@ class OTIOCompatTests(unittest.TestCase):
     def test_adapter_candidates_prefer_modern_fcpxml_name(self):
         with self.fake_otio(available_adapters=["fcpx_xml", "fcpxml"]):
             self.assertEqual(
-                self.module._otio_fcpx_adapter_candidates(),
+                self.module.otio_adapter._otio_fcpx_adapter_candidates(),
                 ["fcpxml", "fcpx_xml"],
             )
 
@@ -166,7 +166,7 @@ class OTIOCompatTests(unittest.TestCase):
                     raise RuntimeError("missing plugin")
                 return "ok"
 
-            self.assertEqual(self.module._otio_with_fcpx_adapter(operation), "ok")
+            self.assertEqual(self.module.otio_adapter._otio_with_fcpx_adapter(operation), "ok")
             self.assertEqual(calls, ["fcpxml", "fcpx_xml"])
 
     def test_prepare_for_fcp_preserves_title_generators_across_metadata_variants(self):
@@ -185,7 +185,7 @@ class OTIOCompatTests(unittest.TestCase):
             )
             timeline = FakeTimeline(tracks=[FakeTrack([title_kind, title_params, non_title])])
 
-            prepared = self.module._otio_prepare_for_fcp(timeline)
+            prepared = self.module.otio_adapter._otio_prepare_for_fcp(timeline)
 
             self.assertIs(prepared.tracks[0][0], title_kind)
             self.assertIs(prepared.tracks[0][1], title_params)
@@ -204,8 +204,8 @@ class OTIOCompatTests(unittest.TestCase):
                 name="Library",
             )
 
-            self.assertEqual(self.module._otio_all_timelines(result), [timeline_a, timeline_b])
-            self.assertIs(self.module._otio_first_timeline(result), timeline_a)
+            self.assertEqual(self.module.otio_adapter._otio_all_timelines(result), [timeline_a, timeline_b])
+            self.assertIs(self.module.otio_adapter._otio_first_timeline(result), timeline_a)
 
     def test_read_fcpx_document_reads_package_entrypoint(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -215,7 +215,7 @@ class OTIOCompatTests(unittest.TestCase):
             info_path.write_text("<fcpxml version='1.14'/>", encoding="utf-8")
 
             self.assertEqual(
-                self.module._otio_read_fcpx_document(str(package_path)),
+                self.module.otio_adapter._otio_read_fcpx_document(str(package_path)),
                 "<fcpxml version='1.14'/>",
             )
 
@@ -225,7 +225,7 @@ class OTIOCompatTests(unittest.TestCase):
             package_path.mkdir()
 
             with self.assertRaisesRegex(FileNotFoundError, "Info.fcpxml"):
-                self.module._otio_read_fcpx_document(str(package_path))
+                self.module.otio_adapter._otio_read_fcpx_document(str(package_path))
 
     def test_write_fcpx_string_passes_version_to_modern_adapter(self):
         calls = []
@@ -236,7 +236,7 @@ class OTIOCompatTests(unittest.TestCase):
 
         with self.fake_otio(available_adapters=["fcpxml"], write_to_string=write_to_string):
             self.assertEqual(
-                self.module._otio_write_fcpx_string(FakeTimeline(), fcpxml_version="1.10"),
+                self.module.otio_adapter._otio_write_fcpx_string(FakeTimeline(), fcpxml_version="1.10"),
                 "xml",
             )
 
@@ -253,7 +253,7 @@ class OTIOCompatTests(unittest.TestCase):
 
         with self.fake_otio(available_adapters=["fcpx_xml"], write_to_string=write_to_string):
             self.assertEqual(
-                self.module._otio_write_fcpx_string(FakeTimeline(), fcpxml_version="1.10"),
+                self.module.otio_adapter._otio_write_fcpx_string(FakeTimeline(), fcpxml_version="1.10"),
                 "legacy-xml",
             )
 

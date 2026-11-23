@@ -10,7 +10,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 PROBE_DIR = REPO_ROOT / "Tools" / "audio-bus-probe-au"
 SOURCE = PROBE_DIR / "SpliceKitAudioBusProbe.c"
 INFO_PLIST = PROBE_DIR / "Info.plist"
-MAKEFILE = REPO_ROOT / "Makefile"
+MAKEFILE = REPO_ROOT / "Scripts" / "Makefile"
 READER = PROBE_DIR / "read_probe.py"
 
 

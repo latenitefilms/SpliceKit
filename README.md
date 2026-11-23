@@ -9,7 +9,7 @@
 
 | 🎹 Command Palette | 🤖 MCP Server | 🧩 Plugin Framework |
 |---|---|---|
-| Hit `Cmd+Shift+P` and type what you want. Apple Intelligence runs it. | Any LLM can read and edit your timeline — and build new tools as it goes. | Every built-in feature is just an example plugin. You (or an AI) can ship more. |
+| Hit `Cmd+Shift+P` and type what you want. Apple Intelligence runs it. | Connect an MCP client to edit your timeline and use tools from installed plugins. | Every built-in feature is just an example plugin. You (or an AI) can ship more. |
 
 > **Editor? Start here.** The [official SpliceKit site](https://splicekit.fcp.cafe) and the [FAQ](https://splicekit.fcp.cafe/faq/) are the friendliest way in. Questions, help, or feature requests? Join the SpliceKit channels on the [FCP Cafe Discord](https://discord.com/invite/HD3FPc4Azu). Bug reports: [open a GitHub issue](https://github.com/latenitefilms/SpliceKit/issues).
 >
@@ -41,29 +41,17 @@ Hit **Cmd+Shift+P** inside the patched FCP. Fuzzy-search 100+ built-in editing a
 
 ### 🤖 2. The MCP Server
 
-*Claude (or any other LLM) can drive your editor — and teach it new tricks.*
-
-SpliceKit ships with an MCP server that exposes ~200 tools covering every major FCP subsystem. Point **Claude Code**, **Claude Desktop**, or any MCP-compatible AI client at it and you can say things like:
+SpliceKit’s Swift MCP server provides 189 built-in tools, 10 resources and seven editing prompts. Connect **Claude Code**, **Claude Desktop**, or another MCP client to request edits like these.
 
 - *"cut this 40-minute interview down to its best moments"*
 - *"remove the silences from this podcast, add captions, and export"*
 - *"assemble a rough cut from these clips, synced to the beat of this song"*
 
-It's not a chat wrapper around keyboard shortcuts. The MCP talks to FCP's internal ObjC runtime directly — so it can read timeline state, inspect clips, blade, retime, color-correct, apply effects, and render without ever touching the UI.
+The server sends commands to the SpliceKit bridge inside Final Cut Pro. It can inspect clips, blade, retime, color-correct, apply effects and render using the editor’s own methods.
 
-#### The editor that gets smarter every week
+#### Reusing an editing workflow
 
-The first time you ask for something complicated, the AI might be a little clumsy. It's improvising — stitching together primitives, trial-and-error against your timeline, occasionally picking the long way around.
-
-When that happens, don't settle for the workaround. **Tell it to build the ability.**
-
-| Step | What happens |
-|---|---|
-| **1. Ask** | You request something complex. The LLM improvises with the primitives it has. |
-| **2. Build** | You say "make this a real command." Claude writes a plugin, registers a new MCP tool, and wires it into your editor. |
-| **3. Reuse** | Next time — or the hundredth time after that — it's instant, reliable, and shared with everyone running the same plugin. |
-
-> Every clumsy first attempt is a prompt to turn that workflow into a first-class feature. The editor you use six months from now is smarter than the one you installed today — and most of that improvement won't come from the SpliceKit team. It'll come from you, and from the community shipping plugins back.
+A plugin can register a named editing command with SpliceKit. The Swift server discovers those commands when the client first lists its tools. After you install or update a plugin, call `reload_plugin_tools` to refresh the list for the current session.
 
 ---
 
@@ -81,7 +69,7 @@ SpliceKit isn't a feature list — it's a platform. Once the SpliceKit dylib is 
 - Expose new tools over the MCP server
 - Hook into timeline events, selection changes, and playback
 - Ship custom Motion templates, FxPlug effects, and Workflow Extensions
-- Be written in Objective-C / C++, Swift, Lua, or Python
+- Use Lua or a native library for an in-process plugin. External tools can use any language that speaks JSON-RPC.
 
 #### And you can ask an AI to build one
 
@@ -130,7 +118,7 @@ Paste a YouTube, Vimeo, or Twitter link and pull it into your library as a real 
 One command, every clip on your timeline exports as its own file — all effects, color grades, and transitions baked in.
 
 ### Native VP9 and MKV/WebM Support
-The source checkout includes a VP9 decoder and an MKV/WebM format reader. Running `make deploy` installs both bundles into the patched copy of Final Cut Pro.
+The source checkout includes a VP9 decoder and an MKV/WebM format reader. Running `make -f Scripts/Makefile deploy` installs both bundles into the patched copy of Final Cut Pro.
 
 For Blackmagic RAW (`.braw`), use [BRAW Toolbox](https://brawtoolbox.io) — SpliceKit no longer includes its own BRAW support.
 
@@ -161,62 +149,23 @@ To patch from a source checkout, run `./Patcher/patch_fcp.sh`.
 
 ## Connect It to Claude (or any MCP client)
 
-The MCP server needs Python 3.10 or newer. Set up its virtual environment once, then point your MCP client at the server.
-
-### From a source checkout
-
-```bash
-make mcp-setup
-```
-
-That creates an isolated Python virtualenv at `~/.venvs/splicekit-mcp` and installs the dependencies in `MCP/requirements.txt`.
-
-### From the installed app
-
-```bash
-python3 -m venv ~/.venvs/splicekit-mcp
-~/.venvs/splicekit-mcp/bin/python -m pip install -r "/Applications/SpliceKit.app/Contents/Resources/mcp/requirements.txt"
-```
-
-### Verify everything is wired up
-
-```bash
-make mcp-doctor
-```
-
-Run this from the source checkout to check the virtual environment, the MCP client configuration and the connection to the FCP bridge on `127.0.0.1:9876`.
-
-### Point your MCP client at the server
-
-Use the virtual environment's Python as the MCP `command`. The `args` path depends on how you installed SpliceKit:
-
-**From a repo checkout:**
+Point your MCP client at the Swift executable inside the installed patcher. It communicates over standard input and output. Tool discovery works with Final Cut Pro closed. Open the patched copy of Final Cut Pro to use editing tools.
 
 ```json
 {
   "mcpServers": {
     "splicekit": {
-      "command": "/Users/yourname/.venvs/splicekit-mcp/bin/python",
-      "args": ["/absolute/path/to/SpliceKit/MCP/server.py"]
+      "command": "/Applications/SpliceKit.app/Contents/Resources/mcp/splicekit-mcp"
     }
   }
 }
 ```
 
-**From the packaged installer:**
+**Building in Xcode.** Build the `SpliceKit` scheme in `Patcher/SpliceKit.xcodeproj`. The build also writes `build/mcp/splicekit-mcp` in the checkout. The included `.mcp.json` uses that executable. For clients started elsewhere, set `command` to its absolute path. From Terminal, `make -f Scripts/Makefile mcp-setup` builds the same server and `make -f Scripts/Makefile mcp-doctor` checks the executable, client configuration, and bridge.
 
-```json
-{
-  "mcpServers": {
-    "splicekit": {
-      "command": "/Users/yourname/.venvs/splicekit-mcp/bin/python",
-      "args": ["/Applications/SpliceKit.app/Contents/Resources/mcp/server.py"]
-    }
-  }
-}
-```
+**Optional OpenTimelineIO adapters.** Direct FCPXML import and export use Final Cut Pro. For interchange formats such as EDL or AAF, install OpenTimelineIO and the adapters for those formats in a Python environment. Set `SPLICEKIT_OTIO_PYTHON` in the MCP client’s `env` to that environment’s Python executable. The server also looks in `~/.venvs/splicekit-otio` and the earlier `~/.venvs/splicekit-mcp` environment. The Swift server itself runs without Python. The optional Gemma engine inside Final Cut Pro uses Python and `mlx-lm`.
 
-The MCP server connects to the SpliceKit bridge running inside Final Cut Pro on `127.0.0.1:9876` — so the patched Final Cut Pro has to be running.
+**Developer tools.** The checkout retains the 220-tool Python MCP entry point, including 31 additional developer commands. To use it, install `MCP/requirements.txt` in a virtual environment, launch that interpreter as the MCP command, and pass the absolute path to `MCP/server.py` as its argument. The Swift editing tools accept the same arguments. Some return their results as JSON instead of formatted text.
 
 ---
 
@@ -250,7 +199,7 @@ SpliceKit injects a dynamic library into a re-signed copy of Final Cut Pro. Once
 │  ┌───────────────────────────────────────┐  │
 │  │  SpliceKit.framework (LC_LOAD_DYLIB)  │  │
 │  │  ├── Command Palette                  │  │
-│  │  ├── MCP / JSON-RPC server on :9876   │  │
+│  │  ├── JSON-RPC bridge on :9876         │  │
 │  │  ├── Plugin loader (hot-reload)       │  │
 │  │  └── your plugins here                │  │
 │  └───────────┬───────────────────────────┘  │
@@ -261,16 +210,16 @@ SpliceKit injects a dynamic library into a re-signed copy of Final Cut Pro. Once
 └──────────────────────┬──────────────────────┘
                        │ TCP :9876
         ┌──────────────▼──────────────┐
-        │  MCP server / Python REPL / │
-        │  nc / curl / Lua / your app │
+        │  Swift MCP server or other  │
+        │  JSON-RPC clients           │
         └─────────────────────────────┘
 ```
 
 ### Ways to build
 
 - **Native plugins** — see [EditorToolkit](Plugins/EditorToolkit/README.md) for Objective-C plugins and their build settings.
-- **Lua, inside FCP** — Ctrl+Opt+L opens a REPL with an `sk` module. The [Hello World plugin](Examples/plugins/com.splicekit.hello-world) shows how to register a command. The bundled examples and menu scripts live in [Lua Scripts](Lua%20Scripts). See the [Lua SDK reference](Documentation/LUA_SDK_REFERENCE.md).
-- **Python / any language with a TCP socket** — `python3 Examples/splicekit_client.py` gives you an interactive runtime REPL. Or: `echo '{"jsonrpc":"2.0","method":"system.version","id":1}' | nc 127.0.0.1 9876`
+- **Lua, inside FCP** — Ctrl+Opt+L opens a REPL with the `sk` module. Browse the [bundled scripts](Lua%20Scripts) and [Lua SDK reference](Documentation/LUA_SDK_REFERENCE.md).
+- **Direct JSON-RPC** — any language with a TCP socket can use the bridge. To read its version, run `echo '{"jsonrpc":"2.0","method":"system.version","id":1}' | nc 127.0.0.1 9876`.
 - **MCP tools** — expose your plugin's capabilities as MCP tools and any AI client can drive them.
 - **Ask an AI to build it** — the API reference in `Documentation/` is written to be AI-consumable. Describe what you want, hand the spec to Claude, and it can write the plugin for you.
 - **Open a PR to SpliceKit itself** — if the thing you built is useful to other editors, send it upstream. The bundled "features" (Text-Based Editor, Silence Remover, LiveCam, Song Cut, etc.) all started as plugins. Fork the repo, drop your plugin in `Plugins/` or `Sources/`, and open a [pull request](https://github.com/latenitefilms/SpliceKit/pulls) — community plugins are how SpliceKit grows.
@@ -300,12 +249,14 @@ SpliceKit injects a dynamic library into a re-signed copy of Final Cut Pro. Once
 ```bash
 git clone https://github.com/latenitefilms/SpliceKit.git
 cd SpliceKit
-make all tools
+open Patcher/SpliceKit.xcodeproj
 ```
 
-The first build downloads Lua 5.4.9, checks its SHA-256, and links it into the universal SpliceKit dylib. Subsequent builds reuse the copy under `build/`. For an offline build, pass `LUA_URL=file:///absolute/path/to/lua-5.4.9.tar.gz` to `make`. The packaged app includes the Lua runtime.
+The first build resolves the Swift packages and downloads Lua 5.4.9. It verifies the Lua archive’s SHA-256 and links Lua into the universal SpliceKit dylib. Subsequent builds reuse the copy under `build/`. To build offline, cache the resolved Swift packages and supply a local Lua archive with the Xcode build setting `LUA_URL=file:///absolute/path/to/lua-5.4.9.tar.gz`.
 
-Open `Patcher/SpliceKit.xcodeproj` to build the macOS patcher. Use `make deploy` to update an existing patched copy of Final Cut Pro. Run the offline test suite from the repository root with `python3 -m unittest discover -s Tests`. The programs in `Tests/live/` exercise a running Final Cut Pro.
+Build the **SpliceKit** scheme in Xcode. Its Release configuration builds the MCP server and the transcription helpers for Apple silicon and Intel. The project invokes `Scripts/Makefile` for the bridge and companion executables. Use `make -f Scripts/Makefile deploy` to update an existing patched copy of Final Cut Pro. Run the native server tests with `swift test --package-path MCP` and the development suite with `python3 -m unittest discover -s Tests`. The programs in `Tests/live/` exercise a running Final Cut Pro.
+
+For a public release, `./Scripts/release.sh <version> "<release notes>"` signs and notarizes the DMG and publishes it to GitHub Releases. It updates `Website/appcast.xml` and `Documentation/releasenotes.html`. The Pages workflow serves both files at the site root.
 
 ### Documentation map
 

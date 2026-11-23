@@ -2,19 +2,21 @@
 set -e
 
 # SpliceKit Release Script — fully automated
-# Usage: ./release.sh <version> "<release notes>"
-# Example: ./release.sh 3.0.0 "New feature X, fix Y"
+# Usage: ./Scripts/release.sh <version> "<release notes>"
+# Example: ./Scripts/release.sh 3.0.0 "New feature X, fix Y"
 
 VERSION="$1"
 NOTES="$2"
 if [ -z "$VERSION" ]; then
-    echo "Usage: ./release.sh <version> [\"release notes\"]"
-    echo "Example: ./release.sh 3.0.0 \"Wizard UI, DMG distribution\""
+    echo "Usage: $0 <version> [\"release notes\"]"
+    echo "Example: $0 3.0.0 \"Wizard UI, DMG distribution\""
     exit 1
 fi
 if [ -z "$NOTES" ]; then
     NOTES="Bug fixes and improvements"
 fi
+
+cd -- "$(dirname "$0")/.."
 
 SIGN_ID="${SIGN_ID:-Developer ID Application: LateNite Films Pty Ltd (A5HDJTY9X5)}"
 KEYCHAIN_PROFILE="${KEYCHAIN_PROFILE:-SpliceKit}"
@@ -29,6 +31,7 @@ DMG_PATH="Patcher/${DMG_NAME}"
 SPARKLE_SIGN="/tmp/bin/sign_update"
 SPARKLE_GENERATE_KEYS="/tmp/bin/generate_keys"
 PATCHER_INFO_PLIST="Patcher/SpliceKit/Resources/Info.plist"
+APPCAST_FILE="Website/appcast.xml"
 RELEASE_NOTES_URL="${RELEASE_NOTES_URL:-https://latenitefilms.github.io/SpliceKit/releasenotes.html}"
 RELEASE_NOTES_FILE="${RELEASE_NOTES_FILE:-Documentation/releasenotes.html}"
 
@@ -199,17 +202,10 @@ echo "[1/15] Bumping version to ${VERSION}..."
 update_version_file
 
 echo "[2/15] Building SpliceKit dylib + tools..."
-make clean
-make
-make tools
-make symbols
+make -f Scripts/Makefile clean
+make -f Scripts/Makefile all tools symbols
 
-echo "[3/15] Building transcription helpers..."
-for tool in parakeet-transcriber whisper-transcriber; do
-    swift build -c release --arch arm64 --arch x86_64 --package-path "Tools/$tool"
-done
-
-echo "[4/15] Building SpliceKit app via Xcode..."
+echo "[3–4/15] Building the SpliceKit app and transcription helpers via Xcode..."
 xcodebuild -project "${XCODE_PROJECT}" \
     -scheme SpliceKit \
     -configuration Release \
@@ -242,9 +238,9 @@ echo "  Built: $(lipo -info "${INSERT_DYLIB_BIN}")"
 
 echo "[5/15] Adding the release helper to the app..."
 APP_RES="${BUILT_APP}/Contents/Resources"
-for tool in parakeet-transcriber whisper-transcriber; do
-    lipo "${APP_RES}/tools/$tool" -verify_arch arm64
-    lipo "${APP_RES}/tools/$tool" -verify_arch x86_64
+for helper in tools/parakeet-transcriber tools/whisper-transcriber mcp/splicekit-mcp; do
+    lipo "${APP_RES}/$helper" -verify_arch arm64
+    lipo "${APP_RES}/$helper" -verify_arch x86_64
 done
 cp "${INSERT_DYLIB_BIN}" "${APP_RES}/tools/insert_dylib"
 chmod +x "${APP_RES}/tools/insert_dylib"
@@ -334,7 +330,7 @@ FILE_SIZE=$(stat -f%z "${DMG_PATH}")
 PUB_DATE=$(date -u "+%a, %d %b %Y %H:%M:%S +0000")
 echo "  Signature: ${SPARKLE_SIG}"
 
-echo "[13/15] Updating appcast.xml..."
+echo "[13/15] Updating ${APPCAST_FILE}..."
 # Build the new item XML
 NEW_ITEM="    <item>
       <title>SpliceKit v${VERSION}</title>
@@ -351,21 +347,18 @@ NEW_ITEM="    <item>
     </item>"
 
 # Insert after <language>en</language>
-python3 -c "
+python3 - "${APPCAST_FILE}" "${NEW_ITEM}" <<'PY'
+from pathlib import Path
 import sys
-with open('appcast.xml', 'r') as f:
-    content = f.read()
+
+path = Path(sys.argv[1])
+content = path.read_text(encoding='utf-8')
 marker = '<language>en</language>'
-idx = content.find(marker)
-if idx == -1:
-    print('ERROR: Could not find marker in appcast.xml', file=sys.stderr)
-    sys.exit(1)
-insert_pos = idx + len(marker)
-new_content = content[:insert_pos] + '\n' + '''${NEW_ITEM}''' + content[insert_pos:]
-with open('appcast.xml', 'w') as f:
-    f.write(new_content)
+if marker not in content:
+    raise SystemExit(f'ERROR: Could not find marker in {path}')
+path.write_text(content.replace(marker, marker + '\n' + sys.argv[2], 1), encoding='utf-8')
 print('  Appcast updated')
-"
+PY
 
 echo "  Updating ${RELEASE_NOTES_FILE}..."
 update_release_notes_html
@@ -375,7 +368,7 @@ update_release_notes_html
 # ──────────────────────────────────────────────
 
 echo "[14/15] Committing and pushing..."
-git add appcast.xml "${VERSION_FILE}" "${RELEASE_NOTES_FILE}"
+git add -- "${APPCAST_FILE}" "${VERSION_FILE}" "${RELEASE_NOTES_FILE}"
 git commit -m "Release v${VERSION}: ${NOTES}"
 git push "${PUSH_REMOTE}" "HEAD:${PUSH_BRANCH}"
 

@@ -62,7 +62,7 @@ The build target writes a `.link` file pointing at
 then `open loupedeck:plugin/FCPHaptics/reload`s the running service so the
 plugin shows up live without restarting Logi Options+.
 
-The main `make deploy` build includes `Sources/SpliceKitHapticBridge.m`.
+The main `make -f Scripts/Makefile deploy` build includes `Sources/SpliceKitHapticBridge.m`.
 `appDidLaunch` in `Sources/SpliceKit.m` installs the haptics bridge.
 
 ## Testing
@@ -149,5 +149,5 @@ Adding a new FCP haptic event takes four edits:
    `description` block.
 4. **`events/extra/eventMapping.yaml`** → map the new event to a waveform.
 
-Rebuild SpliceKit (`make deploy && restart FCP`), rebuild the plugin
+Rebuild SpliceKit (`make -f Scripts/Makefile deploy && restart FCP`), rebuild the plugin
 (`dotnet build`), retest.

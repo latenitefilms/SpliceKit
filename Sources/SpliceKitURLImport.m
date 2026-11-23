@@ -527,7 +527,7 @@ static NSString *SpliceKitURLImportProviderDependencyMessage(NSString *provider,
         ? [missing componentsJoinedByString:@" and "]
         : @"yt-dlp and ffmpeg";
     return [NSString stringWithFormat:
-        @"%@ import requires %@. SpliceKit looks in ~/Applications/SpliceKit/tools, your PATH, and common package-manager locations. If they're already installed somewhere custom, run `make url-import-tools` or symlink them into ~/Applications/SpliceKit/tools/.",
+        @"%@ import requires %@. SpliceKit looks in ~/Applications/SpliceKit/tools, your PATH, and common package-manager locations. If they're already installed somewhere custom, run `make -f Scripts/Makefile url-import-tools` or symlink them into ~/Applications/SpliceKit/tools/.",
         label, missingList];
 }
 
@@ -571,7 +571,7 @@ static NSDictionary *SpliceKitURLImportFFprobeJSONForPath(NSString *path, NSStri
     NSString *ffprobe = SpliceKitURLImportFFprobePath();
     if (ffprobe.length == 0) {
         if (outError) {
-            *outError = @"SpliceKit could not find ffprobe to inspect this Matroska/WebM source. Run `make url-import-tools` or put ffprobe in ~/Applications/SpliceKit/tools/.";
+            *outError = @"SpliceKit could not find ffprobe to inspect this Matroska/WebM source. Run `make -f Scripts/Makefile url-import-tools` or put ffprobe in ~/Applications/SpliceKit/tools/.";
         }
         return nil;
     }
@@ -1915,7 +1915,7 @@ static void SpliceKitURLImportResolveProviderURL(NSString *provider,
                       state:SpliceKitURLImportStateFailed
                     message:[NSString stringWithFormat:@"%@ requires ffmpeg.",
                              [operationLabel capitalizedString]]
-                      error:@"SpliceKit could not find ffmpeg to normalize this media without transcoding. Run `make url-import-tools` or put ffmpeg in ~/Applications/SpliceKit/tools/."];
+                      error:@"SpliceKit could not find ffmpeg to normalize this media without transcoding. Run `make -f Scripts/Makefile url-import-tools` or put ffmpeg in ~/Applications/SpliceKit/tools/."];
             return;
         }
 

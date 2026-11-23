@@ -1,5 +1,7 @@
 # SpliceKit Caption System — Complete Technical Internals
 
+The shipped Swift MCP server routes caption tools through `MCP/Sources/SpliceKitMCP/EditingRequests.swift`. References to `MCP/server.py` below describe the Python developer entry point.
+
 ## Table of Contents
 
 1. [Architecture Overview](#1-architecture-overview)

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-SpliceKit MCP Server — the bridge between AI tools and Final Cut Pro.
+SpliceKit's optional Python MCP server for development and runtime inspection.
 
 This is the MCP (Model Context Protocol) server that Claude and other AI tools
 talk to. It exposes FCP's entire editing API as MCP tools. Under the hood, each
@@ -26,9 +26,7 @@ except ModuleNotFoundError as exc:
         sys.stderr.write(
             "\n[splicekit-mcp] The `mcp` Python package is not installed for "
             f"this interpreter ({sys.executable}).\n"
-            "Set up the recommended virtualenv and re-launch your MCP client:\n\n"
-            "    make mcp-setup\n\n"
-            "Or manually:\n"
+            "To use the Python developer server, install its dependencies:\n\n"
             "    python3 -m venv ~/.venvs/splicekit-mcp\n"
             "    ~/.venvs/splicekit-mcp/bin/python -m pip install -r "
             f"{shlex.quote(str(Path(__file__).resolve().with_name('requirements.txt')))}\n"
@@ -1643,7 +1641,7 @@ def generate_fcpxml(event_name: str = "SpliceKit Event", project_name: str = "Sp
 
     # Serialize to FCPXML via the adapter
     try:
-        xml = _otio_write_fcpx_string(timeline)
+        xml = otio_adapter._otio_write_fcpx_string(timeline)
     except Exception as e:
         # Fall back to direct construction on adapter failure
         return _generate_fcpxml_direct(event_name, project_name, frame_rate, width, height, spine_items, markers)
@@ -4164,232 +4162,12 @@ def export_xml(path: str = "/tmp/splicekit_export.fcpxml") -> str:
 # the otio-fcpx-xml-adapter. Replaces import_fcpxml / export_xml
 # as the primary format tools.
 
-def _otio_prepare_for_fcp(timeline):
-    """Prepare an OTIO timeline for FCP import.
+# The developer server may be launched by path, outside a Python package.
+import importlib.util
 
-    - Converts non-title GeneratorReference clips to gaps
-    - Preserves title generators (the adapter writes them as <title> elements)
-    - Returns the modified timeline (in-place)
-    """
-    import opentimelineio as otio
-    if not isinstance(timeline, otio.schema.Timeline):
-        return timeline
-    for track in timeline.tracks:
-        for i, item in enumerate(list(track)):
-            if (isinstance(item, otio.schema.Clip) and
-                    isinstance(item.media_reference, otio.schema.GeneratorReference)):
-                if not _otio_is_title_generator_reference(item.media_reference):
-                    track[i] = otio.schema.Gap(source_range=item.source_range)
-    return timeline
-
-
-def _otio_is_title_generator_reference(media_reference):
-    """Detect title-like GeneratorReference metadata across adapter variants."""
-    title_generator_kinds = {"Title", "title", "fcpx.title"}
-    gen_kind = getattr(media_reference, "generator_kind", "")
-    if gen_kind in title_generator_kinds:
-        return True
-
-    parameters = getattr(media_reference, "parameters", {}) or {}
-    if not isinstance(parameters, dict):
-        return False
-    return bool(parameters.get("text_xml") or parameters.get("text_style_def_xml"))
-
-
-def _otio_fcpx_adapter_candidates():
-    """Return compatible FCPXML adapter names in preference order."""
-    import opentimelineio as otio
-
-    preferred = ("fcpxml", "fcpx_xml")
-    try:
-        available = set(otio.adapters.available_adapter_names())
-    except Exception:
-        available = set()
-
-    ordered = [name for name in preferred if name in available]
-    if ordered:
-        return ordered
-    return list(preferred)
-
-
-def _otio_with_fcpx_adapter(operation):
-    """Run an OTIO adapter operation against the supported FCPXML adapter names."""
-    errors = []
-    for adapter_name in _otio_fcpx_adapter_candidates():
-        try:
-            return operation(adapter_name)
-        except Exception as exc:
-            errors.append(f"{adapter_name}: {exc}")
-    raise RuntimeError("No working FCPXML adapter found (" + "; ".join(errors) + ")")
-
-
-def _otio_read_fcpx_string(fcpxml_str):
-    """Read FCPXML using whichever adapter name is installed."""
-    import opentimelineio as otio
-
-    return _otio_with_fcpx_adapter(
-        lambda adapter_name: otio.adapters.read_from_string(fcpxml_str, adapter_name)
-    )
-
-
-def _otio_write_fcpx_string(timeline, fcpxml_version=None):
-    """Write FCPXML using whichever adapter name is installed.
-
-    The modern PR #7 adapter accepts ``fcpxml_version`` for version-aware
-    FCPXML 1.0-1.14 output. Older adapters reject that kwarg, so retry without
-    it before moving to the next adapter name.
-    """
-    import opentimelineio as otio
-
-    def write(adapter_name):
-        if fcpxml_version:
-            try:
-                return otio.adapters.write_to_string(
-                    timeline,
-                    adapter_name,
-                    fcpxml_version=fcpxml_version,
-                )
-            except TypeError as exc:
-                if "fcpxml_version" not in str(exc):
-                    raise
-        return otio.adapters.write_to_string(timeline, adapter_name)
-
-    return _otio_with_fcpx_adapter(write)
-
-
-def _otio_fcpxmld_info_path(package_path):
-    """Return the FCPXML document entrypoint for a `.fcpxmld` package."""
-    from pathlib import Path
-
-    package = Path(package_path)
-    if not package.exists():
-        raise FileNotFoundError(f"FCPXML package does not exist: '{package}'.")
-    if not package.is_dir():
-        raise NotADirectoryError(f"FCPXML package path is not a directory: '{package}'.")
-
-    info_path = package / "Info.fcpxml"
-    if not info_path.is_file():
-        raise FileNotFoundError(f"FCPXML package is missing 'Info.fcpxml': '{package}'.")
-    return info_path
-
-
-def _otio_read_fcpx_document(path):
-    """Read a `.fcpxml` document or `.fcpxmld` package entrypoint."""
-    from pathlib import Path
-
-    document_path = Path(path)
-    if document_path.is_dir() or document_path.suffix.lower() == ".fcpxmld":
-        document_path = _otio_fcpxmld_info_path(document_path)
-
-    return document_path.read_text(encoding="utf-8")
-
-
-def _otio_fcpxml_clean_for_paste(fcpxml_str):
-    """Clean FCPXML for FCP's pasteboard import.
-
-    - Strips <library> wrapper (pasteboard merges into active library)
-    - Strips standalone <asset-clip> elements at event level (browser clutter)
-    """
-    lines = fcpxml_str.split("\n")
-    clean = []
-    for line in lines:
-        s = line.strip()
-        if s in ("<library>", "</library>"):
-            continue
-        if s.startswith("<asset-clip ") and s.endswith("/>"):
-            if (len(line) - len(line.lstrip())) <= 16:
-                continue
-        clean.append(line)
-    return "\n".join(clean)
-
-
-def _otio_first_timeline(result):
-    """Extract the first Timeline from an OTIO read result."""
-    timelines = _otio_all_timelines(result, collection_fallback=False)
-    if timelines:
-        return timelines[0]
-    return result
-
-def _otio_all_timelines(result, collection_fallback=True):
-    """Extract all Timelines from an OTIO read result."""
-    import opentimelineio as otio
-    if isinstance(result, otio.schema.Timeline):
-        return [result]
-    if isinstance(result, otio.schema.SerializableCollection):
-        timelines = []
-        if hasattr(result, "find_children"):
-            timelines = list(result.find_children(descended_from_type=otio.schema.Timeline))
-        if not timelines:
-            timelines = [
-                child
-                for item in result
-                for child in _otio_all_timelines(item, collection_fallback=False)
-            ]
-        if timelines:
-            return timelines
-        return list(result) if collection_fallback else []
-    return [result] if collection_fallback else []
-
-def _otio_timeline_summary(timeline):
-    """Build a summary dict for an OTIO timeline."""
-    import opentimelineio as otio
-    info = {"name": getattr(timeline, "name", "unknown")}
-    if isinstance(timeline, otio.schema.Timeline):
-        info["tracks"] = len(timeline.tracks)
-        info["clips"] = len(list(timeline.find_clips()))
-        total_dur = timeline.duration()
-        if total_dur and total_dur.value > 0 and total_dur.rate > 0:
-            info["duration_seconds"] = round(total_dur.value / total_dur.rate, 3)
-    return info
-
-
-def _otio_detect_rate(timeline):
-    """Auto-detect frame rate from an OTIO timeline. Returns 24 as default."""
-    import opentimelineio as otio
-    raw_rate = 24
-    if isinstance(timeline, otio.schema.Timeline):
-        for clip in timeline.find_clips():
-            if clip.source_range and clip.source_range.duration.rate > 1:
-                raw_rate = clip.source_range.duration.rate
-                break
-        else:
-            dur = timeline.duration()
-            if dur and dur.rate > 1:
-                raw_rate = dur.rate
-    return _otio_normalize_rate(raw_rate)
-
-
-def _otio_normalize_rate(rate):
-    """Map common approximate frame rates to exact SMPTE values.
-
-    The FCPXML adapter returns integer rates (29 for 29.97fps) and user input
-    may use approximate values (29.97). The EDL adapter needs exact fractional
-    rates (30000/1001) for drop-frame timecode support.
-    """
-    rate_map = {
-        23: 24000 / 1001,    # 23.976
-        23.98: 24000 / 1001,
-        23.976: 24000 / 1001,
-        24: 24,
-        25: 25,
-        29: 30000 / 1001,    # 29.97 (FCPXML adapter returns 29)
-        29.97: 30000 / 1001,
-        30: 30,
-        47: 48000 / 1001,
-        47.95: 48000 / 1001,
-        48: 48,
-        50: 50,
-        59: 60000 / 1001,    # 59.94
-        59.94: 60000 / 1001,
-        60: 60,
-    }
-    # Check exact match first, then closest integer
-    if rate in rate_map:
-        return rate_map[rate]
-    rounded = round(rate)
-    if rounded in rate_map:
-        return rate_map[rounded]
-    return rate
+_adapter_spec = importlib.util.spec_from_file_location("splicekit_otio", Path(__file__).with_name("otio_adapter.py"))
+otio_adapter = importlib.util.module_from_spec(_adapter_spec)
+_adapter_spec.loader.exec_module(otio_adapter)
 
 
 @mcp.tool(annotations=_tool_annotations("export_otio"))
@@ -4441,9 +4219,9 @@ def export_otio(path: str = "/tmp/splicekit_export.otio", rate: float = 0) -> st
         try:
             with open(export_path, "r") as f:
                 fcpxml_str = f.read()
-            result = _otio_read_fcpx_string(fcpxml_str)
-            timeline = _otio_first_timeline(result)
-            summary = _otio_timeline_summary(timeline)
+            result = otio_adapter._otio_read_fcpx_string(fcpxml_str)
+            timeline = otio_adapter._otio_first_timeline(result)
+            summary = otio_adapter._otio_timeline_summary(timeline)
         except Exception:
             summary = {}
         summary.update({
@@ -4463,18 +4241,18 @@ def export_otio(path: str = "/tmp/splicekit_export.otio", rate: float = 0) -> st
     try:
         with open(fcpxml_path, "r") as f:
             fcpxml_str = f.read()
-        result = _otio_read_fcpx_string(fcpxml_str)
+        result = otio_adapter._otio_read_fcpx_string(fcpxml_str)
     except Exception as e:
         return f"Error reading FCPXML into OTIO: {e}"
 
-    timeline = _otio_first_timeline(result)
+    timeline = otio_adapter._otio_first_timeline(result)
 
     # Format-specific write options
     ext = path.rsplit(".", 1)[-1].lower()
     try:
         if ext == "edl":
             # EDL needs a rate; auto-detect from timeline or use provided rate
-            edl_rate = _otio_normalize_rate(rate) if rate > 0 else _otio_detect_rate(timeline)
+            edl_rate = otio_adapter._otio_normalize_rate(rate) if rate > 0 else otio_adapter._otio_detect_rate(timeline)
             otio.adapters.write_to_file(timeline, path, rate=edl_rate)
         else:
             otio.adapters.write_to_file(timeline, path)
@@ -4486,7 +4264,7 @@ def export_otio(path: str = "/tmp/splicekit_export.otio", rate: float = 0) -> st
             hint = " (.otioz bundles media files — referenced files must exist on disk)"
         return f"Error writing {ext.upper()} file: {e}{hint}"
 
-    summary = _otio_timeline_summary(timeline)
+    summary = otio_adapter._otio_timeline_summary(timeline)
     summary.update({"status": "ok", "path": path, "bytes": os.path.getsize(path), "format": ext})
 
     try:
@@ -4533,7 +4311,7 @@ def import_otio(path: str = "", otio_json: str = "", rate: float = 0) -> str:
     # For .fcpxml/.fcpxmld input, send directly to FCP's native importer for full fidelity.
     if path and path.lower().endswith((".fcpxml", ".fcpxmld")):
         try:
-            fcpxml_str = _otio_read_fcpx_document(path)
+            fcpxml_str = otio_adapter._otio_read_fcpx_document(path)
         except Exception as e:
             return f"Error reading file: {e}"
 
@@ -4542,10 +4320,10 @@ def import_otio(path: str = "", otio_json: str = "", rate: float = 0) -> str:
         # Also parse through OTIO for summary info
         summary = {"format": path.rsplit(".", 1)[-1].lower()}
         try:
-            result = _otio_read_fcpx_string(fcpxml_str)
-            timelines = _otio_all_timelines(result)
+            result = otio_adapter._otio_read_fcpx_string(fcpxml_str)
+            timelines = otio_adapter._otio_all_timelines(result)
             summary["timelines_total"] = len(timelines)
-            summary["details"] = [_otio_timeline_summary(tl) for tl in timelines]
+            summary["details"] = [otio_adapter._otio_timeline_summary(tl) for tl in timelines]
         except Exception:
             pass
 
@@ -4571,15 +4349,15 @@ def import_otio(path: str = "", otio_json: str = "", rate: float = 0) -> str:
 
             if not _err(r) and r.get("fcpxml"):
                 fcpxml_str = r["fcpxml"]
-                fcpxml_str = _otio_fcpxml_clean_for_paste(fcpxml_str)
+                fcpxml_str = otio_adapter._otio_fcpxml_clean_for_paste(fcpxml_str)
                 ir = bridge.call("fcpxml.import", xml=fcpxml_str, internal=True)
                 # Parse through OTIO for summary
                 summary = {"format": ext or "otio_json", "converter": "native"}
                 try:
-                    parsed = _otio_read_fcpx_string(fcpxml_str)
-                    timelines = _otio_all_timelines(parsed)
+                    parsed = otio_adapter._otio_read_fcpx_string(fcpxml_str)
+                    timelines = otio_adapter._otio_all_timelines(parsed)
                     summary["timelines_total"] = len(timelines)
-                    summary["details"] = [_otio_timeline_summary(tl) for tl in timelines]
+                    summary["details"] = [otio_adapter._otio_timeline_summary(tl) for tl in timelines]
                 except Exception:
                     pass
                 if _err(ir):
@@ -4595,7 +4373,7 @@ def import_otio(path: str = "", otio_json: str = "", rate: float = 0) -> str:
     try:
         if path:
             if ext == "edl":
-                edl_rate = _otio_normalize_rate(rate) if rate > 0 else 24
+                edl_rate = otio_adapter._otio_normalize_rate(rate) if rate > 0 else 24
                 result = otio.adapters.read_from_file(path, rate=edl_rate)
             else:
                 result = otio.adapters.read_from_file(path)
@@ -4609,16 +4387,16 @@ def import_otio(path: str = "", otio_json: str = "", rate: float = 0) -> str:
             hint = " (try setting rate=29.97 for drop-frame EDLs)"
         return f"Error reading file: {e}{hint}"
 
-    timelines = _otio_all_timelines(result)
+    timelines = otio_adapter._otio_all_timelines(result)
     if not timelines:
         return "Error: no timelines found in OTIO file"
 
     imported = []
     for tl in timelines:
-        _otio_prepare_for_fcp(tl)
+        otio_adapter._otio_prepare_for_fcp(tl)
         try:
-            fcpxml_str = _otio_write_fcpx_string(tl)
-            fcpxml_str = _otio_fcpxml_clean_for_paste(fcpxml_str)
+            fcpxml_str = otio_adapter._otio_write_fcpx_string(tl)
+            fcpxml_str = otio_adapter._otio_fcpxml_clean_for_paste(fcpxml_str)
         except Exception as e:
             err_msg = f"FCPXML conversion failed: {e}"
             if "kind" in str(e):
@@ -4629,7 +4407,7 @@ def import_otio(path: str = "", otio_json: str = "", rate: float = 0) -> str:
             continue
 
         r = bridge.call("fcpxml.import", xml=fcpxml_str, internal=True)
-        entry = _otio_timeline_summary(tl)
+        entry = otio_adapter._otio_timeline_summary(tl)
         entry["converter"] = "python_adapter"
         if _err(r):
             entry["error"] = r.get("error", str(r))
@@ -4658,13 +4436,13 @@ def deploy_and_restart(skip_build: bool = False) -> str:
     """Build SpliceKit, deploy to the modded FCP app, and restart FCP.
 
     This automates the entire deploy cycle:
-    1. Run `make deploy` (builds dylib + copies to framework path + re-signs)
+    1. Run `make -f Scripts/Makefile deploy` (builds dylib + copies to framework path + re-signs)
     2. Kill any running FCP process
     3. Relaunch the modded FCP
     4. Wait for the SpliceKit bridge to come online (up to 30 seconds)
 
     Args:
-        skip_build: If True, skip `make deploy` and just restart FCP.
+        skip_build: If True, skip `make -f Scripts/Makefile deploy` and just restart FCP.
                     Useful when you've already built and just need to relaunch.
 
     Returns success/failure status and bridge connection state.
@@ -4678,7 +4456,7 @@ def deploy_and_restart(skip_build: bool = False) -> str:
     if not skip_build:
         try:
             proc = subprocess.run(
-                ["make", "deploy"],
+                ["make", "-f", "Scripts/Makefile", "deploy"],
                 cwd=project_dir, capture_output=True, text=True, timeout=120
             )
             if proc.returncode != 0:
@@ -4687,7 +4465,7 @@ def deploy_and_restart(skip_build: bool = False) -> str:
         except subprocess.TimeoutExpired:
             return "Error: build timed out after 120s"
         except Exception as e:
-            return f"Error running make deploy: {e}"
+            return f"Error running make -f Scripts/Makefile deploy: {e}"
 
     # Step 2: Kill FCP
     try:
@@ -5020,7 +4798,7 @@ def detect_beats(file_path: str, sensitivity: float = 0.5, min_bpm: float = 60.0
     import subprocess
     tool = _find_audio_analysis_tool("beat-detector")
     if not tool:
-        return "Error: beat-detector is missing. Reinstall the patcher or run 'make tools' in the source checkout."
+        return "Error: beat-detector is missing. Reinstall the patcher or run 'make -f Scripts/Makefile tools' in the source checkout."
 
     try:
         result = subprocess.run(
@@ -5049,7 +4827,7 @@ def _run_structure_analyzer(file_path: str, sensitivity: float = 0.5,
     import subprocess
     tool = _find_audio_analysis_tool("structure-analyzer")
     if not tool:
-        return {"error": "structure-analyzer is missing. Reinstall the patcher or run 'make tools' in the source checkout."}
+        return {"error": "structure-analyzer is missing. Reinstall the patcher or run 'make -f Scripts/Makefile tools' in the source checkout."}
     try:
         result = subprocess.run(
             [tool, file_path, str(sensitivity), str(min_bpm), str(max_bpm)],
@@ -7283,7 +7061,7 @@ def resource_instructions() -> str:
     """Workflow guidance and operating rules for models using SpliceKit.
 
     This teaches the model how to use SpliceKit properly regardless of
-    whether CLAUDE.md is in context.
+    whether AGENTS.md is in context.
     """
     return """# SpliceKit Operating Instructions
 

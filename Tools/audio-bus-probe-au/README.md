@@ -7,7 +7,7 @@ It does not alter audio. It reports whether render callbacks are receiving non-s
 Build and install:
 
 ```bash
-make install-audio-bus-probe
+make -f Scripts/Makefile install-audio-bus-probe
 ```
 
 After install, restart Final Cut Pro if the effect is not visible yet. The effect appears as:

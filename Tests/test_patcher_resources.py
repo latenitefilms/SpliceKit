@@ -1,5 +1,6 @@
 import os
 from pathlib import Path
+import plistlib
 import subprocess
 import tempfile
 import unittest
@@ -13,15 +14,24 @@ class PatcherResourceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="SpliceKit resources ") as temp:
             checkout = Path(temp) / "checkout"
             checkout.mkdir()
-            for name in ("MCP", "Lua Scripts", "Documentation"):
+            for name in ("Lua Scripts", "Documentation"):
                 (checkout / name).symlink_to(ROOT / name, target_is_directory=True)
             project = checkout / "Patcher"
             project.mkdir()
-            (project / "scripts").symlink_to(ROOT / "Patcher/scripts", target_is_directory=True)
+            (project / "SpliceKit").symlink_to(ROOT / "Patcher/SpliceKit", target_is_directory=True)
+            project_file = ROOT / "Patcher/SpliceKit.xcodeproj/project.pbxproj"
+            plist = subprocess.check_output(["plutil", "-convert", "xml1", "-o", "-", project_file])
+            phases = plistlib.loads(plist)["objects"].values()
+            bundle_phase = next(phase["shellScript"] for phase in phases
+                                if phase.get("name") == "Bundle SpliceKit Resources")
 
             products = Path(temp) / "products"
             prebuilt = products / "SpliceKit_prebuilt"
             prebuilt.mkdir(parents=True)
+            mcp = prebuilt / "mcp"
+            mcp.mkdir()
+            for name in ("splicekit-mcp", "Catalog.json", "otio_adapter.py", "server.py"):
+                (mcp / name).write_text(name)
             for name in ("SpliceKit", "beat-detector", "silence-detector", "structure-analyzer", "SpliceKitMixer"):
                 (prebuilt / name).write_text(name)
             for name in ("parakeet-transcriber", "whisper-transcriber"):
@@ -31,7 +41,7 @@ class PatcherResourceTests(unittest.TestCase):
 
             def bundle():
                 subprocess.run(
-                    ["bash", ROOT / "Patcher/scripts/bundle_resources.sh"],
+                    ["bash", "-c", bundle_phase],
                     env={**os.environ, "PROJECT_DIR": str(project),
                          "BUILT_PRODUCTS_DIR": str(products), "PRODUCT_NAME": "SpliceKit"},
                     check=True, capture_output=True, text=True,
@@ -42,8 +52,11 @@ class PatcherResourceTests(unittest.TestCase):
             tool = resources / "tools/whisper-transcriber"
             self.assertTrue((tool / "Package.swift").is_file())
             self.assertTrue((resources / "tools/beat-detector").is_file())
-            self.assertEqual((resources / "mcp/requirements.txt").read_bytes(), (ROOT / "MCP/requirements.txt").read_bytes())
+            for name in ("splicekit-mcp", "Catalog.json", "otio_adapter.py", "server.py"):
+                self.assertEqual((resources / "mcp" / name).read_bytes(), (mcp / name).read_bytes())
             self.assertTrue((resources / "Scripts/lua/lib/skutil.lua").is_file())
+            self.assertEqual((resources / "entitlements.plist").read_bytes(),
+                             (project / "SpliceKit/Resources/entitlements.plist").read_bytes())
 
             release = checkout / "Tools/whisper-transcriber/.build/release"
             assets = release / "Tokenizer.bundle"

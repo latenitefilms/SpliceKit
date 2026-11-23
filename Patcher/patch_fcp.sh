@@ -291,7 +291,7 @@ fi
 step "Step 2: Building SpliceKit dylib"
 
 BUILD_DIR="$REPO_DIR/build"
-make -C "$REPO_DIR" all
+make -C "$REPO_DIR" -f Scripts/Makefile all mcp-server
 
 log "Built: $(file "$BUILD_DIR/SpliceKit" | grep -o 'universal.*')"
 
@@ -507,17 +507,17 @@ MCP_CONFIG=".mcp.json"
 if [[ -e "$MCP_CONFIG" ]]; then
     log "Found existing $MCP_CONFIG"
 else
-    python3 - "$REPO_DIR/MCP/server.py" "$MCP_CONFIG" <<'PY'
-import json
-import sys
-from pathlib import Path
-
-server = {"command": str(Path.home() / ".venvs/splicekit-mcp/bin/python"), "args": [sys.argv[1]]}
-with open(sys.argv[2], "x", encoding="utf-8") as config:
-    json.dump({"mcpServers": {"splicekit": server}}, config, indent=2)
-    config.write("\n")
-PY
-    log "MCP config written to $MCP_CONFIG"
+    config_tmp=$(mktemp "./.splicekit-mcp.XXXXXX")
+    printf '%s\n' '{"mcpServers":{"splicekit":{}}}' > "$config_tmp"
+    /usr/bin/plutil -insert mcpServers.splicekit.command -string "$REPO_DIR/build/mcp/splicekit-mcp" "$config_tmp"
+    /usr/bin/plutil -convert json "$config_tmp"
+    if ln "$config_tmp" "$MCP_CONFIG" 2>/dev/null; then
+        log "MCP config written to $MCP_CONFIG"
+    elif [[ ! -e "$MCP_CONFIG" ]]; then
+        rm -f "$config_tmp"
+        err "Unable to create $MCP_CONFIG"
+    fi
+    rm -f "$config_tmp"
 fi
 
 # ============================================================
@@ -540,11 +540,8 @@ ${BOLD}JSON-RPC server:${NC}
 ${BOLD}Check logs:${NC}
   ~/Library/Logs/SpliceKit/splicekit.log
 
-${BOLD}Python client:${NC}
-  python3 \"$REPO_DIR/Examples/splicekit_client.py\"
-
 ${BOLD}MCP server:${NC}
-  Run make -C \"$REPO_DIR\" mcp-setup and load .mcp.json in your client.
+  Load .mcp.json in your client, or use \"$REPO_DIR/build/mcp/splicekit-mcp\" as its command.
 
 ${BOLD}Quick test:${NC}
   echo '{\"jsonrpc\":\"2.0\",\"method\":\"system.version\",\"id\":1}' | nc 127.0.0.1 $BRIDGE_PORT

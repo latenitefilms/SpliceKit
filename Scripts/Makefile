@@ -1,3 +1,12 @@
+# Recipes use checkout-relative paths. Run them from the root even for make -C Scripts.
+ifeq ($(abspath $(lastword $(MAKEFILE_LIST))),$(CURDIR)/Makefile)
+requested_goals := $(or $(MAKECMDGOALS),all)
+.PHONY: $(requested_goals) run-from-root
+$(requested_goals): run-from-root ;
+run-from-root:
+	$(MAKE) -C .. -f Scripts/Makefile $(MAKECMDGOALS)
+else
+
 CC = clang
 ARCHS = -arch arm64 -arch x86_64
 MACOSX_DEPLOYMENT_TARGET = 14.0
@@ -35,7 +44,7 @@ MODDED_APP_STANDARD = $(HOME)/Applications/SpliceKit/Final Cut Pro.app
 MODDED_APP_CREATOR = $(HOME)/Applications/SpliceKit/Final Cut Pro Creator Studio.app
 MODDED_APP = $(shell if [ -d "$(MODDED_APP_STANDARD)" ]; then echo "$(MODDED_APP_STANDARD)"; elif [ -d "$(MODDED_APP_CREATOR)" ]; then echo "$(MODDED_APP_CREATOR)"; else echo "$(MODDED_APP_STANDARD)"; fi)
 FW_DIR = $(MODDED_APP)/Contents/Frameworks/SpliceKit.framework
-ENTITLEMENTS = entitlements.plist
+ENTITLEMENTS = Patcher/SpliceKit/Resources/entitlements.plist
 REGISTER_PRO_EXTENSION_APP = $(MODDED_APP)/Contents/Helpers/RegisterProExtension.app
 PROAPP_SUPPORT_FRAMEWORK = $(MODDED_APP)/Contents/Frameworks/ProAppSupport.framework
 
@@ -116,53 +125,43 @@ uninstall-audio-bus-probe:
 	@echo "Uninstalled: $(AUDIO_BUS_PROBE_INSTALL_DIR)/SpliceKitAudioBusProbe.component"
 
 # ---------------------------------------------------------------------------
-# MCP server setup (Python venv + dependencies)
+# Native stdio MCP server and its optional interchange adapter
 # ---------------------------------------------------------------------------
-MCP_VENV ?= $(HOME)/.venvs/splicekit-mcp
-MCP_PYTHON = $(MCP_VENV)/bin/python
-MCP_REQUIREMENTS = MCP/requirements.txt
+MCP_OUTPUT = $(BUILD_DIR)/mcp
+MCP_BINARY = $(MCP_OUTPUT)/splicekit-mcp
+MCP_BUILD = swift build --package-path MCP --configuration release --arch arm64 --arch x86_64 --only-use-versions-from-resolved-file
+MCP_CATALOG = MCP/Sources/SpliceKitMCP/Catalog.json
 
-mcp-setup:
-	@PY="$$(command -v python3.13 || command -v python3.12 || command -v python3.11 || command -v python3)"; \
-	if [ -z "$$PY" ]; then echo "[mcp-setup] python3 not found in PATH"; exit 1; fi; \
-	echo "[mcp-setup] Using interpreter: $$PY ($$($$PY --version 2>&1))"; \
-	if [ ! -x "$(MCP_PYTHON)" ]; then \
-		echo "[mcp-setup] Creating venv at $(MCP_VENV)"; \
-		"$$PY" -m venv "$(MCP_VENV)"; \
-	else \
-		echo "[mcp-setup] Reusing venv at $(MCP_VENV)"; \
-	fi
-	@"$(MCP_PYTHON)" -m pip install --upgrade --quiet pip
-	@"$(MCP_PYTHON)" -m pip install --upgrade --quiet -r $(MCP_REQUIREMENTS)
-	@echo "[mcp-setup] Installed:"; "$(MCP_PYTHON)" -m pip show mcp | awk '/^(Name|Version|Location):/'
-	@echo "[mcp-setup] Set your MCP client command to $(MCP_PYTHON)"
+.PHONY: mcp-server
+mcp-server: $(MCP_BINARY) $(MCP_OUTPUT)/Catalog.json $(MCP_OUTPUT)/otio_adapter.py $(MCP_OUTPUT)/server.py
+
+$(MCP_OUTPUT): | $(BUILD_DIR)
+	@mkdir -p "$@"
+
+$(MCP_BINARY): MCP/Package.swift MCP/Package.resolved $(wildcard MCP/Sources/SpliceKitMCP/*.swift) $(MCP_CATALOG) MCP/Sources/SpliceKitMCP Scripts/Makefile | $(MCP_OUTPUT)
+	$(MCP_BUILD)
+	@cp "$$($(MCP_BUILD) --show-bin-path)/splicekit-mcp" "$@"
+
+$(MCP_OUTPUT)/Catalog.json: $(MCP_CATALOG) | $(MCP_OUTPUT)
+	@cp "$<" "$@"
+
+$(MCP_OUTPUT)/otio_adapter.py: MCP/otio_adapter.py | $(MCP_OUTPUT)
+	@cp "$<" "$@"
+
+$(MCP_OUTPUT)/server.py: MCP/Compatibility/server.py | $(MCP_OUTPUT)
+	@cp "$<" "$@"
+
+mcp-setup: mcp-server
+	@echo "MCP command: $(abspath $(MCP_BINARY))"
 
 mcp-doctor:
-	@echo "== SpliceKit MCP doctor =="
-	@if [ -x "$(MCP_PYTHON)" ]; then \
-		echo "[ok] venv interpreter:    $(MCP_PYTHON) ($$($(MCP_PYTHON) --version 2>&1))"; \
+	@test -x "$(MCP_BINARY)" || { echo "Build the server in Xcode or run make -f Scripts/Makefile mcp-setup."; exit 1; }
+	@"$(MCP_BINARY)" --check
+	@/usr/bin/plutil -extract mcpServers.splicekit.command raw -o - .mcp.json
+	@if /usr/sbin/lsof -nP -iTCP:9876 -sTCP:LISTEN >/dev/null 2>&1; then \
+		echo "FCP bridge is listening on port 9876."; \
 	else \
-		echo "[FAIL] venv interpreter missing at $(MCP_PYTHON) — run 'make mcp-setup'"; \
-	fi
-	@if [ -x "$(MCP_PYTHON)" ] && "$(MCP_PYTHON)" -c "import mcp.server.fastmcp" >/dev/null 2>&1; then \
-		echo "[ok] mcp package:         $$($(MCP_PYTHON) -m pip show mcp | awk '/^Version:/{print $$2}')"; \
-	else \
-		echo "[FAIL] mcp package not importable in venv — run 'make mcp-setup'"; \
-	fi
-	@if [ -f .mcp.json ]; then \
-		CMD=$$(/usr/bin/python3 -c "import json, os; print(os.path.expandvars(json.load(open('.mcp.json'))['mcpServers']['splicekit']['command']))" 2>/dev/null); \
-		if [ "$$CMD" = "$(MCP_PYTHON)" ]; then \
-			echo "[ok] .mcp.json command:   $$CMD"; \
-		else \
-			echo "[warn] .mcp.json command: $$CMD (expected $(MCP_PYTHON))"; \
-		fi; \
-	else \
-		echo "[warn] .mcp.json not found in repo root"; \
-	fi
-	@if /usr/sbin/lsof -nP -iTCP:9876 -sTCP:LISTEN 2>/dev/null | grep -q LISTEN; then \
-		echo "[ok] FCP bridge listening on 127.0.0.1:9876"; \
-	else \
-		echo "[warn] No process listening on :9876 — launch the modded Final Cut Pro"; \
+		echo "Launch the patched Final Cut Pro to connect editing tools."; \
 	fi
 
 url-import-tools:
@@ -201,7 +200,7 @@ $(BEAT_DETECTOR): Tools/beat-detector.swift
 $(MIXER_APP): $(wildcard Tools/mixer-app/*.swift)
 $(MIXER_APP): SWIFT_FLAGS = -parse-as-library
 
-$(SWIFT_TOOLS): Makefile | $(BUILD_DIR)
+$(SWIFT_TOOLS): Scripts/Makefile | $(BUILD_DIR)
 	@set -eu; tmp=$$(mktemp -d "$@.XXXXXX"); trap 'rm -rf "$$tmp"' EXIT; \
 		for arch in $(filter-out -arch,$(ARCHS)); do \
 			swiftc -O -suppress-warnings $(SWIFT_FLAGS) -target "$$arch-apple-macosx$(MACOSX_DEPLOYMENT_TARGET)" \
@@ -309,13 +308,15 @@ deploy: $(OUTPUT) tools vp9-prototype mkv-prototype
 	@/usr/libexec/PlistBuddy -c "Add :NSBonjourServices: string '_ivtpreviewclient._tcp'" "$(MODDED_APP)/Contents/Info.plist" 2>/dev/null || true
 	@# Deploy tools
 	@mkdir -p "$(TOOLS_DIR)"
-	@$(MAKE) url-import-tools
+	@$(MAKE) -f Scripts/Makefile url-import-tools
 	@cp $(SWIFT_TOOLS) "$(TOOLS_DIR)/"
 	@set -e; for tool in parakeet-transcriber whisper-transcriber; do \
 		for config in release apple/Products/Release debug; do \
 			binary="Tools/$$tool/.build/$$config/$$tool"; \
 			if [ -f "$$binary" ]; then \
-				bash Patcher/scripts/copy_transcriber.sh "$$binary" "$(TOOLS_DIR)" "$(FW_DIR)/Versions/A/Resources"; \
+				for destination in "$(TOOLS_DIR)" "$(FW_DIR)/Versions/A/Resources"; do \
+					rsync -a --include="/$$tool" --include='/*.bundle/***' --exclude='*' "$${binary%/*}/" "$$destination/"; \
+				done; \
 				break; \
 			fi; \
 		done; \
@@ -381,4 +382,6 @@ launch: deploy
 	DYLD_INSERT_LIBRARIES="$(FW_DIR)/Versions/A/SpliceKit" \
 		"$(MODDED_APP)/Contents/MacOS/Final Cut Pro" &
 	@echo "FCP launched. Check Console.app for [SpliceKit] messages."
-	@echo "Connect: python3 Examples/splicekit_client.py system.version"
+	@echo "JSON-RPC bridge: 127.0.0.1:9876"
+
+endif

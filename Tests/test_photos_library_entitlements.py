@@ -16,12 +16,10 @@ PHOTOS_LIBRARY = "com.apple.security.personal-information.photos-library"
 
 class PhotosLibraryEntitlementTests(unittest.TestCase):
     def test_all_signing_templates_allow_photos_library_access(self):
-        # Both Swift patchers generate separate plists for patch and update.
         templates = {
-            "entitlements.plist": 1,
+            "Patcher/SpliceKit/Resources/entitlements.plist": 1,
             "Patcher/patch_fcp.sh": 1,
-            "Patcher/SpliceKit/Models/PatcherModel.swift": 2,
-            }
+        }
         for relative_path, expected_count in templates.items():
             source = (ROOT / relative_path).read_text(encoding="utf-8")
             plists = [
@@ -40,13 +38,10 @@ class PhotosLibraryEntitlementTests(unittest.TestCase):
         source = (ROOT / "Patcher/SpliceKit/Models/PatcherModel.swift").read_text()
         diagnostics = re.findall(r"let entKeys = \[([^\]]+)\]", source)
         self.assertEqual(len(diagnostics), 2)
-        templates = [
-            plistlib.loads(xml.encode("utf-8"))
-            for xml in re.findall(r"<\?xml.*?</plist>", source, flags=re.DOTALL)
-            if "com.apple.security.app-sandbox" in xml
-        ]
+        resource = ROOT / "Patcher/SpliceKit/Resources/entitlements.plist"
+        configured = {key.rsplit(".", 1)[-1] for key in plistlib.loads(resource.read_bytes())}
+        self.assertEqual(source.count('shellQuote(repoDir + "/entitlements.plist")'), 2)
         for index, diagnostic in enumerate(diagnostics):
-            configured = {key.rsplit(".", 1)[-1] for key in templates[index]}
             for key in re.findall(r'"([^"]+)"', diagnostic):
                 with self.subTest(template=index, key=key):
                     self.assertIn(key, configured)

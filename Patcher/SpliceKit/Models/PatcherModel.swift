@@ -975,23 +975,7 @@ class PatcherModel: ObservableObject {
         } else {
             await logAsync("Using signing identity: \(signIdentity)")
         }
-        let entitlements = buildDir + "/entitlements.plist"
-        let entPlist = """
-            <?xml version="1.0" encoding="UTF-8"?>
-            <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "https://www.apple.com/DTDs/PropertyList-1.0.dtd">
-            <plist version="1.0"><dict>
-            <key>com.apple.security.app-sandbox</key><false/>
-            <key>com.apple.security.cs.disable-library-validation</key><true/>
-            <key>com.apple.security.cs.allow-dyld-environment-variables</key><true/>
-            <key>com.apple.security.get-task-allow</key><true/>
-            <!-- Preserve Photos imports when replacing FCP's original entitlements. -->
-            <key>com.apple.security.personal-information.photos-library</key><true/>
-            <key>com.apple.security.device.camera</key><true/>
-            <key>com.apple.security.device.microphone</key><true/>
-            <key>com.apple.security.device.audio-input</key><true/>
-            </dict></plist>
-            """
-        try entPlist.write(toFile: entitlements, atomically: true, encoding: .utf8)
+        let quotedEntitlements = shellQuote(repoDir + "/entitlements.plist")
 
         shell("/usr/libexec/PlistBuddy -c \"Set :NSSpeechRecognitionUsageDescription 'SpliceKit uses speech recognition for transcript editing and command palette voice dictation inside Final Cut Pro.'\" '\(moddedApp)/Contents/Info.plist' 2>/dev/null || /usr/libexec/PlistBuddy -c \"Add :NSSpeechRecognitionUsageDescription string 'SpliceKit uses speech recognition for transcript editing and command palette voice dictation inside Final Cut Pro.'\" '\(moddedApp)/Contents/Info.plist' 2>/dev/null")
         shell("/usr/libexec/PlistBuddy -c \"Set :NSCameraUsageDescription 'SpliceKit LiveCam uses the camera for native webcam recording inside Final Cut Pro.'\" '\(moddedApp)/Contents/Info.plist' 2>/dev/null || /usr/libexec/PlistBuddy -c \"Add :NSCameraUsageDescription string 'SpliceKit LiveCam uses the camera for native webcam recording inside Final Cut Pro.'\" '\(moddedApp)/Contents/Info.plist' 2>/dev/null")
@@ -1019,7 +1003,7 @@ class PatcherModel: ObservableObject {
             (xattr -cr '\(moddedApp)' 2>/dev/null || true) && \
             \(signSpliceKitBundles(quotedIdentity)) && \
             codesign --force --options runtime --sign \(quotedIdentity) '\(moddedApp)/Contents/Frameworks/SpliceKit.framework' 2>&1 && \
-            codesign --force --options runtime --sign \(quotedIdentity) --entitlements '\(entitlements)' '\(moddedApp)' 2>&1
+            codesign --force --options runtime --sign \(quotedIdentity) --entitlements \(quotedEntitlements) '\(moddedApp)' 2>&1
             """)
         if signResult.status != 0 && signIdentity != "-" {
             await logAsync("Developer signing failed; retrying with ad-hoc signature (higher risk of macOS launch/security blocks)")
@@ -1031,7 +1015,7 @@ class PatcherModel: ObservableObject {
                 (xattr -cr '\(moddedApp)' 2>/dev/null || true) && \
                 \(signSpliceKitBundles("-")) && \
                 codesign --force --options runtime --sign - '\(moddedApp)/Contents/Frameworks/SpliceKit.framework' 2>&1 && \
-                codesign --force --options runtime --sign - --entitlements '\(entitlements)' '\(moddedApp)' 2>&1
+                codesign --force --options runtime --sign - --entitlements \(quotedEntitlements) '\(moddedApp)' 2>&1
                 """)
         }
         guard signResult.status == 0 else {
@@ -1059,7 +1043,7 @@ class PatcherModel: ObservableObject {
 
         // Step 8: MCP
         await setStepAsync(.setupMCP)
-        let mcpServer = repoDir + "/mcp/server.py"
+        let mcpServer = repoDir + "/mcp/splicekit-mcp"
         if FileManager.default.fileExists(atPath: mcpServer) {
             await logAsync("MCP server: \(mcpServer)")
         }
@@ -1190,23 +1174,7 @@ class PatcherModel: ObservableObject {
         } else {
             await logAsync("Using signing identity: \(signIdentity)")
         }
-        let entitlements = buildDir + "/entitlements.plist"
-        let entPlist = """
-            <?xml version="1.0" encoding="UTF-8"?>
-            <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "https://www.apple.com/DTDs/PropertyList-1.0.dtd">
-            <plist version="1.0"><dict>
-            <key>com.apple.security.app-sandbox</key><false/>
-            <key>com.apple.security.cs.disable-library-validation</key><true/>
-            <key>com.apple.security.cs.allow-dyld-environment-variables</key><true/>
-            <key>com.apple.security.get-task-allow</key><true/>
-            <!-- Preserve Photos imports when replacing FCP's original entitlements. -->
-            <key>com.apple.security.personal-information.photos-library</key><true/>
-            <key>com.apple.security.device.camera</key><true/>
-            <key>com.apple.security.device.microphone</key><true/>
-            <key>com.apple.security.device.audio-input</key><true/>
-            </dict></plist>
-            """
-        try entPlist.write(toFile: entitlements, atomically: true, encoding: .utf8)
+        let quotedEntitlements = shellQuote(repoDir + "/entitlements.plist")
 
         let quotedIdentity = shellQuote(signIdentity)
         // Sign inside-out: any nested SpliceKit plug-in bundles → framework → app.
@@ -1230,7 +1198,7 @@ class PatcherModel: ObservableObject {
             (xattr -cr '\(moddedApp)' 2>/dev/null || true) && \
             \(signSpliceKitBundles(quotedIdentity)) && \
             codesign --force --options runtime --sign \(quotedIdentity) '\(moddedApp)/Contents/Frameworks/SpliceKit.framework' 2>&1 && \
-            codesign --force --options runtime --sign \(quotedIdentity) --entitlements '\(entitlements)' '\(moddedApp)' 2>&1
+            codesign --force --options runtime --sign \(quotedIdentity) --entitlements \(quotedEntitlements) '\(moddedApp)' 2>&1
             """)
         if signResult.status != 0 && signIdentity != "-" {
             await logAsync("Developer signing failed; retrying with ad-hoc signature (higher risk of macOS launch/security blocks)")
@@ -1242,7 +1210,7 @@ class PatcherModel: ObservableObject {
                 (xattr -cr '\(moddedApp)' 2>/dev/null || true) && \
                 \(signSpliceKitBundles("-")) && \
                 codesign --force --options runtime --sign - '\(moddedApp)/Contents/Frameworks/SpliceKit.framework' 2>&1 && \
-                codesign --force --options runtime --sign - --entitlements '\(entitlements)' '\(moddedApp)' 2>&1
+                codesign --force --options runtime --sign - --entitlements \(quotedEntitlements) '\(moddedApp)' 2>&1
                 """)
         }
         guard signResult.status == 0 else {

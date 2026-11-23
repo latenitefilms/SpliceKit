@@ -78,8 +78,10 @@ static NSArray<NSString *> *RecordingKeys(NSURL *u) {
     if (h && [h seekToEndReturningOffset:&size error:nil] && size > 0) {
         CC_SHA256_CTX ctx; CC_SHA256_Init(&ctx);
         const unsigned long long chunk = 1 << 20;
-        const unsigned long long offs[2] = {0, size / 2};
-        const int n = size > 2 * chunk ? 2 : 1;   // a small file is read whole by the first chunk
+        // the first 1 MB, then the middle 1 MB - or, for a file under 2 MB, the rest of it - so every
+        // byte of a short recording counts (a small file is read whole by the first chunk alone)
+        const unsigned long long offs[2] = {0, size > 2 * chunk ? size / 2 : chunk};
+        const int n = size > chunk ? 2 : 1;
         BOOL ok = YES;
         for (int i = 0; i < n && ok; i++) {
             NSData *d = ([h seekToOffset:offs[i] error:nil]) ? [h readDataUpToLength:chunk error:nil] : nil;

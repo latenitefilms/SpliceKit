@@ -1,7 +1,7 @@
 # SpliceKit
 
 [![Release](https://img.shields.io/github/v/release/latenitefilms/SpliceKit)](https://github.com/latenitefilms/SpliceKit/releases/latest)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE.md)
 [![Discord](https://img.shields.io/badge/Discord-FCP%20Cafe-5865F2?logo=discord&logoColor=white)](https://discord.com/invite/HD3FPc4Azu)
 [![Docs](https://img.shields.io/badge/docs-splicekit.fcp.cafe-0A84FF)](https://splicekit.fcp.cafe)
 
@@ -286,6 +286,6 @@ There's a long tradition of community modding projects getting adopted back into
 
 ## License
 
-[MIT](LICENSE). Use it, modify it, ship your own plugins with it.
+[MIT](LICENSE.md). Use it, modify it, ship your own plugins with it.
 
 Onwards & upwards 🥳

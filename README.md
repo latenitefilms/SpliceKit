@@ -5,6 +5,12 @@
 [![Discord](https://img.shields.io/badge/Discord-FCP%20Cafe-5865F2?logo=discord&logoColor=white)](https://discord.com/invite/HD3FPc4Azu)
 [![Docs](https://img.shields.io/badge/docs-splicekit.fcp.cafe-0A84FF)](https://splicekit.fcp.cafe)
 
+---
+
+This is a **fork** of the official [SpliceKit repository](https://github.com/elliotttate/SpliceKit) created by [elliotttate](https://github.com/elliotttate/) for the FCP Cafe community.
+
+---
+
 **Final Cut Pro, unlocked. A Command Palette, MCP server, and an open plugin framework to do almost anything.**
 
 | 🎹 Command Palette | 🤖 MCP Server | 🧩 Plugin Framework |
